@@ -63,6 +63,7 @@ class CourseViewModel(application: Application) : AndroidViewModel(application) 
     fun createCourse(name: String) = viewModelScope.launch { if (name.isNotBlank()) settings.selectCourse(repository.createCourse(name)) }
     fun renameCourse(id: Long, name: String) = viewModelScope.launch { if (name.isNotBlank()) repository.renameCourse(id, name) }
     fun updateCourseAsrPrompt(id: Long, prompt: String) = viewModelScope.launch { repository.updateCourseAsrPrompt(id, prompt) }
+    fun updateCourseAsrPromptMode(id: Long, mode: String?) = viewModelScope.launch { repository.updateCourseAsrPromptMode(id, mode) }
     fun deleteCourse(id: Long) = viewModelScope.launch { repository.deleteCourse(id); if (_uiState.value.selectedCourse?.id == id) settings.selectCourse(null) }
     fun enterCourse(id: Long) = viewModelScope.launch { settings.selectCourse(id) }
     fun createRecord(courseId: Long, name: String?) = viewModelScope.launch {
@@ -72,4 +73,8 @@ class CourseViewModel(application: Application) : AndroidViewModel(application) 
     fun renameRecord(id: Long, name: String) = viewModelScope.launch { if (name.isNotBlank()) repository.renameRecord(id, name) }
     fun deleteRecord(id: Long) = viewModelScope.launch { repository.deleteRecord(id); if (_uiState.value.selectedRecord?.id == id) settings.selectCourse(_uiState.value.selectedCourse?.id) }
     fun selectRecord(courseId: Long, recordId: Long) = viewModelScope.launch { settings.selectRecord(courseId, recordId) }
+    fun deleteSegments(recordId: Long, ids: Set<Long>, onComplete: () -> Unit = {}) = viewModelScope.launch {
+        repository.deleteSegments(recordId, ids.toList())
+        onComplete()
+    }
 }

@@ -16,6 +16,7 @@ class AiRepository(
     fun resultSourceSegments(id: Long) = dao.resultSourceSegments(id)
     fun conversations(recordId: Long) = dao.conversations(recordId)
     fun conversation(id: Long) = dao.conversation(id)
+    fun conversationForResult(resultId: Long) = dao.conversationForResult(resultId)
     fun conversationSourceSegments(id: Long) = dao.conversationSourceSegments(id)
     fun messages(conversationId: Long) = dao.messages(conversationId)
     fun resultAttachments(resultId: Long) = dao.resultAttachments(resultId)
@@ -56,7 +57,8 @@ class AiRepository(
         title: String,
         snapshot: String,
         segmentIds: List<Long>,
-        systemPrompt: String = DEFAULT_CONVERSATION_PROMPT
+        systemPrompt: String = DEFAULT_CONVERSATION_PROMPT,
+        originResultId: Long? = null
     ): Long = database.withTransaction {
         val now = System.currentTimeMillis()
         val id = dao.insertConversation(AiConversationEntity(
@@ -64,6 +66,7 @@ class AiRepository(
             title = title,
             sourceTextSnapshot = snapshot,
             systemPrompt = systemPrompt,
+            originResultId = originResultId,
             createdAt = now,
             updatedAt = now
         ))
@@ -72,7 +75,9 @@ class AiRepository(
     }
 
     suspend fun conversationOnce(id: Long) = dao.conversationOnce(id)
+    suspend fun conversationForResultOnce(resultId: Long) = dao.conversationForResultOnce(resultId)
     suspend fun messagesOnce(id: Long) = dao.messagesOnce(id)
+    suspend fun renameConversation(id: Long, title: String) = dao.renameConversation(id, title, System.currentTimeMillis())
     suspend fun conversationAttachmentsOnce(id: Long) = dao.conversationAttachmentsOnce(id)
     suspend fun insertUserAndPendingAssistant(
         conversationId: Long,

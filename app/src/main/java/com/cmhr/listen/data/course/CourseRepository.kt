@@ -16,6 +16,7 @@ class CourseRepository(
     suspend fun createCourse(name: String): Long = database.courseDao().insert(CourseEntity(name = name.trim(), createdAt = System.currentTimeMillis()))
     suspend fun renameCourse(id: Long, name: String) = database.courseDao().rename(id, name.trim())
     suspend fun updateCourseAsrPrompt(id: Long, prompt: String) = database.courseDao().updateAsrPrompt(id, prompt.trim())
+    suspend fun updateCourseAsrPromptMode(id: Long, mode: String?) = database.courseDao().updateAsrPromptMode(id, mode)
     suspend fun deleteCourse(id: Long) {
         val recordIds = database.recordDao().idsForCourse(id)
         database.courseDao().delete(id)
@@ -31,4 +32,6 @@ class CourseRepository(
     suspend fun finishRecord(id: Long) = database.recordDao().end(id, System.currentTimeMillis())
     suspend fun saveSegment(recordId: Long, start: Long, end: Long, duration: Long, recognitionDuration: Long?, text: String) =
         database.transcriptDao().insert(TranscriptEntity(recordId = recordId, startTime = start, endTime = end, audioDurationMs = duration, recognitionDurationMs = recognitionDuration, text = text))
+    suspend fun deleteSegments(recordId: Long, ids: List<Long>): Int =
+        if (ids.isEmpty()) 0 else database.transcriptDao().deleteByIds(recordId, ids)
 }

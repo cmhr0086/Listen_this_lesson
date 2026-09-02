@@ -19,17 +19,17 @@ class AiServiceClientTest {
             val result = client.chat(
                 AiCredentials(server.url("/").toString().trimEnd('/'), "secret", "deepseek-chat"),
                 listOf(AiChatMessage("user", "测试内容")),
-                0.2
+                AiRequestOptions(temperature = 0.2)
             )
 
-            assertEquals("课堂总结", result)
+            assertEquals("课堂总结", result.content)
             val request = server.takeRequest()
             assertEquals("/chat/completions", request.path)
             assertEquals("Bearer secret", request.getHeader("Authorization"))
             val body = request.body.readUtf8()
             assertTrue(body.contains("\"model\":\"deepseek-chat\""))
             assertTrue(body.contains("\"temperature\":0.2"))
-            assertTrue(body.contains("\"max_tokens\":4096"))
+            assertTrue(body.contains("\"max_tokens\":8192"))
         }
     }
 
@@ -77,13 +77,47 @@ class AiServiceClientTest {
             AiServiceClient(OkHttpClient(), enforceHttps = false).chat(
                 AiCredentials(server.url("/").toString().trimEnd('/'), "secret", "vision-model"),
                 listOf(AiChatMessage("user", "分析照片", listOf("data:image/jpeg;base64,YQ=="))),
-                0.2
+                AiRequestOptions(temperature = 0.2)
             )
 
             val body = server.takeRequest().body.readUtf8()
             assertTrue(body.contains("image_url"))
             assertTrue(body.contains("data:image/jpeg;base64,YQ=="))
             assertTrue(body.contains("分析照片"))
+        }
+    }
+
+    @Test
+    fun `chat parses array content and legacy text`() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(
+                """{"choices":[{"message":{"content":[{"type":"text","text":"第一段"},{"type":"text","text":"第二段"}]},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":4}}"""
+            ))
+            server.enqueue(MockResponse().setBody("""{"choices":[{"text":"旧式结果"}]}"""))
+            val client = AiServiceClient(OkHttpClient(), enforceHttps = false)
+            val credentials = AiCredentials(server.url("/").toString().trimEnd('/'), "secret", "model")
+            val first = client.chat(credentials, listOf(AiChatMessage("user", "问")))
+            val second = client.chat(credentials, listOf(AiChatMessage("user", "问")))
+            assertEquals("第一段第二段", first.content)
+            assertEquals("stop", first.finishReason)
+            assertEquals(9, first.promptTokens)
+            assertEquals("旧式结果", second.content)
+        }
+    }
+
+    @Test
+    fun `reasoning only response reports a clear error`() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(
+                """{"choices":[{"message":{"content":"","reasoning_content":"hidden"},"finish_reason":"stop"}]}"""
+            ))
+            val failure = runCatching {
+                AiServiceClient(OkHttpClient(), enforceHttps = false).chat(
+                    AiCredentials(server.url("/").toString().trimEnd('/'), "secret", "model"),
+                    listOf(AiChatMessage("user", "问"))
+                )
+            }.exceptionOrNull()
+            assertTrue(failure?.message.orEmpty().contains("思考"))
         }
     }
 }

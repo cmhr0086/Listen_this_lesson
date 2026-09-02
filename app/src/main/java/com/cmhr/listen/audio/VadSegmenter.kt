@@ -5,6 +5,8 @@ import android.util.Log
 import com.k2fsa.sherpa.onnx.SileroVadModelConfig
 import com.k2fsa.sherpa.onnx.Vad
 import com.k2fsa.sherpa.onnx.VadModelConfig
+import com.cmhr.listen.data.stt.SegmentQuality
+import kotlin.math.log10
 
 class VadSegmenter(
     assetManager: AssetManager,
@@ -37,6 +39,12 @@ class VadSegmenter(
     private var softLimitLogged = false
     private var lastStartReason: String? = null
     private var lastEndReason: String? = null
+    private var qualityVoicedSamples = 0L
+    private var qualityNoiseSamples = 0L
+    private var qualitySpeechProbabilitySum = 0.0
+    private var qualitySpeechFrames = 0
+    private var qualitySpeechEnergy = 0.0
+    private var qualityNoiseEnergy = 0.0
 
     fun acceptPcm(pcm: ByteArray): VadResult {
         history.append(pcm)
@@ -60,6 +68,8 @@ class VadSegmenter(
                     candidateSpeechSamples = 0
                     silenceSamples = 0
                     lastStartReason = "连续语音达到 ${currentConfig.startConfirmMs} ms"
+                    resetQuality()
+                    accumulateQuality(pcm, probability, true)
                     Log.d(TAG, "speech start: $lastStartReason, sample=$activeSegmentStartSample")
                 }
             } else {
@@ -67,6 +77,7 @@ class VadSegmenter(
             }
         } else {
             val segmentConfig = activeConfig ?: currentConfig
+            accumulateQuality(pcm, probability, isSpeech)
             if (isSpeech) silenceSamples = 0 else silenceSamples += chunkSamples
 
             val softEnd = activeStart + segmentConfig.softLimitSamples
@@ -87,6 +98,7 @@ class VadSegmenter(
                     activeConfig = currentConfig
                     silenceSamples = 0
                     softLimitLogged = false
+                    resetQuality()
                     lastStartReason = "达到最大长度后重叠续段"
                 }
 
@@ -141,11 +153,12 @@ class VadSegmenter(
         ) ?: return
         val durationMs = slice.pcm.size.toLong() * 1_000 /
             (PcmRecorder.SAMPLE_RATE_HZ * PcmRecorder.BYTES_PER_SAMPLE)
+        val quality = qualitySnapshot(durationMs)
         lastEndReason = reason
         Log.d(TAG, "speech end: reason=$reason duration=${durationMs}ms")
         if (slice.pcm.size >= config.minSegmentSamples * PcmRecorder.BYTES_PER_SAMPLE) {
             Log.d(TAG, "segment emitted duration=${durationMs}ms reason=$reason")
-            completedSegments += CapturedPcmSegment(slice, hitMaxDuration, reason)
+            completedSegments += CapturedPcmSegment(slice, hitMaxDuration, reason, quality)
         } else {
             Log.d(TAG, "segment discarded: below min duration (${durationMs}ms)")
             discardedShortDurationsMs += durationMs
@@ -158,11 +171,51 @@ class VadSegmenter(
         candidateSpeechSamples = 0
         silenceSamples = 0
         softLimitLogged = false
+        resetQuality()
+    }
+
+    private fun accumulateQuality(pcm: ByteArray, probability: Float, isSpeech: Boolean) {
+        val samples = pcm.size / PcmRecorder.BYTES_PER_SAMPLE
+        val energy = pcm.meanSquare() * samples
+        if (isSpeech) {
+            qualityVoicedSamples += samples
+            qualitySpeechProbabilitySum += probability
+            qualitySpeechFrames++
+            qualitySpeechEnergy += energy
+        } else {
+            qualityNoiseSamples += samples
+            qualityNoiseEnergy += energy
+        }
+    }
+
+    private fun qualitySnapshot(audioDurationMs: Long): SegmentQuality {
+        val totalAnalyzed = qualityVoicedSamples + qualityNoiseSamples
+        val speechMeanSquare = if (qualityVoicedSamples > 0) qualitySpeechEnergy / qualityVoicedSamples else 0.0
+        val noiseMeanSquare = if (qualityNoiseSamples > 0) qualityNoiseEnergy / qualityNoiseSamples else 0.0
+        val snr = if (speechMeanSquare > 0.0 && noiseMeanSquare > 0.0) {
+            (10.0 * log10(speechMeanSquare / noiseMeanSquare)).toFloat().coerceIn(-30f, 60f)
+        } else null
+        return SegmentQuality(
+            audioDurationMs = audioDurationMs,
+            voicedDurationMs = qualityVoicedSamples * 1_000 / PcmRecorder.SAMPLE_RATE_HZ,
+            meanSpeechProbability = if (qualitySpeechFrames > 0) (qualitySpeechProbabilitySum / qualitySpeechFrames).toFloat() else 0f,
+            speechFrameRatio = if (totalAnalyzed > 0) qualityVoicedSamples.toFloat() / totalAnalyzed else 0f,
+            estimatedSnrDb = snr
+        )
+    }
+
+    private fun resetQuality() {
+        qualityVoicedSamples = 0
+        qualityNoiseSamples = 0
+        qualitySpeechProbabilitySum = 0.0
+        qualitySpeechFrames = 0
+        qualitySpeechEnergy = 0.0
+        qualityNoiseEnergy = 0.0
     }
 
     override fun close() = vad.release()
 
-    private fun ByteArray.toFloatSamples(): FloatArray = FloatArray(size / 2) { index ->
+private fun ByteArray.toFloatSamples(): FloatArray = FloatArray(size / 2) { index ->
         val low = this[index * 2].toInt() and 0xff
         val high = this[index * 2 + 1].toInt()
         ((high shl 8) or low) / 32768f
@@ -173,6 +226,20 @@ class VadSegmenter(
         private const val HISTORY_SAMPLES = PcmRecorder.SAMPLE_RATE_HZ * 20
         private const val TAG = "ListenVad"
     }
+}
+
+private fun ByteArray.meanSquare(): Double {
+    if (isEmpty()) return 0.0
+    var sum = 0.0
+    var index = 0
+    while (index + 1 < size) {
+        val low = this[index].toInt() and 0xff
+        val high = this[index + 1].toInt()
+        val sample = ((high shl 8) or low) / 32768.0
+        sum += sample * sample
+        index += 2
+    }
+    return sum / (size / 2).coerceAtLeast(1)
 }
 
 private fun VadConfig.msToSamples(value: Long): Long = value * PcmRecorder.SAMPLE_RATE_HZ / 1_000
@@ -199,5 +266,6 @@ data class VadResult(
 data class CapturedPcmSegment(
     val pcmSlice: PcmSegmentSlice,
     val hitMaxDuration: Boolean,
-    val endReason: String
+    val endReason: String,
+    val quality: SegmentQuality
 )

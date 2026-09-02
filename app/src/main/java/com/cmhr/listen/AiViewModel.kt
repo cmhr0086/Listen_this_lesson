@@ -8,6 +8,8 @@ import androidx.lifecycle.viewModelScope
 import com.cmhr.listen.data.ai.AiActionType
 import com.cmhr.listen.data.ai.AiChatMessage
 import com.cmhr.listen.data.ai.AiCredentials
+import com.cmhr.listen.data.ai.AiCompletion
+import com.cmhr.listen.data.ai.AiRequestOptions
 import com.cmhr.listen.data.ai.AiConversationEntity
 import com.cmhr.listen.data.ai.AiImageAttachmentEntity
 import com.cmhr.listen.data.ai.AiPhotoStore
@@ -38,6 +40,19 @@ data class AiUiState(
     val contentSelectionRecordId: Long? = null,
     val selectedContentKeys: Set<AiContentKey> = emptySet(),
     val isBusy: Boolean = false,
+    val lastDiagnostics: AiRequestDiagnostics? = null,
+    val error: String? = null
+)
+
+data class AiRequestDiagnostics(
+    val model: String,
+    val durationMs: Long?,
+    val finishReason: String?,
+    val promptTokens: Int?,
+    val completionTokens: Int?,
+    val reasoningPresent: Boolean,
+    val sourceCodePoints: Int,
+    val imageCount: Int,
     val error: String? = null
 )
 
@@ -67,6 +82,7 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
     fun resultSourceSegments(resultId: Long) = repository.resultSourceSegments(resultId)
     fun conversations(recordId: Long) = repository.conversations(recordId)
     fun conversation(conversationId: Long) = repository.conversation(conversationId)
+    fun conversationForResult(resultId: Long) = repository.conversationForResult(resultId)
     fun conversationSourceSegments(conversationId: Long) = repository.conversationSourceSegments(conversationId)
     fun messages(conversationId: Long) = repository.messages(conversationId)
     fun resultAttachments(resultId: Long) = repository.resultAttachments(resultId)
@@ -293,19 +309,20 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update { it.copy(isBusy = true, error = null) }
             try {
                 val images = repository.resultAttachmentsOnce(resultId).map { photoStore.dataUrl(it.relativePath, it.mimeType) }
-                val output = client.chat(
+                val completion = client.chat(
                     credentials,
                     listOf(
                         AiChatMessage("system", prompt),
                         AiChatMessage("user", "以下是按时间排列的课堂原文：\n\n$snapshot", images)
                     ),
-                    temperature = 0.2
+                    requestOptions(chat = false)
                 )
-                repository.completeResult(resultId, output)
+                repository.completeResult(resultId, completion.content)
+                recordDiagnostics(credentials, completion, snapshot, images.size)
             } catch (exception: Exception) {
                 val message = safeError(exception)
                 repository.failResult(resultId, message)
-                _uiState.update { it.copy(error = message) }
+                recordFailureDiagnostics(credentials, snapshot, photos.size, message)
             } finally {
                 _uiState.update { it.copy(isBusy = false) }
             }
@@ -321,19 +338,20 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update { it.copy(isBusy = true, error = null) }
             try {
                 val images = repository.resultAttachmentsOnce(resultId).map { photoStore.dataUrl(it.relativePath, it.mimeType) }
-                val output = client.chat(
+                val completion = client.chat(
                     credentials,
                     listOf(
                         AiChatMessage("system", result.requestPrompt),
                         AiChatMessage("user", "以下是按时间排列的课堂原文：\n\n${result.sourceTextSnapshot}", images)
                     ),
-                    temperature = 0.2
+                    requestOptions(chat = false)
                 )
-                repository.completeResult(resultId, output)
+                repository.completeResult(resultId, completion.content)
+                recordDiagnostics(credentials, completion, result.sourceTextSnapshot, images.size)
             } catch (exception: Exception) {
                 val message = safeError(exception)
                 repository.failResult(resultId, message)
-                _uiState.update { it.copy(error = message) }
+                recordFailureDiagnostics(credentials, result.sourceTextSnapshot, 0, message)
             } finally {
                 _uiState.update { it.copy(isBusy = false) }
             }
@@ -381,6 +399,68 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun createConversationDraft(
+        recordId: Long,
+        availableSegments: List<TranscriptEntity>,
+        onCreated: (Long) -> Unit
+    ) {
+        if (aiJob?.isActive == true) {
+            _uiState.update { it.copy(error = "已有 AI 请求正在处理。") }
+            return
+        }
+        aiJob = viewModelScope.launch {
+            val selected = selectedSegments(recordId, availableSegments) ?: return@launch
+            val snapshot = buildSourceSnapshot(selected)
+            if (!validateSnapshot(snapshot)) return@launch
+            val prompts = settingsRepository.settings.first().aiPrompts
+            val conversationId = repository.createConversation(
+                recordId = recordId,
+                title = "新对话",
+                snapshot = snapshot,
+                segmentIds = selected.map { it.id },
+                systemPrompt = prompts.customConversation
+            )
+            clearSelection()
+            onCreated(conversationId)
+        }
+    }
+
+    fun sendResultFollowUp(resultId: Long, question: String, photos: List<PendingAiPhoto> = emptyList()) {
+        if (aiJob?.isActive == true || question.isBlank()) {
+            discardPhotos(photos)
+            if (aiJob?.isActive == true) _uiState.update { it.copy(error = "已有 AI 请求正在处理。") }
+            return
+        }
+        aiJob = viewModelScope.launch {
+            val result = repository.resultOnce(resultId) ?: run {
+                discardPhotos(photos)
+                return@launch
+            }
+            if (result.status != AiRequestStatus.SUCCESS.name || result.output.isNullOrBlank()) {
+                discardPhotos(photos)
+                _uiState.update { it.copy(error = "AI 结果尚未成功生成，暂时不能继续追问。") }
+                return@launch
+            }
+            val conversation = repository.conversationForResultOnce(resultId) ?: run {
+                val prompts = settingsRepository.settings.first().aiPrompts
+                val action = runCatching { AiActionType.valueOf(result.actionType).displayName }.getOrDefault(result.actionType)
+                val id = repository.createConversation(
+                    recordId = result.recordId,
+                    title = action,
+                    snapshot = result.sourceTextSnapshot,
+                    segmentIds = emptyList(),
+                    systemPrompt = "${prompts.customConversation}\n\n原始处理任务：${result.requestPrompt}",
+                    originResultId = result.id
+                )
+                repository.conversationOnce(id) ?: run {
+                    discardPhotos(photos)
+                    return@launch
+                }
+            }
+            sendMessageInternal(conversation.id, question.trim(), photos)
+        }
+    }
+
     fun sendMessage(conversationId: Long, question: String, photos: List<PendingAiPhoto> = emptyList()) {
         if (aiJob?.isActive == true || question.isBlank()) {
             discardPhotos(photos)
@@ -399,6 +479,7 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
             discardPhotos(photos)
             return
         }
+        val messagesBefore = repository.messagesOnce(conversationId)
         val imagePrompt = if (photos.isNotEmpty()) settingsRepository.settings.first().aiPrompts.imageContext else ""
         val exchange = repository.insertUserAndPendingAssistant(
             conversationId = conversationId,
@@ -407,6 +488,9 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
             contextPrompt = imagePrompt,
             photos = photos
         )
+        if (messagesBefore.none { it.role == "user" } && conversation.originResultId == null) {
+            repository.renameConversation(conversationId, question.replace('\n', ' ').take(24).ifBlank { "课堂问答" })
+        }
         _uiState.update { it.copy(isBusy = true, error = null) }
         try {
             val attachments = repository.conversationAttachmentsOnce(conversationId).groupBy { it.messageId }
@@ -417,19 +501,25 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
                     val content = if (message.contextPrompt.isBlank()) message.content else "${message.content}\n\n${message.contextPrompt}"
                     AiChatMessage(message.role, content, images)
                 }
-            val output = client.chat(
+            val originResult = conversation.originResultId?.let { resultId ->
+                repository.resultOnce(resultId)
+            }
+            val contextMessages = buildList {
+                add(AiChatMessage("system", conversation.systemPrompt))
+                add(AiChatMessage("user", "以下内容是本对话冻结的课堂原文，只能依据它回答：\n\n${conversation.sourceTextSnapshot}"))
+                originResult?.output?.takeIf { it.isNotBlank() }?.let { add(AiChatMessage("assistant", it)) }
+            }
+            val completion = client.chat(
                 credentials,
-                listOf(
-                    AiChatMessage("system", conversation.systemPrompt),
-                    AiChatMessage("user", "以下内容是本对话冻结的课堂原文，只能依据它回答：\n\n${conversation.sourceTextSnapshot}")
-                ) + history,
-                temperature = 0.7
+                contextMessages + history,
+                requestOptions(chat = true)
             )
-            repository.completeMessage(conversationId, exchange.assistantMessageId, output)
+            repository.completeMessage(conversationId, exchange.assistantMessageId, completion.content)
+            recordDiagnostics(credentials, completion, conversation.sourceTextSnapshot, photos.size)
         } catch (exception: Exception) {
             val message = safeError(exception)
             repository.failMessage(conversationId, exchange.assistantMessageId, message)
-            _uiState.update { it.copy(error = message) }
+            recordFailureDiagnostics(credentials, conversation.sourceTextSnapshot, photos.size, message)
         } finally {
             _uiState.update { it.copy(isBusy = false) }
         }
@@ -466,7 +556,60 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update { it.copy(error = message) }
             return null
         }
-        return AiCredentials(settings.baseUrl, apiKey, settings.model)
+        return AiCredentials(settings.baseUrl, apiKey, settings.model, settings.provider)
+    }
+
+    private suspend fun requestOptions(chat: Boolean): AiRequestOptions {
+        val settings = settingsRepository.settings.first().aiGeneration
+        return AiRequestOptions(
+            maxTokens = settings.maxTokens,
+            temperature = (if (chat) settings.chatTemperature else settings.fixedTemperature).toDouble(),
+            thinkingMode = settings.deepSeekThinkingMode,
+            reasoningEffort = settings.reasoningEffort
+        )
+    }
+
+    private fun recordDiagnostics(
+        credentials: AiCredentials,
+        completion: AiCompletion,
+        source: String,
+        imageCount: Int
+    ) = _uiState.update {
+        it.copy(
+            error = null,
+            lastDiagnostics = AiRequestDiagnostics(
+                model = credentials.model,
+                durationMs = completion.durationMs,
+                finishReason = completion.finishReason,
+                promptTokens = completion.promptTokens,
+                completionTokens = completion.completionTokens,
+                reasoningPresent = completion.reasoningPresent,
+                sourceCodePoints = source.codePointCount(0, source.length),
+                imageCount = imageCount
+            )
+        )
+    }
+
+    private fun recordFailureDiagnostics(
+        credentials: AiCredentials,
+        source: String,
+        imageCount: Int,
+        message: String
+    ) = _uiState.update {
+        it.copy(
+            error = message,
+            lastDiagnostics = AiRequestDiagnostics(
+                model = credentials.model,
+                durationMs = null,
+                finishReason = null,
+                promptTokens = null,
+                completionTokens = null,
+                reasoningPresent = false,
+                sourceCodePoints = source.codePointCount(0, source.length),
+                imageCount = imageCount,
+                error = message
+            )
+        )
     }
 
     private fun safeError(exception: Exception): String =

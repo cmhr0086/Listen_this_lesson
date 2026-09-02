@@ -7,6 +7,9 @@ import com.cmhr.listen.data.settings.AppSettingsRepository
 import com.cmhr.listen.data.settings.AiProvider
 import com.cmhr.listen.data.settings.AiServiceSettings
 import com.cmhr.listen.data.settings.AiPromptSettings
+import com.cmhr.listen.data.settings.AiGenerationSettings
+import com.cmhr.listen.data.stt.AsrPromptAutoConfig
+import com.cmhr.listen.data.stt.AsrPromptMode
 import com.cmhr.listen.data.settings.ConnectionTestResult
 import com.cmhr.listen.data.settings.ServerSettings
 import com.cmhr.listen.data.settings.ServerConnectionTester
@@ -27,6 +30,9 @@ data class SettingsUiState(
     val server: ServerSettings = ServerSettings(),
     val ai: AiServiceSettings = AiServiceSettings(),
     val aiPrompts: AiPromptSettings = AiPromptSettings(),
+    val aiGeneration: AiGenerationSettings = AiGenerationSettings(),
+    val globalAsrPromptMode: AsrPromptMode = AsrPromptMode.AUTO,
+    val asrPromptAutoConfig: AsrPromptAutoConfig = AsrPromptAutoConfig(),
     val availableAiModels: List<String> = emptyList(),
     val isLoadingAiModels: Boolean = false,
     val connectionTestState: ConnectionTestState = ConnectionTestState.Idle,
@@ -50,7 +56,17 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val connectionTester = ServerConnectionTester(client)
     private val aiClient = AiServiceClient()
 
-    init { viewModelScope.launch { repository.settings.collect { settings -> _uiState.update { it.copy(developerMode = settings.developerMode, server = settings.server, ai = settings.ai, aiPrompts = settings.aiPrompts) } } } }
+    init { viewModelScope.launch { repository.settings.collect { settings ->
+        _uiState.update { it.copy(
+            developerMode = settings.developerMode,
+            server = settings.server,
+            ai = settings.ai,
+            aiPrompts = settings.aiPrompts,
+            aiGeneration = settings.aiGeneration,
+            globalAsrPromptMode = settings.globalAsrPromptMode,
+            asrPromptAutoConfig = settings.asrPromptAutoConfig
+        ) }
+    } } }
 
     fun setDeveloperMode(enabled: Boolean) = viewModelScope.launch { repository.setDeveloperMode(enabled) }
     fun saveServer(baseUrl: String, apiKey: String?) = viewModelScope.launch {
@@ -74,6 +90,26 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         repository.restoreDefaultAiPrompts()
         messageFlow.emit(UiMessage("AI 提示词已恢复默认值。"))
     }
+    fun saveAiGeneration(value: AiGenerationSettings) = viewModelScope.launch {
+        repository.saveAiGeneration(value)
+        messageFlow.emit(UiMessage("AI 生成参数已保存。"))
+    }
+    fun restoreDefaultAiGeneration() = viewModelScope.launch {
+        repository.restoreDefaultAiGeneration()
+        messageFlow.emit(UiMessage("AI 生成参数已恢复默认值。"))
+    }
+    fun saveGlobalAsrPromptMode(mode: AsrPromptMode) = viewModelScope.launch {
+        repository.saveGlobalAsrPromptMode(mode)
+        messageFlow.emit(UiMessage("全局 ASR 提示词模式已保存。"))
+    }
+    fun saveAsrPromptAutoConfig(value: AsrPromptAutoConfig) = viewModelScope.launch {
+        repository.saveAsrPromptAutoConfig(value)
+        messageFlow.emit(UiMessage("自动 Prompt 门槛已保存。"))
+    }
+    fun restoreDefaultAsrPromptAutoConfig() = viewModelScope.launch {
+        repository.restoreDefaultAsrPromptAutoConfig()
+        messageFlow.emit(UiMessage("自动 Prompt 门槛已恢复默认值。"))
+    }
     fun testAiConnection(baseUrl: String, apiKeyInput: String) = viewModelScope.launch {
         _uiState.update { it.copy(aiConnectionTestState = ConnectionTestState.Testing) }
         val key = apiKeyInput.trim().takeIf { it.isNotEmpty() }
@@ -86,7 +122,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     }
     fun fetchAiModels(baseUrl: String, apiKeyInput: String) = viewModelScope.launch {
         if (_uiState.value.isLoadingAiModels) return@launch
-        _uiState.update { it.copy(isLoadingAiModels = true) }
+        _uiState.update { it.copy(isLoadingAiModels = true, availableAiModels = emptyList()) }
         val key = apiKeyInput.trim().takeIf { it.isNotEmpty() }
             ?: runCatching { repository.readAiApiKey().orEmpty() }.getOrDefault("")
         when (val result = aiClient.fetchModels(baseUrl, key)) {

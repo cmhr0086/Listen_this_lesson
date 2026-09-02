@@ -3,6 +3,7 @@ package com.cmhr.listen.ui
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.SystemClock
+import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -18,6 +19,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.School
@@ -39,8 +41,8 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -64,6 +66,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.cmhr.listen.AiViewModel
+import com.cmhr.listen.AppNavigationRequests
 import com.cmhr.listen.CourseViewModel
 import com.cmhr.listen.SettingsViewModel
 import com.cmhr.listen.SttViewModel
@@ -86,6 +89,8 @@ private sealed interface FabState {
 }
 
 private fun isSettingsRoute(route: String?): Boolean = route == "settings" || route?.startsWith("settings/") == true
+private fun isAiWorkspaceRoute(route: String?): Boolean =
+    route?.contains("ai-results") == true || route?.contains("ai-result/") == true || route?.startsWith("ai-conversation/") == true
 
 private fun routeTitle(route: String?): String = when (route) {
     "courses" -> "课程"
@@ -97,6 +102,8 @@ private fun routeTitle(route: String?): String = when (route) {
     "settings/vad-presets" -> "VAD 预设"
     "settings/ai-service" -> "AI 配置"
     "settings/ai-prompts" -> "AI 提示词"
+    "settings/asr-prompt-policy" -> "ASR 提示词模式"
+    "settings/ai-generation" -> "AI 生成参数"
     "record/{recordId}/ai-results" -> "AI 结果"
     "record/{recordId}/ai-result/{resultId}" -> "AI 结果详情"
     "record/{recordId}/ai-conversations" -> "AI 对话"
@@ -129,9 +136,11 @@ fun ListenApp(
     var showSelectionAiActions by remember { mutableStateOf(false) }
     var editingRecordCoursePrompt by remember { mutableStateOf(false) }
     var promptDraft by remember { mutableStateOf("") }
+    var promptModeDraft by remember { mutableStateOf<String?>(null) }
     var exportContent by remember { mutableStateOf<String?>(null) }
     var requestedFullAiAction by remember { mutableStateOf<AiActionType?>(null) }
     var confirmDeleteAiContents by remember { mutableStateOf(false) }
+    var confirmDeleteTranscripts by remember { mutableStateOf(false) }
 
     val courseId = backStackEntry?.arguments?.getString("courseId")?.toLongOrNull()
     val recordId = backStackEntry?.arguments?.getString("recordId")?.toLongOrNull()
@@ -156,6 +165,11 @@ fun ListenApp(
         recordMenuExpanded = false
         if (!selectionMode) showSelectionAiActions = false
     }
+    LaunchedEffect(nav) {
+        AppNavigationRequests.recordRequests.collectLatest { requestedRecordId ->
+            nav.navigate("record/$requestedRecordId") { launchSingleTop = true }
+        }
+    }
 
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
         val content = exportContent
@@ -167,10 +181,17 @@ fun ListenApp(
         exportContent = null
     }
 
-    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
         val recordId = pendingPermissionRecordId
         pendingPermissionRecordId = null
-        if (granted && recordId != null) stt.startListening(recordId) else if (!granted) stt.reportPermissionDenied()
+        val microphoneGranted = grants[Manifest.permission.RECORD_AUDIO]
+            ?: (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
+        val notificationGranted = Build.VERSION.SDK_INT < 33 || grants[Manifest.permission.POST_NOTIFICATIONS]
+            ?: (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED)
+        if (microphoneGranted && recordId != null) {
+            stt.startListening(recordId)
+            if (!notificationGranted) stt.reportNotificationPermissionDenied()
+        } else stt.reportPermissionDenied()
     }
 
     if (creatingCourse) NameDialog(
@@ -195,28 +216,38 @@ fun ListenApp(
         AsrPromptDialog(
             prompt = promptDraft,
             update = { promptDraft = it },
+            modeOverride = promptModeDraft,
+            updateMode = { promptModeDraft = it },
             save = {
                 courses.updateCourseAsrPrompt(currentCourse.id, promptDraft)
+                courses.updateCourseAsrPromptMode(currentCourse.id, promptModeDraft)
                 editingRecordCoursePrompt = false
             },
             dismiss = { editingRecordCoursePrompt = false }
         )
     }
-    if (confirmDeleteAiContents && recordId != null) AlertDialog(
-        onDismissRequest = { confirmDeleteAiContents = false },
-        title = { Text("删除 AI 内容") },
-        text = { Text("将删除选中的 ${aiState.selectedContentKeys.size} 项 AI 结果或对话，原始识别文本不会受影响。") },
-        confirmButton = {
-            Button(onClick = {
+    if (confirmDeleteAiContents && recordId != null) TimedDeleteDialog(
+        title = "删除 AI 内容",
+        message = "将删除选中的 ${aiState.selectedContentKeys.size} 项 AI 结果或对话，原始识别文本不会受影响。",
+        confirm = {
                 ai.deleteSelectedContents(recordId)
                 confirmDeleteAiContents = false
-            }) { Text("删除") }
         },
-        dismissButton = { TextButton(onClick = { confirmDeleteAiContents = false }) { Text("取消") } }
+        dismiss = { confirmDeleteAiContents = false }
+    )
+    if (confirmDeleteTranscripts && recordId != null) TimedDeleteDialog(
+        title = "删除识别片段",
+        message = "将永久删除选中的 ${aiState.selectedSegmentIds.size} 条原始识别片段。已保存的 AI 冻结快照和输出会保留。",
+        confirm = {
+            courses.deleteSegments(recordId, aiState.selectedSegmentIds) { ai.clearSelection() }
+            confirmDeleteTranscripts = false
+        },
+        dismiss = { confirmDeleteTranscripts = false }
     )
 
     val nested = route != "courses" && route != "settings"
     val fabState: FabState = when {
+        isAiWorkspaceRoute(route) -> FabState.None
         sttState.isListening -> FabState.StopListening(sttState.listeningStartedAtElapsedRealtimeMs)
         route == "courses" -> FabState.NewCourse
         route == "course/{courseId}" && courseId != null -> FabState.NewRecord(courseId)
@@ -249,7 +280,8 @@ fun ListenApp(
                     selectedCount = aiState.selectedSegmentIds.size,
                     aiEnabled = aiState.selectedSegmentIds.isNotEmpty() && !aiState.isBusy,
                     close = ai::clearSelection,
-                    process = { showSelectionAiActions = true }
+                    process = { showSelectionAiActions = true },
+                    delete = { confirmDeleteTranscripts = true }
                 )
                 route == "record/{recordId}" && recordId != null -> RecordNormalTopBar(
                     menuExpanded = recordMenuExpanded,
@@ -277,6 +309,7 @@ fun ListenApp(
                     editAsrPrompt = {
                         recordMenuExpanded = false
                         promptDraft = currentCourse?.asrPrompt.orEmpty()
+                        promptModeDraft = currentCourse?.asrPromptModeOverride
                         editingRecordCoursePrompt = currentCourse != null
                     }
                 )
@@ -320,11 +353,18 @@ fun ListenApp(
                     FabState.NewCourse -> { newName = ""; creatingCourse = true }
                     is FabState.NewRecord -> { newName = ""; creatingRecordForCourse = action.courseId }
                     is FabState.StartListening -> {
-                        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                        val microphoneGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                        val notificationGranted = Build.VERSION.SDK_INT < 33 ||
+                            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+                        if (microphoneGranted && notificationGranted) {
                             stt.startListening(action.recordId)
                         } else {
                             pendingPermissionRecordId = action.recordId
-                            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                            val permissions = buildList {
+                                if (!microphoneGranted) add(Manifest.permission.RECORD_AUDIO)
+                                if (Build.VERSION.SDK_INT >= 33 && !notificationGranted) add(Manifest.permission.POST_NOTIFICATIONS)
+                            }
+                            permissionLauncher.launch(permissions.toTypedArray())
                         }
                     }
                     is FabState.StopListening -> stt.stopListening()
@@ -386,12 +426,16 @@ fun ListenApp(
                     onAiService = { nav.navigate("settings/ai-service") },
                     onVadParameters = { nav.navigate("settings/vad-parameters") },
                     onVadPresets = { nav.navigate("settings/vad-presets") },
-                    onAiPrompts = { nav.navigate("settings/ai-prompts") }
+                    onAiPrompts = { nav.navigate("settings/ai-prompts") },
+                    onAsrPromptPolicy = { nav.navigate("settings/asr-prompt-policy") },
+                    onAiGeneration = { nav.navigate("settings/ai-generation") }
                 )
             }
             composable("settings/stt-service") { SttServiceSettingsScreen(settingsState, settings) }
             composable("settings/ai-service") { AiServiceSettingsScreen(settingsState, settings) }
             composable("settings/ai-prompts") { AiPromptsSettingsScreen(settingsState, settings) }
+            composable("settings/asr-prompt-policy") { AsrPromptPolicySettingsScreen(settingsState, settings) }
+            composable("settings/ai-generation") { AiGenerationSettingsScreen(settingsState, settings) }
             composable("settings/vad-parameters") { VadParametersScreen(sttState.configuredVadConfig, stt) }
             composable("settings/vad-presets") { VadPresetsScreen(sttState.selectedVadPreset, stt) }
             composable("record/{recordId}/ai-results") { entry ->
@@ -405,7 +449,7 @@ fun ListenApp(
             }
             composable("record/{recordId}/ai-result/{resultId}") { entry ->
                 val resultId = entry.arguments?.getString("resultId")?.toLongOrNull() ?: return@composable
-                AiResultDetailScreen(resultId, ai)
+                AiResultDetailScreen(resultId, ai, settingsState.developerMode)
             }
             composable("record/{recordId}/ai-conversations") { entry ->
                 val id = entry.arguments?.getString("recordId")?.toLongOrNull() ?: return@composable
@@ -413,7 +457,7 @@ fun ListenApp(
             }
             composable("ai-conversation/{conversationId}") { entry ->
                 val id = entry.arguments?.getString("conversationId")?.toLongOrNull() ?: return@composable
-                AiConversationScreen(id, ai)
+                AiConversationScreen(id, ai, settingsState.developerMode)
             }
         }
     }
@@ -425,13 +469,23 @@ internal fun RecordSelectionTopBar(
     selectedCount: Int,
     aiEnabled: Boolean,
     close: () -> Unit,
-    process: () -> Unit
+    process: () -> Unit,
+    delete: () -> Unit
 ) = TopAppBar(
     navigationIcon = {
         IconButton(onClick = close) { Icon(Icons.Outlined.Close, contentDescription = "退出选择") }
     },
     title = { Text("已选择 $selectedCount 条") },
-    actions = { TextButton(onClick = process, enabled = aiEnabled) { Text("AI 处理") } }
+    actions = {
+        IconButton(onClick = delete, enabled = selectedCount > 0) { Icon(Icons.Outlined.Delete, contentDescription = "删除") }
+        TextButton(onClick = process, enabled = aiEnabled) { Text("AI 处理") }
+    },
+    colors = TopAppBarDefaults.topAppBarColors(
+        containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+        titleContentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+        actionIconContentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+        navigationIconContentColor = MaterialTheme.colorScheme.onTertiaryContainer
+    )
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -447,7 +501,13 @@ internal fun AiContentSelectionTopBar(
     actions = {
         TextButton(onClick = export, enabled = selectedCount > 0) { Text("导出") }
         TextButton(onClick = delete, enabled = selectedCount > 0) { Text("删除") }
-    }
+    },
+    colors = TopAppBarDefaults.topAppBarColors(
+        containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+        titleContentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+        actionIconContentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+        navigationIconContentColor = MaterialTheme.colorScheme.onTertiaryContainer
+    )
 )
 
 @OptIn(ExperimentalMaterial3Api::class)

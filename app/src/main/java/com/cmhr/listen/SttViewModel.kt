@@ -18,6 +18,11 @@ import com.cmhr.listen.data.course.CourseRepository
 import com.cmhr.listen.data.course.ListenDatabase
 import com.cmhr.listen.data.stt.SttApiClient
 import com.cmhr.listen.data.stt.SttCredentials
+import com.cmhr.listen.data.stt.AsrPromptAutoConfig
+import com.cmhr.listen.data.stt.AsrPromptMode
+import com.cmhr.listen.data.stt.AsrPromptPolicy
+import com.cmhr.listen.data.stt.PromptDecision
+import com.cmhr.listen.data.stt.SegmentQuality
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -72,6 +77,8 @@ data class ListeningUiState(
     val listeningStartedAtElapsedRealtimeMs: Long? = null,
     val currentCourseName: String? = null,
     val currentRecordName: String? = null,
+    val lastSegmentQuality: SegmentQuality? = null,
+    val lastPromptDecision: PromptDecision? = null,
     val error: String? = null
 )
 
@@ -100,6 +107,9 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
     @Volatile private var currentVadConfig = VadConfig.Default
     @Volatile private var currentServer = ServerSettings()
     @Volatile private var currentCourseAsrPrompt = ""
+    @Volatile private var currentCoursePromptModeOverride: String? = null
+    @Volatile private var currentGlobalPromptMode = AsrPromptMode.AUTO
+    @Volatile private var currentPromptAutoConfig = AsrPromptAutoConfig()
 
     init {
         viewModelScope.launch {
@@ -116,12 +126,17 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             appSettingsRepository.settings.collect { settings ->
                 currentServer = settings.server
+                currentGlobalPromptMode = settings.globalAsrPromptMode
+                currentPromptAutoConfig = settings.asrPromptAutoConfig
                 val course = settings.selectedCourseId?.let { courseRepository.course(it).first() }
                 val record = settings.selectedRecordId?.let { courseRepository.record(it).first() }
                 _uiState.update { state ->
                     if (state.activeRecordId == null) state.copy(currentCourseName = course?.name, currentRecordName = record?.name) else state
                 }
             }
+        }
+        viewModelScope.launch {
+            ListeningControlBus.stopRequests.collect { stopListening() }
         }
     }
 
@@ -151,11 +166,13 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
             }
             val course = courseRepository.course(record.courseId).first()
             currentCourseAsrPrompt = course?.asrPrompt.orEmpty()
+            currentCoursePromptModeOverride = course?.asrPromptModeOverride
             val queue = Channel<PendingSegment>(capacity = QUEUE_CAPACITY)
             val worker = launch { consumeQueue(queue) }
             val promptObserver = launch {
                 courseRepository.course(record.courseId).collect { updatedCourse ->
                     currentCourseAsrPrompt = updatedCourse?.asrPrompt.orEmpty()
+                    currentCoursePromptModeOverride = updatedCourse?.asrPromptModeOverride
                 }
             }
             sessionStartedAtMs = System.currentTimeMillis()
@@ -174,6 +191,7 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
             )
 
             try {
+                ListeningForegroundService.start(getApplication(), _uiState.value)
                 withContext(Dispatchers.Default) {
                     VadSegmenter(getApplication<Application>().assets) { currentVadConfig }.use { segmenter ->
                         recorder.listen(
@@ -212,7 +230,9 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
                 worker.cancel()
                 promptObserver.cancel()
                 currentCourseAsrPrompt = ""
+                currentCoursePromptModeOverride = null
                 withContext(NonCancellable) { courseRepository.finishRecord(recordId) }
+                ListeningForegroundService.stop(getApplication())
                 sessionRecordId = null
                 _uiState.update {
                     it.copy(
@@ -236,6 +256,10 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
 
     fun reportPermissionDenied() {
         _uiState.update { it.copy(error = "需要麦克风权限才能开始监听。") }
+    }
+
+    fun reportNotificationPermissionDenied() {
+        _uiState.update { it.copy(error = "通知权限未授予；监听仍会继续，但系统可能不显示课堂监听通知。") }
     }
 
     fun updateVadConfig(config: VadConfig) {
@@ -277,10 +301,24 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
         )
         previousAudioEndTimeMs = audioEnd
 
-        val promptForSegment = currentCourseAsrPrompt.trim().takeIf { it.isNotEmpty() }
+        val promptDecision = AsrPromptPolicy.decide(
+            globalMode = currentGlobalPromptMode,
+            courseOverride = currentCoursePromptModeOverride,
+            coursePrompt = currentCourseAsrPrompt,
+            quality = captured.quality.copy(audioDurationMs = transcript.audioDurationMs),
+            config = currentPromptAutoConfig
+        )
+        _uiState.update {
+            it.copy(
+                lastSegmentQuality = captured.quality.copy(audioDurationMs = transcript.audioDurationMs),
+                lastPromptDecision = promptDecision
+            )
+        }
+        val promptForSegment = promptDecision.prompt
         if (queue.trySend(PendingSegment(transcript, captured.pcmSlice.pcm, promptForSegment)).isSuccess) {
             appendTranscript(transcript)
             _uiState.update { it.copy(pendingQueueCount = it.pendingQueueCount + 1) }
+            ListeningForegroundService.update(getApplication(), _uiState.value)
             Log.d(TAG, "segment #${transcript.id} queued duration=${transcript.audioDurationMs}ms")
         } else {
             val dropped = transcript.copy(status = TranscriptStatus.DROPPED, error = "Queue full")
@@ -291,6 +329,7 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
                     error = "识别队列已满，已丢弃 segment #${dropped.id}。"
                 )
             }
+            ListeningForegroundService.update(getApplication(), _uiState.value)
             Log.w(TAG, "segment #${dropped.id} dropped duration=${dropped.audioDurationMs}ms at=$now")
         }
     }
@@ -350,6 +389,7 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
                 Log.e(TAG, "segment #${pending.transcript.id} recognition failed", exception)
             } finally {
                 _uiState.update { it.copy(isRecognizing = false) }
+                ListeningForegroundService.update(getApplication(), _uiState.value)
             }
         }
     }

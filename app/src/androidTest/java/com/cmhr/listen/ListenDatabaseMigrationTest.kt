@@ -29,7 +29,7 @@ class ListenDatabaseMigrationTest {
     @After fun after() { context.deleteDatabase(databaseName) }
 
     @Test
-    fun migratesV1ThroughV4AndPreservesExistingClassroomData() = runBlocking {
+    fun migratesV1ThroughV5AndPreservesExistingClassroomData() = runBlocking {
         val configuration = SupportSQLiteOpenHelper.Configuration.builder(context)
             .name(databaseName)
             .callback(object : SupportSQLiteOpenHelper.Callback(1) {
@@ -52,16 +52,35 @@ class ListenDatabaseMigrationTest {
         }
 
         val database = Room.databaseBuilder(context, ListenDatabase::class.java, databaseName)
-            .addMigrations(ListenDatabase.MIGRATION_1_2, ListenDatabase.MIGRATION_2_3, ListenDatabase.MIGRATION_3_4)
+            .addMigrations(
+                ListenDatabase.MIGRATION_1_2,
+                ListenDatabase.MIGRATION_2_3,
+                ListenDatabase.MIGRATION_3_4,
+                ListenDatabase.MIGRATION_4_5
+            )
             .build()
         try {
             assertEquals("", database.courseDao().course(1).first()?.asrPrompt)
+            assertEquals(null, database.courseDao().course(1).first()?.asrPromptModeOverride)
             assertEquals("第一课", database.recordDao().record(1).first()?.name)
             assertEquals("原始识别文本", database.transcriptDao().segments(1).first().single().text)
 
             val aiRepository = AiRepository(database)
-            aiRepository.createResult(1, AiActionType.SUMMARY, "提示词", "原始识别文本", listOf(1))
+            val resultId = aiRepository.createResult(1, AiActionType.SUMMARY, "提示词", "原始识别文本", listOf(1))
+            val linkedConversationId = aiRepository.createConversation(
+                recordId = 1,
+                title = "总结追问",
+                snapshot = "原始识别文本",
+                segmentIds = emptyList(),
+                originResultId = resultId
+            )
             assertEquals(1, aiRepository.results(1).first().size)
+            assertEquals(resultId, aiRepository.conversationOnce(linkedConversationId)?.originResultId)
+
+            aiRepository.deleteResult(resultId)
+            assertEquals(null, aiRepository.conversationOnce(linkedConversationId))
+
+            aiRepository.createResult(1, AiActionType.SUMMARY, "提示词", "原始识别文本", listOf(1))
 
             CourseRepository(database).deleteRecord(1)
             assertTrue(aiRepository.results(1).first().isEmpty())

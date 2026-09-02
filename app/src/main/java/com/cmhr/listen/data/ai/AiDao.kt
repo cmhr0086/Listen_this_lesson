@@ -26,13 +26,16 @@ interface AiDao {
 
     @Insert suspend fun insertConversation(conversation: AiConversationEntity): Long
     @Insert suspend fun insertConversationSegments(links: List<AiConversationSegmentEntity>)
-    @Query("SELECT * FROM ai_conversations WHERE recordId = :recordId ORDER BY updatedAt DESC")
+    @Query("SELECT * FROM ai_conversations WHERE recordId = :recordId AND originResultId IS NULL ORDER BY updatedAt DESC")
     fun conversations(recordId: Long): Flow<List<AiConversationEntity>>
     @Query("SELECT * FROM ai_conversations WHERE id = :id") fun conversation(id: Long): Flow<AiConversationEntity?>
     @Query("SELECT * FROM ai_conversations WHERE id = :id") suspend fun conversationOnce(id: Long): AiConversationEntity?
+    @Query("SELECT * FROM ai_conversations WHERE originResultId = :resultId LIMIT 1") fun conversationForResult(resultId: Long): Flow<AiConversationEntity?>
+    @Query("SELECT * FROM ai_conversations WHERE originResultId = :resultId LIMIT 1") suspend fun conversationForResultOnce(resultId: Long): AiConversationEntity?
     @Query("SELECT t.* FROM transcript_segments t INNER JOIN ai_conversation_segments l ON l.segmentId = t.id WHERE l.conversationId = :conversationId ORDER BY t.startTime ASC")
     fun conversationSourceSegments(conversationId: Long): Flow<List<TranscriptEntity>>
     @Query("UPDATE ai_conversations SET updatedAt = :updatedAt WHERE id = :id") suspend fun touchConversation(id: Long, updatedAt: Long)
+    @Query("UPDATE ai_conversations SET title = :title, updatedAt = :updatedAt WHERE id = :id") suspend fun renameConversation(id: Long, title: String, updatedAt: Long)
     @Query("DELETE FROM ai_conversations WHERE id = :id") suspend fun deleteConversation(id: Long)
 
     @Insert suspend fun insertMessage(message: AiMessageEntity): Long

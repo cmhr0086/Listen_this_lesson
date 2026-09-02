@@ -8,6 +8,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.longClick
@@ -70,7 +71,7 @@ class UiInteractionTest {
     @Test
     fun zeroSelectionTopBarDisablesAiProcessing() {
         composeRule.setContent {
-            ListenTheme { RecordSelectionTopBar(0, aiEnabled = false, close = {}, process = {}) }
+            ListenTheme { RecordSelectionTopBar(0, aiEnabled = false, close = {}, process = {}, delete = {}) }
         }
 
         composeRule.onNodeWithText("已选择 0 条").assertTextContains("已选择 0 条")
@@ -105,7 +106,8 @@ class UiInteractionTest {
                 SettingsOverview(
                     state = SettingsUiState(),
                     setDeveloperMode = {},
-                    onSttService = {}, onAiService = {}, onVadParameters = {}, onVadPresets = {}, onAiPrompts = {}
+                    onSttService = {}, onAiService = {}, onVadParameters = {}, onVadPresets = {}, onAiPrompts = {},
+                    onAsrPromptPolicy = {}, onAiGeneration = {}
                 )
             }
         }
@@ -115,5 +117,22 @@ class UiInteractionTest {
         composeRule.onNodeWithText("开发者功能").assertDoesNotExist()
         composeRule.onNodeWithText("语音识别服务").assertDoesNotExist()
         composeRule.onNodeWithText("AI 服务").assertDoesNotExist()
+    }
+
+    @Test
+    fun persistentDeleteRequiresTwoSecondConfirmation() {
+        var deleted = false
+        composeRule.mainClock.autoAdvance = false
+        composeRule.setContent {
+            ListenTheme {
+                TimedDeleteDialog("删除测试", "该数据将永久删除。", confirm = { deleted = true }, dismiss = {})
+            }
+        }
+
+        composeRule.onNodeWithText("删除（2s）").assertIsNotEnabled()
+        composeRule.mainClock.advanceTimeBy(2_100)
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("确认删除").assertIsEnabled().performClick()
+        assertTrue(deleted)
     }
 }

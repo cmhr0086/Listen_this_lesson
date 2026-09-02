@@ -29,7 +29,8 @@ data class CourseEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val name: String,
     val createdAt: Long,
-    val asrPrompt: String = ""
+    val asrPrompt: String = "",
+    val asrPromptModeOverride: String? = null
 )
 
 @Entity(tableName = "records", foreignKeys = [ForeignKey(entity = CourseEntity::class, parentColumns = ["id"], childColumns = ["courseId"], onDelete = ForeignKey.CASCADE)], indices = [Index("courseId")])
@@ -44,6 +45,7 @@ data class TranscriptEntity(@PrimaryKey(autoGenerate = true) val id: Long = 0, v
     @Insert suspend fun insert(course: CourseEntity): Long
     @Query("UPDATE courses SET name = :name WHERE id = :id") suspend fun rename(id: Long, name: String)
     @Query("UPDATE courses SET asrPrompt = :prompt WHERE id = :id") suspend fun updateAsrPrompt(id: Long, prompt: String)
+    @Query("UPDATE courses SET asrPromptModeOverride = :mode WHERE id = :id") suspend fun updateAsrPromptMode(id: Long, mode: String?)
     @Query("DELETE FROM courses WHERE id = :id") suspend fun delete(id: Long)
 }
 @Dao interface RecordDao {
@@ -60,6 +62,7 @@ data class TranscriptEntity(@PrimaryKey(autoGenerate = true) val id: Long = 0, v
     @Query("SELECT * FROM transcript_segments WHERE recordId = :recordId ORDER BY startTime ASC") fun segments(recordId: Long): Flow<List<TranscriptEntity>>
     @Query("SELECT * FROM transcript_segments WHERE id IN (:ids) ORDER BY startTime ASC") suspend fun segmentsByIds(ids: List<Long>): List<TranscriptEntity>
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insert(segment: TranscriptEntity): Long
+    @Query("DELETE FROM transcript_segments WHERE recordId = :recordId AND id IN (:ids)") suspend fun deleteByIds(recordId: Long, ids: List<Long>): Int
 }
 
 @Database(
@@ -74,7 +77,7 @@ data class TranscriptEntity(@PrimaryKey(autoGenerate = true) val id: Long = 0, v
         AiMessageEntity::class,
         AiImageAttachmentEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 abstract class ListenDatabase : RoomDatabase() {
@@ -115,11 +118,18 @@ abstract class ListenDatabase : RoomDatabase() {
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_ai_image_attachments_messageId ON ai_image_attachments(messageId)")
             }
         }
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE courses ADD COLUMN asrPromptModeOverride TEXT")
+                db.execSQL("ALTER TABLE ai_conversations ADD COLUMN originResultId INTEGER REFERENCES ai_results(id) ON DELETE CASCADE")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_ai_conversations_originResultId ON ai_conversations(originResultId)")
+            }
+        }
 
         @Volatile private var instance: ListenDatabase? = null
         fun get(context: Context): ListenDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, ListenDatabase::class.java, "listen.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                 .build()
                 .also { instance = it }
         }

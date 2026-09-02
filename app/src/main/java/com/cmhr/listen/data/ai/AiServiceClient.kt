@@ -1,26 +1,54 @@
 package com.cmhr.listen.data.ai
 
+import com.cmhr.listen.data.settings.AiProvider
+import com.cmhr.listen.data.settings.AiReasoningEffort
+import com.cmhr.listen.data.settings.AiThinkingMode
 import java.io.IOException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import okhttp3.MediaType.Companion.toMediaType
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 
-data class AiCredentials(val baseUrl: String, val apiKey: String, val model: String)
+data class AiCredentials(
+    val baseUrl: String,
+    val apiKey: String,
+    val model: String,
+    val provider: AiProvider = AiProvider.OPENAI_COMPATIBLE
+)
+
+data class AiRequestOptions(
+    val maxTokens: Int = 8_192,
+    val temperature: Double = 0.2,
+    val thinkingMode: AiThinkingMode = AiThinkingMode.DISABLED,
+    val reasoningEffort: AiReasoningEffort = AiReasoningEffort.HIGH
+)
+
+data class AiCompletion(
+    val content: String,
+    val finishReason: String?,
+    val promptTokens: Int?,
+    val completionTokens: Int?,
+    val reasoningPresent: Boolean,
+    val durationMs: Long
+)
 
 sealed interface AiConnectionResult {
     data class Success(val statusCode: Int) : AiConnectionResult
@@ -38,20 +66,6 @@ data class AiChatMessage(
     val imageDataUrls: List<String> = emptyList()
 )
 
-@Serializable
-private data class ChatMessagePayload(val role: String, val content: JsonElement)
-
-@Serializable
-private data class ChatCompletionRequest(
-    val model: String,
-    val messages: List<ChatMessagePayload>,
-    val temperature: Double,
-    @SerialName("max_tokens") val maxTokens: Int
-)
-
-@Serializable private data class ChatCompletionResponse(val choices: List<ChatChoice> = emptyList())
-@Serializable private data class ChatChoice(val message: ChatResponseMessage)
-@Serializable private data class ChatResponseMessage(val role: String = "assistant", val content: String = "")
 @Serializable private data class ModelsResponse(val data: List<ModelItem> = emptyList())
 @Serializable private data class ModelItem(val id: String = "")
 
@@ -66,8 +80,7 @@ class AiServiceClient(
             val request = Request.Builder()
                 .url("${baseUrl.trim().trimEnd('/')}/models")
                 .header("Authorization", "Bearer ${apiKey.trim()}")
-                .get()
-                .build()
+                .get().build()
             httpClient.newCall(request).execute().use { response ->
                 if (response.isSuccessful) AiConnectionResult.Success(response.code)
                 else AiConnectionResult.Failure(httpFailure(response.code))
@@ -90,8 +103,7 @@ class AiServiceClient(
             val request = Request.Builder()
                 .url("${baseUrl.trim().trimEnd('/')}/models")
                 .header("Authorization", "Bearer ${apiKey.trim()}")
-                .get()
-                .build()
+                .get().build()
             httpClient.newCall(request).execute().use { response ->
                 val body = response.body?.string().orEmpty()
                 if (!response.isSuccessful) return@use AiModelsResult.Failure(httpFailure(response.code))
@@ -114,36 +126,91 @@ class AiServiceClient(
     suspend fun chat(
         credentials: AiCredentials,
         messages: List<AiChatMessage>,
-        temperature: Double
-    ): String = withContext(Dispatchers.IO) {
+        options: AiRequestOptions = AiRequestOptions()
+    ): AiCompletion = withContext(Dispatchers.IO) {
         validate(credentials.baseUrl, credentials.apiKey, credentials.model)?.let { throw IllegalStateException(it) }
         require(messages.isNotEmpty()) { "AI 请求内容不能为空。" }
         val hasImages = messages.any { it.imageDataUrls.isNotEmpty() }
-        val body = json.encodeToString(
-            ChatCompletionRequest(
-                model = credentials.model.trim(),
-                messages = messages.map(::payload),
-                temperature = temperature,
-                maxTokens = MAX_TOKENS
-            )
-        ).toRequestBody(JSON_MEDIA_TYPE)
         val request = Request.Builder()
             .url("${credentials.baseUrl.trim().trimEnd('/')}/chat/completions")
             .header("Authorization", "Bearer ${credentials.apiKey.trim()}")
-            .post(body)
+            .post(buildRequest(credentials, messages, options).toString().toRequestBody(JSON_MEDIA_TYPE))
             .build()
+        val startedAt = System.nanoTime()
         httpClient.newCall(request).execute().use { response ->
             val responseBody = response.body?.string().orEmpty()
             if (!response.isSuccessful) throw IOException(httpFailure(response.code, hasImages))
-            val content = runCatching { json.decodeFromString(ChatCompletionResponse.serializer(), responseBody) }
-                .getOrElse { throw IOException("AI 服务返回了无法解析的数据。") }
-                .choices.firstOrNull()?.message?.content?.trim().orEmpty()
-            if (content.isBlank()) throw IOException("AI 服务没有返回内容。")
-            content
+            parseCompletion(responseBody, (System.nanoTime() - startedAt) / 1_000_000)
         }
     }
 
-    private fun payload(message: AiChatMessage): ChatMessagePayload {
+    private fun buildRequest(credentials: AiCredentials, messages: List<AiChatMessage>, options: AiRequestOptions): JsonObject {
+        val fields = linkedMapOf<String, JsonElement>(
+            "model" to JsonPrimitive(credentials.model.trim()),
+            "messages" to JsonArray(messages.map(::payload)),
+            "max_tokens" to JsonPrimitive(options.maxTokens.coerceIn(512, 32_768)),
+            "stream" to JsonPrimitive(false)
+        )
+        val thinkingEnabled = credentials.provider == AiProvider.DEEPSEEK && options.thinkingMode == AiThinkingMode.ENABLED
+        if (!thinkingEnabled) fields["temperature"] = JsonPrimitive(options.temperature.coerceIn(0.0, 2.0))
+        if (credentials.provider == AiProvider.DEEPSEEK && options.thinkingMode != AiThinkingMode.SERVICE_DEFAULT) {
+            fields["thinking"] = JsonObject(mapOf("type" to JsonPrimitive(if (thinkingEnabled) "enabled" else "disabled")))
+            if (thinkingEnabled) fields["reasoning_effort"] = JsonPrimitive(options.reasoningEffort.name.lowercase())
+        }
+        return JsonObject(fields)
+    }
+
+    private fun parseCompletion(body: String, durationMs: Long): AiCompletion {
+        val root = runCatching { json.parseToJsonElement(body).jsonObject }
+            .getOrElse { throw IOException("AI 服务返回了无法解析的数据。") }
+        val choice = root["choices"]?.let { runCatching { it.jsonArray.firstOrNull()?.jsonObject }.getOrNull() }
+            ?: throw IOException("AI 服务没有返回 choices。")
+        val message = choice["message"]?.let { runCatching { it.jsonObject }.getOrNull() }
+        val content = message?.get("content")?.extractText().orEmpty().ifBlank {
+            choice["text"]?.extractText().orEmpty()
+        }.trim()
+        val reasoningPresent = !message?.get("reasoning_content")?.extractText().isNullOrBlank()
+        val finishReason = choice["finish_reason"]?.primitiveContent()
+        val usage = root["usage"]?.let { runCatching { it.jsonObject }.getOrNull() }
+        if (finishReason in setOf("length", "content_filter", "insufficient_system_resource")) {
+            throw IOException(emptyContentMessage(finishReason, reasoningPresent))
+        }
+        if (content.isBlank()) throw IOException(emptyContentMessage(finishReason, reasoningPresent))
+        return AiCompletion(
+            content = content,
+            finishReason = finishReason,
+            promptTokens = usage?.get("prompt_tokens")?.jsonPrimitive?.intOrNull,
+            completionTokens = usage?.get("completion_tokens")?.jsonPrimitive?.intOrNull,
+            reasoningPresent = reasoningPresent,
+            durationMs = durationMs
+        )
+    }
+
+    private fun JsonElement.extractText(): String = when (this) {
+        JsonNull -> ""
+        is JsonPrimitive -> contentOrNull.orEmpty()
+        is JsonArray -> mapNotNull { part ->
+            when (part) {
+                is JsonPrimitive -> part.contentOrNull
+                is JsonObject -> part["text"]?.extractText() ?: part["content"]?.extractText()
+                else -> null
+            }
+        }.joinToString("")
+        is JsonObject -> this["text"]?.extractText().orEmpty()
+    }
+
+    private fun JsonElement.primitiveContent(): String? =
+        (this as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+
+    private fun emptyContentMessage(finishReason: String?, reasoningPresent: Boolean): String = when {
+        finishReason == "length" -> "AI 输出达到 max_tokens 或上下文长度限制，未产生完整最终答案。"
+        finishReason == "content_filter" -> "AI 输出被内容安全策略过滤。"
+        finishReason == "insufficient_system_resource" -> "AI 服务资源不足，未产生最终答案。"
+        reasoningPresent -> "AI 只返回了思考内容，没有最终答案；请关闭思考模式或提高 max_tokens 后重试。"
+        else -> "AI 服务没有返回最终内容（finish_reason=${finishReason ?: "未知"}）。"
+    }
+
+    private fun payload(message: AiChatMessage): JsonObject {
         val content = if (message.imageDataUrls.isEmpty()) JsonPrimitive(message.content) else JsonArray(
             listOf(JsonObject(mapOf("type" to JsonPrimitive("text"), "text" to JsonPrimitive(message.content)))) +
                 message.imageDataUrls.map { dataUrl ->
@@ -153,7 +220,7 @@ class AiServiceClient(
                     ))
                 }
         )
-        return ChatMessagePayload(message.role, content)
+        return JsonObject(mapOf("role" to JsonPrimitive(message.role), "content" to content))
     }
 
     private fun validate(baseUrl: String, apiKey: String, model: String): String? = when {
@@ -172,13 +239,12 @@ class AiServiceClient(
     }
 
     companion object {
-        private const val MAX_TOKENS = 4096
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         private val json = Json { ignoreUnknownKeys = true }
         private val defaultHttpClient = OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(60, TimeUnit.SECONDS)
+            .readTimeout(120, TimeUnit.SECONDS)
             .build()
     }
 }

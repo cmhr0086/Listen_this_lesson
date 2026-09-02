@@ -13,6 +13,11 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.cmhr.listen.ListeningUiState
@@ -20,6 +25,7 @@ import com.cmhr.listen.TranscriptSegment
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.delay
 
 @Composable
 fun NameDialog(
@@ -46,6 +52,34 @@ fun NameDialog(
 )
 
 @Composable
+fun TimedDeleteDialog(
+    title: String,
+    message: String,
+    confirm: () -> Unit,
+    dismiss: () -> Unit
+) {
+    var secondsRemaining by remember(title, message) { mutableIntStateOf(2) }
+    LaunchedEffect(title, message) {
+        while (secondsRemaining > 0) {
+            delay(1_000)
+            secondsRemaining--
+        }
+    }
+    AlertDialog(
+        onDismissRequest = dismiss,
+        title = { Text(title) },
+        text = { Text(message) },
+        confirmButton = {
+            Button(
+                onClick = confirm,
+                enabled = secondsRemaining == 0
+            ) { Text(if (secondsRemaining > 0) "删除（${secondsRemaining}s）" else "确认删除") }
+        },
+        dismissButton = { OutlinedButton(onClick = dismiss) { Text("取消") } }
+    )
+}
+
+@Composable
 fun ExpandHeader(title: String, expanded: Boolean, click: () -> Unit) =
     Card(Modifier.fillMaxWidth().clickable(onClick = click)) {
         Text("$title ${if (expanded) "▲" else "▼"}", Modifier.padding(16.dp), style = MaterialTheme.typography.titleMedium)
@@ -64,6 +98,18 @@ fun VadDebugCard(state: ListeningUiState) = Card(Modifier.fillMaxWidth()) {
         Text("已丢弃片段：${state.droppedSegments}")
         Text("已丢弃过短片段：${state.discardedShortSegments}")
         Text("AudioRecord 读取错误：${state.audioReadErrors}")
+        state.lastSegmentQuality?.let { quality ->
+            Text("最近片段音频：${quality.audioDurationMs} ms")
+            Text("最近有效语音：${quality.voicedDurationMs} ms")
+            Text("最近平均 VAD：${formatFloat(quality.meanSpeechProbability)}")
+            Text("最近语音帧占比：${formatFloat(quality.speechFrameRatio * 100)}%")
+            Text("最近估算 SNR：${quality.estimatedSnrDb?.let { "${formatFloat(it)} dB" } ?: "不可估算"}")
+        }
+        state.lastPromptDecision?.let { decision ->
+            Text("ASR 提示词模式：${decision.effectiveMode.displayName}")
+            Text("最近请求携带 Prompt：${if (decision.included) "是" else "否"}")
+            Text("Prompt 决策原因：${decision.reason}")
+        }
     }
 }
 

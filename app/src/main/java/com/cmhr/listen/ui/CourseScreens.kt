@@ -54,6 +54,7 @@ import com.cmhr.listen.data.ai.AiActionType
 import com.cmhr.listen.data.course.ClassRecordEntity
 import com.cmhr.listen.data.course.CourseEntity
 import com.cmhr.listen.data.course.TranscriptEntity
+import com.cmhr.listen.data.stt.AsrPromptMode
 
 @Composable
 fun CoursesScreen(
@@ -63,6 +64,7 @@ fun CoursesScreen(
     openCourse: (Long) -> Unit
 ) {
     var warning by remember { mutableStateOf<String?>(null) }
+    var deleteTarget by remember { mutableStateOf<CourseEntity?>(null) }
     LazyColumn(
         Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
@@ -78,13 +80,24 @@ fun CoursesScreen(
                 selected = state.selectedCourse?.id == course.id,
                 enter = { openCourse(course.id) },
                 rename = { model.renameCourse(course.id, it) },
-                editAsrPrompt = { model.updateCourseAsrPrompt(course.id, it) },
+                editAsrPrompt = { prompt, mode ->
+                    model.updateCourseAsrPrompt(course.id, prompt)
+                    model.updateCourseAsrPromptMode(course.id, mode)
+                },
                 delete = {
                     if (listening.activeRecordId != null) warning = "监听期间不能删除课程，请先停止监听。"
-                    else model.deleteCourse(course.id)
+                    else deleteTarget = course
                 }
             )
         }
+    }
+    deleteTarget?.let { course ->
+        TimedDeleteDialog(
+            title = "删除课程",
+            message = "将删除“${course.name}”及其所有课堂记录、识别内容和 AI 内容。",
+            confirm = { model.deleteCourse(course.id); deleteTarget = null },
+            dismiss = { deleteTarget = null }
+        )
     }
 }
 
@@ -97,6 +110,7 @@ fun CourseRecordsScreen(
     openRecord: (Long) -> Unit
 ) {
     var switchMessage by remember { mutableStateOf<String?>(null) }
+    var deleteTarget by remember { mutableStateOf<ClassRecordEntity?>(null) }
     androidx.compose.runtime.LaunchedEffect(courseId) {
         if (state.selectedCourse?.id != courseId) model.enterCourse(courseId)
     }
@@ -126,10 +140,18 @@ fun CourseRecordsScreen(
                 rename = { model.renameRecord(record.id, it) },
                 delete = {
                     if (listening.activeRecordId == record.id) switchMessage = "当前记录正在监听，停止后才能删除。"
-                    else model.deleteRecord(record.id)
+                    else deleteTarget = record
                 }
             )
         }
+    }
+    deleteTarget?.let { record ->
+        TimedDeleteDialog(
+            title = "删除课堂记录",
+            message = "将删除“${record.name}”及其识别内容和 AI 内容。",
+            confirm = { model.deleteRecord(record.id); deleteTarget = null },
+            dismiss = { deleteTarget = null }
+        )
     }
 }
 
@@ -150,8 +172,6 @@ fun RecordDetailsScreen(
     openConversation: (Long) -> Unit
 ) {
     var debugExpanded by remember { mutableStateOf(false) }
-    var showCustomQuestion by remember { mutableStateOf(false) }
-    var customQuestion by remember { mutableStateOf("") }
     var pendingAction by remember { mutableStateOf<AiActionType?>(null) }
     var pendingActionUsesFullRecord by remember { mutableStateOf(false) }
     var pendingPhotos by remember { mutableStateOf(emptyList<com.cmhr.listen.data.ai.PendingAiPhoto>()) }
@@ -200,7 +220,10 @@ fun RecordDetailsScreen(
                     ) { Text(action.displayName) }
                 }
                 Button(
-                    onClick = { dismissAiActions(); showCustomQuestion = true },
+                    onClick = {
+                        dismissAiActions()
+                        aiModel.createConversationDraft(recordId, segments, openConversation)
+                    },
                     enabled = !aiState.isBusy,
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("自定义提问 / 与 AI 对话") }
@@ -238,45 +261,6 @@ fun RecordDetailsScreen(
             }
         }
     }
-
-    if (showCustomQuestion) AlertDialog(
-        onDismissRequest = {
-            pendingPhotos.forEach(aiModel::discardPhoto)
-            pendingPhotos = emptyList()
-            showCustomQuestion = false
-        },
-        title = { Text("向 AI 提问") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    value = customQuestion,
-                    onValueChange = { customQuestion = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("问题") },
-                    minLines = 3,
-                    maxLines = 8
-                )
-                PhotoAttachmentEditor(pendingPhotos, aiModel) { pendingPhotos = it }
-            }
-        },
-        confirmButton = {
-            Button(
-                onClick = {
-                    val submittedPhotos = pendingPhotos
-                    pendingPhotos = emptyList()
-                    aiModel.createConversation(recordId, customQuestion, segments, submittedPhotos, openConversation)
-                    customQuestion = ""
-                    showCustomQuestion = false
-                },
-                enabled = customQuestion.isNotBlank() && !aiState.isBusy
-            ) { Text("发送") }
-        },
-        dismissButton = { TextButton(onClick = {
-            pendingPhotos.forEach(aiModel::discardPhoto)
-            pendingPhotos = emptyList()
-            showCustomQuestion = false
-        }) { Text("取消") } }
-    )
 
     LazyColumn(
             Modifier.fillMaxSize(),
@@ -357,18 +341,21 @@ private fun CourseCard(
     selected: Boolean,
     enter: () -> Unit,
     rename: (String) -> Unit,
-    editAsrPrompt: (String) -> Unit,
+    editAsrPrompt: (String, String?) -> Unit,
     delete: () -> Unit
 ) {
     var renaming by remember { mutableStateOf(false) }
     var editingPrompt by remember { mutableStateOf(false) }
     var name by remember(course.id, course.name) { mutableStateOf(course.name) }
     var prompt by remember(course.id, course.asrPrompt) { mutableStateOf(course.asrPrompt) }
+    var promptMode by remember(course.id, course.asrPromptModeOverride) { mutableStateOf(course.asrPromptModeOverride) }
     if (renaming) NameDialog("重命名课程", name, { name = it }, { rename(name); renaming = false }, { renaming = false })
     if (editingPrompt) AsrPromptDialog(
         prompt = prompt,
         update = { prompt = it },
-        save = { editAsrPrompt(prompt); editingPrompt = false },
+        modeOverride = promptMode,
+        updateMode = { promptMode = it },
+        save = { editAsrPrompt(prompt, promptMode); editingPrompt = false },
         dismiss = { editingPrompt = false }
     )
     Card(Modifier.fillMaxWidth().clickable(onClick = enter)) {
@@ -398,6 +385,8 @@ private fun CourseCard(
 internal fun AsrPromptDialog(
     prompt: String,
     update: (String) -> Unit,
+    modeOverride: String?,
+    updateMode: (String?) -> Unit,
     save: () -> Unit,
     dismiss: () -> Unit
 ) = AlertDialog(
@@ -406,6 +395,17 @@ internal fun AsrPromptDialog(
     text = {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("填写本课程的专业词、姓名或术语；从下一个尚未入队的片段开始生效。", style = MaterialTheme.typography.bodySmall)
+            Text("课程提示词模式", style = MaterialTheme.typography.titleSmall)
+            val promptModes = listOf<String?>(null) + AsrPromptMode.entries.map { it.name }
+            promptModes.forEach { mode ->
+                androidx.compose.material3.FilterChip(
+                    selected = modeOverride == mode,
+                    onClick = { updateMode(mode) },
+                    label = {
+                        Text(mode?.let { AsrPromptMode.valueOf(it).displayName } ?: "跟随全局")
+                    }
+                )
+            }
             OutlinedTextField(
                 value = prompt,
                 onValueChange = update,

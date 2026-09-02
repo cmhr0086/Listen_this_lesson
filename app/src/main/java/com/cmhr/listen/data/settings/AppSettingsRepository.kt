@@ -3,6 +3,8 @@ package com.cmhr.listen.data.settings
 import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.floatPreferencesKey
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -10,11 +12,17 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import com.cmhr.listen.data.stt.AsrPromptAutoConfig
+import com.cmhr.listen.data.stt.AsrPromptMode
 
 private val Context.appSettingsDataStore by preferencesDataStore(name = "app_settings")
 
 data class ServerSettings(val baseUrl: String = "http://10.0.0.195:8765", val hasApiKey: Boolean = false)
 enum class AiProvider { OPENAI_COMPATIBLE, DEEPSEEK }
+enum class AiThinkingMode(val displayName: String) {
+    DISABLED("关闭"), ENABLED("开启"), SERVICE_DEFAULT("跟随服务")
+}
+enum class AiReasoningEffort { LOW, HIGH, MAX }
 data class AiServiceSettings(
     val provider: AiProvider = AiProvider.OPENAI_COMPATIBLE,
     val baseUrl: String = "https://api.openai.com/v1",
@@ -29,11 +37,27 @@ data class AiPromptSettings(
     val customConversation: String = "你是课堂内容问答助手。只能依据提供的冻结课堂原文回答；若原文不足以回答，应明确说明，不得虚构。",
     val imageContext: String = "请结合附加课堂照片中清晰可见的黑板、课件、公式和图表补充判断；无法辨认的内容必须明确说明，不得猜测。"
 )
+data class AiGenerationSettings(
+    val maxTokens: Int = 8_192,
+    val fixedTemperature: Float = 0.2f,
+    val chatTemperature: Float = 0.7f,
+    val deepSeekThinkingMode: AiThinkingMode = AiThinkingMode.DISABLED,
+    val reasoningEffort: AiReasoningEffort = AiReasoningEffort.HIGH
+) {
+    fun validated() = copy(
+        maxTokens = maxTokens.coerceIn(512, 32_768),
+        fixedTemperature = fixedTemperature.coerceIn(0f, 2f),
+        chatTemperature = chatTemperature.coerceIn(0f, 2f)
+    )
+}
 data class AppSettings(
     val developerMode: Boolean = false,
     val server: ServerSettings = ServerSettings(),
     val ai: AiServiceSettings = AiServiceSettings(),
     val aiPrompts: AiPromptSettings = AiPromptSettings(),
+    val aiGeneration: AiGenerationSettings = AiGenerationSettings(),
+    val globalAsrPromptMode: AsrPromptMode = AsrPromptMode.AUTO,
+    val asrPromptAutoConfig: AsrPromptAutoConfig = AsrPromptAutoConfig(),
     val selectedCourseId: Long? = null,
     val selectedRecordId: Long? = null
 )
@@ -65,6 +89,27 @@ class AppSettingsRepository(private val context: Context) {
                 customConversation = preferences[AI_PROMPT_CHAT] ?: AiPromptSettings().customConversation,
                 imageContext = preferences[AI_PROMPT_IMAGE] ?: AiPromptSettings().imageContext
             ),
+            aiGeneration = AiGenerationSettings(
+                maxTokens = preferences[AI_MAX_TOKENS] ?: AiGenerationSettings().maxTokens,
+                fixedTemperature = preferences[AI_FIXED_TEMPERATURE] ?: AiGenerationSettings().fixedTemperature,
+                chatTemperature = preferences[AI_CHAT_TEMPERATURE] ?: AiGenerationSettings().chatTemperature,
+                deepSeekThinkingMode = preferences[AI_THINKING_MODE]
+                    ?.let { runCatching { AiThinkingMode.valueOf(it) }.getOrNull() }
+                    ?: AiThinkingMode.DISABLED,
+                reasoningEffort = preferences[AI_REASONING_EFFORT]
+                    ?.let { runCatching { AiReasoningEffort.valueOf(it) }.getOrNull() }
+                    ?: AiReasoningEffort.HIGH
+            ).validated(),
+            globalAsrPromptMode = preferences[GLOBAL_ASR_PROMPT_MODE]
+                ?.let { runCatching { AsrPromptMode.valueOf(it) }.getOrNull() }
+                ?: AsrPromptMode.AUTO,
+            asrPromptAutoConfig = AsrPromptAutoConfig(
+                minAudioDurationMs = preferences[ASR_PROMPT_MIN_AUDIO_MS] ?: AsrPromptAutoConfig().minAudioDurationMs,
+                minVoicedDurationMs = preferences[ASR_PROMPT_MIN_VOICED_MS] ?: AsrPromptAutoConfig().minVoicedDurationMs,
+                minMeanSpeechProbability = preferences[ASR_PROMPT_MIN_VAD] ?: AsrPromptAutoConfig().minMeanSpeechProbability,
+                minSpeechFrameRatio = preferences[ASR_PROMPT_MIN_SPEECH_RATIO] ?: AsrPromptAutoConfig().minSpeechFrameRatio,
+                minSnrDb = preferences[ASR_PROMPT_MIN_SNR] ?: AsrPromptAutoConfig().minSnrDb
+            ).validated(),
             selectedCourseId = preferences[SELECTED_COURSE],
             selectedRecordId = preferences[SELECTED_RECORD]
         )
@@ -120,6 +165,48 @@ class AppSettingsRepository(private val context: Context) {
             .forEach(preferences::remove)
     }
 
+    suspend fun saveAiGeneration(value: AiGenerationSettings) {
+        val config = value.validated()
+        context.appSettingsDataStore.edit { preferences ->
+            preferences[AI_MAX_TOKENS] = config.maxTokens
+            preferences[AI_FIXED_TEMPERATURE] = config.fixedTemperature
+            preferences[AI_CHAT_TEMPERATURE] = config.chatTemperature
+            preferences[AI_THINKING_MODE] = config.deepSeekThinkingMode.name
+            preferences[AI_REASONING_EFFORT] = config.reasoningEffort.name
+        }
+    }
+
+    suspend fun restoreDefaultAiGeneration() = context.appSettingsDataStore.edit { preferences ->
+        preferences.remove(AI_MAX_TOKENS)
+        preferences.remove(AI_FIXED_TEMPERATURE)
+        preferences.remove(AI_CHAT_TEMPERATURE)
+        preferences.remove(AI_THINKING_MODE)
+        preferences.remove(AI_REASONING_EFFORT)
+    }
+
+    suspend fun saveGlobalAsrPromptMode(mode: AsrPromptMode) = context.appSettingsDataStore.edit {
+        it[GLOBAL_ASR_PROMPT_MODE] = mode.name
+    }
+
+    suspend fun saveAsrPromptAutoConfig(value: AsrPromptAutoConfig) {
+        val config = value.validated()
+        context.appSettingsDataStore.edit { preferences ->
+            preferences[ASR_PROMPT_MIN_AUDIO_MS] = config.minAudioDurationMs
+            preferences[ASR_PROMPT_MIN_VOICED_MS] = config.minVoicedDurationMs
+            preferences[ASR_PROMPT_MIN_VAD] = config.minMeanSpeechProbability
+            preferences[ASR_PROMPT_MIN_SPEECH_RATIO] = config.minSpeechFrameRatio
+            preferences[ASR_PROMPT_MIN_SNR] = config.minSnrDb
+        }
+    }
+
+    suspend fun restoreDefaultAsrPromptAutoConfig() = context.appSettingsDataStore.edit { preferences ->
+        preferences.remove(ASR_PROMPT_MIN_AUDIO_MS)
+        preferences.remove(ASR_PROMPT_MIN_VOICED_MS)
+        preferences.remove(ASR_PROMPT_MIN_VAD)
+        preferences.remove(ASR_PROMPT_MIN_SPEECH_RATIO)
+        preferences.remove(ASR_PROMPT_MIN_SNR)
+    }
+
     suspend fun selectCourse(courseId: Long?) = context.appSettingsDataStore.edit { preferences ->
         if (courseId == null) preferences.remove(SELECTED_COURSE) else preferences[SELECTED_COURSE] = courseId
         preferences.remove(SELECTED_RECORD)
@@ -144,6 +231,17 @@ class AppSettingsRepository(private val context: Context) {
         val AI_PROMPT_QUICK = stringPreferencesKey("ai_prompt_quick")
         val AI_PROMPT_CHAT = stringPreferencesKey("ai_prompt_chat")
         val AI_PROMPT_IMAGE = stringPreferencesKey("ai_prompt_image")
+        val AI_MAX_TOKENS = intPreferencesKey("ai_max_tokens")
+        val AI_FIXED_TEMPERATURE = floatPreferencesKey("ai_fixed_temperature")
+        val AI_CHAT_TEMPERATURE = floatPreferencesKey("ai_chat_temperature")
+        val AI_THINKING_MODE = stringPreferencesKey("ai_thinking_mode")
+        val AI_REASONING_EFFORT = stringPreferencesKey("ai_reasoning_effort")
+        val GLOBAL_ASR_PROMPT_MODE = stringPreferencesKey("global_asr_prompt_mode")
+        val ASR_PROMPT_MIN_AUDIO_MS = longPreferencesKey("asr_prompt_min_audio_ms")
+        val ASR_PROMPT_MIN_VOICED_MS = longPreferencesKey("asr_prompt_min_voiced_ms")
+        val ASR_PROMPT_MIN_VAD = floatPreferencesKey("asr_prompt_min_vad")
+        val ASR_PROMPT_MIN_SPEECH_RATIO = floatPreferencesKey("asr_prompt_min_speech_ratio")
+        val ASR_PROMPT_MIN_SNR = floatPreferencesKey("asr_prompt_min_snr")
         val SELECTED_COURSE = longPreferencesKey("selected_course_id")
         val SELECTED_RECORD = longPreferencesKey("selected_record_id")
         const val STT_KEY_ALIAS = "listen_stt_api_key"

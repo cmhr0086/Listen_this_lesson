@@ -53,13 +53,21 @@ data class AiResultSegmentEntity(val resultId: Long, val segmentId: Long)
 
 @Entity(
     tableName = "ai_conversations",
-    foreignKeys = [ForeignKey(
-        entity = ClassRecordEntity::class,
-        parentColumns = ["id"],
-        childColumns = ["recordId"],
-        onDelete = ForeignKey.CASCADE
-    )],
-    indices = [Index("recordId")]
+    foreignKeys = [
+        ForeignKey(
+            entity = ClassRecordEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["recordId"],
+            onDelete = ForeignKey.CASCADE
+        ),
+        ForeignKey(
+            entity = AiResultEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["originResultId"],
+            onDelete = ForeignKey.CASCADE
+        )
+    ],
+    indices = [Index("recordId"), Index(value = ["originResultId"], unique = true)]
 )
 data class AiConversationEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
@@ -67,6 +75,7 @@ data class AiConversationEntity(
     val title: String,
     val sourceTextSnapshot: String,
     val systemPrompt: String = DEFAULT_CONVERSATION_PROMPT,
+    val originResultId: Long? = null,
     val createdAt: Long,
     val updatedAt: Long
 )
