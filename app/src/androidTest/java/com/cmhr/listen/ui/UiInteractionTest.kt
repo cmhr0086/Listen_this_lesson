@@ -1,11 +1,14 @@
 package com.cmhr.listen.ui
 
 import android.os.SystemClock
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsEnabled
@@ -16,11 +19,14 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.unit.dp
 import com.cmhr.listen.data.course.TranscriptEntity
 import com.cmhr.listen.SettingsUiState
 import com.cmhr.listen.ListeningUiState
 import com.cmhr.listen.ui.theme.ListenTheme
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -66,6 +72,51 @@ class UiInteractionTest {
         composeRule.onNodeWithTag("compact-listening-status").assertExists()
         composeRule.onNodeWithText("正在收音").assertExists()
         composeRule.onNodeWithText("队列：3", substring = true).assertExists()
+    }
+
+    @Test
+    fun horizontalChoiceSelectorScrollsAndSelectsLastOption() {
+        val options = listOf("跟随全局", "关闭", "自动", "始终使用")
+        var selected by mutableStateOf(options.first())
+        composeRule.setContent {
+            ListenTheme {
+                Box(Modifier.width(220.dp)) {
+                    HorizontalChoiceSelector(
+                        options = options,
+                        selected = selected,
+                        onSelect = { selected = it },
+                        label = { it },
+                        testTag = "test-horizontal-choices",
+                        optionTestTag = { "test-choice-$it" }
+                    )
+                }
+            }
+        }
+
+        composeRule.onNodeWithTag("test-horizontal-choices").performScrollToIndex(3)
+        composeRule.onNodeWithTag("test-choice-始终使用").performClick().assertIsSelected()
+        composeRule.runOnIdle { assertEquals("始终使用", selected) }
+    }
+
+    @Test
+    fun courseAsrPromptDialogUsesScrollableHorizontalChoices() {
+        var mode: String? by mutableStateOf(null)
+        composeRule.setContent {
+            ListenTheme {
+                AsrPromptDialog(
+                    prompt = "创新创业",
+                    update = {},
+                    modeOverride = mode,
+                    updateMode = { mode = it },
+                    save = {},
+                    dismiss = {}
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("course-asr-prompt-modes").performScrollToIndex(3)
+        composeRule.onNodeWithTag("course-asr-prompt-always").performClick().assertIsSelected()
+        composeRule.runOnIdle { assertEquals("ALWAYS", mode) }
     }
 
     @Test

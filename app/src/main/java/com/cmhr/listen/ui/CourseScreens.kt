@@ -12,8 +12,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -428,7 +426,6 @@ private fun CourseCard(
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun AsrPromptDialog(
     prompt: String,
@@ -445,17 +442,14 @@ internal fun AsrPromptDialog(
             Text("填写本课程的专业词、姓名或术语；从下一个尚未入队的片段开始生效。", style = MaterialTheme.typography.bodySmall)
             Text("课程提示词模式", style = MaterialTheme.typography.titleSmall)
             val promptModes = listOf<String?>(null) + AsrPromptMode.entries.map { it.name }
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                promptModes.forEach { mode ->
-                    androidx.compose.material3.FilterChip(
-                        selected = modeOverride == mode,
-                        onClick = { updateMode(mode) },
-                        label = {
-                            Text(mode?.let { AsrPromptMode.valueOf(it).displayName } ?: "跟随全局")
-                        }
-                    )
-                }
-            }
+            HorizontalChoiceSelector(
+                options = promptModes,
+                selected = modeOverride,
+                onSelect = updateMode,
+                label = { mode -> mode?.let { AsrPromptMode.valueOf(it).displayName } ?: "跟随全局" },
+                testTag = "course-asr-prompt-modes",
+                optionTestTag = { "course-asr-prompt-${it?.lowercase() ?: "follow-global"}" }
+            )
             OutlinedTextField(
                 value = prompt,
                 onValueChange = update,

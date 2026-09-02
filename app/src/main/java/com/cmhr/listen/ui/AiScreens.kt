@@ -325,7 +325,7 @@ private fun ChatMessageBubble(
     val isUser = message.role == "user"
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start) {
         Card(
-            modifier = if (isUser) Modifier.widthIn(max = 420.dp) else Modifier.fillMaxWidth(0.9f).widthIn(max = 620.dp),
+            modifier = if (isUser) Modifier.widthIn(max = 420.dp) else Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(22.dp),
             colors = CardDefaults.cardColors(
                 containerColor = if (isUser) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
@@ -359,7 +359,7 @@ private fun AssistantBubble(
     retryEnabled: Boolean = true
 ) = Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
     Card(
-        Modifier.fillMaxWidth(0.9f).widthIn(max = 620.dp),
+        Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(22.dp)
     ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {

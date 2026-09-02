@@ -6,8 +6,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -331,7 +329,6 @@ fun AiPromptsSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun AsrPromptPolicySettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
     var config by remember(state.asrPromptAutoConfig) { mutableStateOf(state.asrPromptAutoConfig) }
@@ -344,15 +341,14 @@ fun AsrPromptPolicySettingsScreen(state: SettingsUiState, model: SettingsViewMod
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("全局提示词模式", style = MaterialTheme.typography.titleMedium)
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        AsrPromptMode.entries.forEach { mode ->
-                            FilterChip(
-                                selected = state.globalAsrPromptMode == mode,
-                                onClick = { model.saveGlobalAsrPromptMode(mode) },
-                                label = { Text(mode.displayName) }
-                            )
-                        }
-                    }
+                    HorizontalChoiceSelector(
+                        options = AsrPromptMode.entries,
+                        selected = state.globalAsrPromptMode,
+                        onSelect = model::saveGlobalAsrPromptMode,
+                        label = AsrPromptMode::displayName,
+                        testTag = "global-asr-prompt-modes",
+                        optionTestTag = { "global-asr-prompt-${it.name.lowercase()}" }
+                    )
                     Text("课程可以覆盖此设置；自动模式只给正常、较长且清晰的片段附带 Prompt。", style = MaterialTheme.typography.bodySmall)
                 }
             }
@@ -392,15 +388,23 @@ fun AiGenerationSettingsScreen(state: SettingsUiState, model: SettingsViewModel)
                     FloatParameter("固定任务温度", "总结、笔记和纠错", value.fixedTemperature, 0f..1.5f, 0.1f) { value = value.copy(fixedTemperature = it) }
                     FloatParameter("对话温度", "课堂问答和追问", value.chatTemperature, 0f..1.5f, 0.1f) { value = value.copy(chatTemperature = it) }
                     Text("DeepSeek 思考", style = MaterialTheme.typography.titleSmall)
-                    AiThinkingMode.entries.forEach { mode ->
-                        FilterChip(selected = value.deepSeekThinkingMode == mode, onClick = { value = value.copy(deepSeekThinkingMode = mode) }, label = { Text(mode.displayName) })
-                    }
+                    HorizontalChoiceSelector(
+                        options = AiThinkingMode.entries,
+                        selected = value.deepSeekThinkingMode,
+                        onSelect = { value = value.copy(deepSeekThinkingMode = it) },
+                        label = AiThinkingMode::displayName,
+                        testTag = "deepseek-thinking-modes",
+                        optionTestTag = { "deepseek-thinking-${it.name.lowercase()}" }
+                    )
                     Text("推理强度", style = MaterialTheme.typography.titleSmall)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        AiReasoningEffort.entries.forEach { effort ->
-                            FilterChip(selected = value.reasoningEffort == effort, onClick = { value = value.copy(reasoningEffort = effort) }, label = { Text(effort.name.lowercase()) })
-                        }
-                    }
+                    HorizontalChoiceSelector(
+                        options = AiReasoningEffort.entries,
+                        selected = value.reasoningEffort,
+                        onSelect = { value = value.copy(reasoningEffort = it) },
+                        label = { it.name.lowercase() },
+                        testTag = "ai-reasoning-efforts",
+                        optionTestTag = { "ai-reasoning-${it.name.lowercase()}" }
+                    )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(onClick = { model.saveAiGeneration(value) }) { Text("保存") }
                         OutlinedButton(onClick = model::restoreDefaultAiGeneration) { Text("恢复默认值") }
