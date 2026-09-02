@@ -20,6 +20,8 @@ interface AiDao {
     suspend fun markResultPending(id: Long)
     @Query("UPDATE ai_results SET status = 'SUCCESS', output = :output, errorMessage = NULL, finishedAt = :finishedAt WHERE id = :id")
     suspend fun completeResult(id: Long, output: String, finishedAt: Long)
+    @Query("UPDATE ai_results SET output = :output WHERE id = :id AND status = 'PENDING'")
+    suspend fun updateResultDraft(id: Long, output: String)
     @Query("UPDATE ai_results SET status = 'ERROR', errorMessage = :message, finishedAt = :finishedAt WHERE id = :id")
     suspend fun failResult(id: Long, message: String, finishedAt: Long)
     @Query("DELETE FROM ai_results WHERE id = :id") suspend fun deleteResult(id: Long)
@@ -45,6 +47,8 @@ interface AiDao {
     suspend fun messagesOnce(conversationId: Long): List<AiMessageEntity>
     @Query("UPDATE ai_messages SET status = 'SUCCESS', content = :content, errorMessage = NULL, finishedAt = :finishedAt WHERE id = :id")
     suspend fun completeMessage(id: Long, content: String, finishedAt: Long)
+    @Query("UPDATE ai_messages SET content = :content WHERE id = :id AND status = 'PENDING'")
+    suspend fun updateMessageDraft(id: Long, content: String)
     @Query("UPDATE ai_messages SET status = 'ERROR', errorMessage = :message, finishedAt = :finishedAt WHERE id = :id")
     suspend fun failMessage(id: Long, message: String, finishedAt: Long)
 

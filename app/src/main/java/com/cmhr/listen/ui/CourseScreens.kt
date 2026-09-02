@@ -12,6 +12,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -31,10 +33,12 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -49,12 +53,14 @@ import com.cmhr.listen.AiViewModel
 import com.cmhr.listen.CourseUiState
 import com.cmhr.listen.CourseViewModel
 import com.cmhr.listen.ListeningUiState
-import com.cmhr.listen.TranscriptStatus
 import com.cmhr.listen.data.ai.AiActionType
 import com.cmhr.listen.data.course.ClassRecordEntity
 import com.cmhr.listen.data.course.CourseEntity
 import com.cmhr.listen.data.course.TranscriptEntity
 import com.cmhr.listen.data.stt.AsrPromptMode
+import android.os.SystemClock
+import kotlinx.coroutines.delay
+import java.util.Locale
 
 @Composable
 fun CoursesScreen(
@@ -169,7 +175,8 @@ fun RecordDetailsScreen(
     requestedFullAction: AiActionType?,
     consumeFullAction: () -> Unit,
     openResult: (Long) -> Unit,
-    openConversation: (Long) -> Unit
+    openConversation: (Long) -> Unit,
+    stopListening: () -> Unit = {}
 ) {
     var debugExpanded by remember { mutableStateOf(false) }
     var pendingAction by remember { mutableStateOf<AiActionType?>(null) }
@@ -179,9 +186,6 @@ fun RecordDetailsScreen(
     val record = state.selectedRecord?.takeIf { it.id == recordId }
     val course = record?.let { selected -> state.courses.firstOrNull { it.id == selected.courseId } }
     val segments = state.detailSegments.filter { it.recordId == recordId }
-    val temporarySegments = listening.transcriptSegments
-        .filter { it.recordId == recordId && it.status != TranscriptStatus.SUCCESS }
-        .asReversed()
     val selectedIds = aiState.takeIf { it.selectionRecordId == recordId }?.selectedSegmentIds.orEmpty()
     val selectionMode = aiState.selectionRecordId == recordId
     val isThisRecordListening = listening.activeRecordId == recordId && listening.isListening
@@ -262,8 +266,9 @@ fun RecordDetailsScreen(
         }
     }
 
-    LazyColumn(
-            Modifier.fillMaxSize(),
+    Column(Modifier.fillMaxSize()) {
+        LazyColumn(
+            Modifier.weight(1f).fillMaxWidth(),
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
@@ -273,26 +278,13 @@ fun RecordDetailsScreen(
                     RecordDetailCard(course, record, segments, developerMode)
                 }
                 item("listening-status") {
-                    Card(Modifier.fillMaxWidth()) {
-                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text(if (isThisRecordListening) "正在监听" else "未监听", style = MaterialTheme.typography.titleLarge)
-                            if (isThisRecordListening) {
-                                Text("识别队列：${listening.pendingQueueCount} · ${if (listening.isRecognizing) "正在识别" else "等待语音"}")
-                                Text("当前语音片段：${if (listening.isSpeechDetected) "活动中" else "未活动"}")
-                            }
-                            Text(if (isThisRecordListening) "可使用全局红色悬浮按钮停止。" else "使用右下角悬浮按钮开始监听。", style = MaterialTheme.typography.bodySmall)
-                        }
-                    }
+                    CompactListeningStatus(listening, isThisRecordListening)
                 }
                 listening.error?.let { item("listening-error") { ErrorCard(it) } }
                 aiState.error?.let { item("ai-error") { ErrorCard(it) } }
                 if (developerMode) {
                     item("vad-debug-header") { ExpandHeader("VAD 调试", debugExpanded) { debugExpanded = !debugExpanded } }
                     if (debugExpanded) item("vad-debug-content") { VadDebugCard(listening) }
-                }
-                if (temporarySegments.isNotEmpty()) {
-                    item("temporary-heading") { Text("实时处理", style = MaterialTheme.typography.titleMedium) }
-                    items(temporarySegments, key = { "temporary-${it.id}" }) { RuntimeTranscriptCard(it) }
                 }
                 item("segment-heading") { Text("识别内容", style = MaterialTheme.typography.titleLarge) }
                 if (segments.isEmpty()) item("empty-segments") { Text("该课堂记录暂无识别内容。") }
@@ -304,6 +296,61 @@ fun RecordDetailsScreen(
                 }
             }
         }
+        if (isThisRecordListening) {
+            RecordListeningStopBar(stopListening)
+        }
+    }
+}
+
+@Composable
+internal fun RecordListeningStopBar(stop: () -> Unit) = Surface(tonalElevation = 4.dp) {
+    Button(
+        onClick = stop,
+        modifier = Modifier.fillMaxWidth().padding(12.dp).testTag("record-stop-listening"),
+        colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+            containerColor = MaterialTheme.colorScheme.error,
+            contentColor = MaterialTheme.colorScheme.onError
+        )
+    ) { Text("停止监听") }
+}
+
+@Composable
+internal fun CompactListeningStatus(listening: ListeningUiState, active: Boolean) {
+    val status = when {
+        !active -> "未监听"
+        listening.isSpeechDetected -> "正在收音"
+        listening.isRecognizing -> "正在识别"
+        else -> "等待语音"
+    }
+    Card(Modifier.fillMaxWidth().testTag("compact-listening-status")) {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text(if (active) "正在监听" else "未监听", style = MaterialTheme.typography.titleMedium)
+                ListeningElapsedText(if (active) listening.listeningStartedAtElapsedRealtimeMs else null)
+            }
+            Text(status, color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                "检测到语音：${if (active && listening.isSpeechDetected) "是" else "否"}  ·  正在识别：${if (active && listening.isRecognizing) "是" else "否"}  ·  队列：${if (active) listening.pendingQueueCount else 0}",
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+    }
+}
+
+@Composable
+private fun ListeningElapsedText(startedAt: Long?) {
+    var elapsed by remember(startedAt) { mutableLongStateOf(0L) }
+    androidx.compose.runtime.LaunchedEffect(startedAt) {
+        while (startedAt != null) {
+            elapsed = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
+            delay(1_000)
+        }
+    }
+    val seconds = elapsed / 1_000
+    Text(
+        String.format(Locale.US, "%02d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60),
+        style = MaterialTheme.typography.labelLarge
+    )
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -381,6 +428,7 @@ private fun CourseCard(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun AsrPromptDialog(
     prompt: String,
@@ -397,14 +445,16 @@ internal fun AsrPromptDialog(
             Text("填写本课程的专业词、姓名或术语；从下一个尚未入队的片段开始生效。", style = MaterialTheme.typography.bodySmall)
             Text("课程提示词模式", style = MaterialTheme.typography.titleSmall)
             val promptModes = listOf<String?>(null) + AsrPromptMode.entries.map { it.name }
-            promptModes.forEach { mode ->
-                androidx.compose.material3.FilterChip(
-                    selected = modeOverride == mode,
-                    onClick = { updateMode(mode) },
-                    label = {
-                        Text(mode?.let { AsrPromptMode.valueOf(it).displayName } ?: "跟随全局")
-                    }
-                )
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                promptModes.forEach { mode ->
+                    androidx.compose.material3.FilterChip(
+                        selected = modeOverride == mode,
+                        onClick = { updateMode(mode) },
+                        label = {
+                            Text(mode?.let { AsrPromptMode.valueOf(it).displayName } ?: "跟随全局")
+                        }
+                    )
+                }
             }
             OutlinedTextField(
                 value = prompt,

@@ -2,7 +2,6 @@ package com.cmhr.listen.ui
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.os.SystemClock
 import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -24,7 +23,6 @@ import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.School
 import androidx.compose.material.icons.outlined.Settings
-import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -46,12 +44,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
@@ -71,9 +67,8 @@ import com.cmhr.listen.CourseViewModel
 import com.cmhr.listen.SettingsViewModel
 import com.cmhr.listen.SttViewModel
 import com.cmhr.listen.data.ai.AiActionType
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
-import java.util.Locale
+import kotlinx.coroutines.flow.flowOf
 
 private enum class MainDestination(val route: String, val label: String) {
     COURSES("courses", "课程"),
@@ -85,7 +80,6 @@ private sealed interface FabState {
     data object NewCourse : FabState
     data class NewRecord(val courseId: Long) : FabState
     data class StartListening(val recordId: Long) : FabState
-    data class StopListening(val startedAt: Long?) : FabState
 }
 
 private fun isSettingsRoute(route: String?): Boolean = route == "settings" || route?.startsWith("settings/") == true
@@ -141,9 +135,20 @@ fun ListenApp(
     var requestedFullAiAction by remember { mutableStateOf<AiActionType?>(null) }
     var confirmDeleteAiContents by remember { mutableStateOf(false) }
     var confirmDeleteTranscripts by remember { mutableStateOf(false) }
+    var aiContextMenuExpanded by remember { mutableStateOf(false) }
+    var showAiContext by remember { mutableStateOf(false) }
 
     val courseId = backStackEntry?.arguments?.getString("courseId")?.toLongOrNull()
     val recordId = backStackEntry?.arguments?.getString("recordId")?.toLongOrNull()
+    val resultId = backStackEntry?.arguments?.getString("resultId")?.toLongOrNull()
+    val conversationId = backStackEntry?.arguments?.getString("conversationId")?.toLongOrNull()
+    val headerResult by remember(resultId) {
+        resultId?.let(ai::result) ?: flowOf<com.cmhr.listen.data.ai.AiResultEntity?>(null)
+    }.collectAsStateWithLifecycle(initialValue = null)
+    val headerConversation by remember(conversationId) {
+        conversationId?.let(ai::conversation) ?: flowOf<com.cmhr.listen.data.ai.AiConversationEntity?>(null)
+    }.collectAsStateWithLifecycle(initialValue = null)
+    val aiContextSnapshot = headerResult?.sourceTextSnapshot ?: headerConversation?.sourceTextSnapshot
     val selectionMode = route == "record/{recordId}" && recordId != null && aiState.selectionRecordId == recordId
     val contentSelectionMode = route == "record/{recordId}/ai-results" && recordId != null && aiState.contentSelectionRecordId == recordId
     val currentRecord = courseState.selectedRecord?.takeIf { it.id == recordId }
@@ -163,6 +168,8 @@ fun ListenApp(
     }
     LaunchedEffect(route) {
         recordMenuExpanded = false
+        aiContextMenuExpanded = false
+        showAiContext = false
         if (!selectionMode) showSelectionAiActions = false
     }
     LaunchedEffect(nav) {
@@ -244,11 +251,14 @@ fun ListenApp(
         },
         dismiss = { confirmDeleteTranscripts = false }
     )
+    if (showAiContext && aiContextSnapshot != null) {
+        AiContextBottomSheet(snapshot = aiContextSnapshot, dismiss = { showAiContext = false })
+    }
 
     val nested = route != "courses" && route != "settings"
     val fabState: FabState = when {
         isAiWorkspaceRoute(route) -> FabState.None
-        sttState.isListening -> FabState.StopListening(sttState.listeningStartedAtElapsedRealtimeMs)
+        sttState.isListening -> FabState.None
         route == "courses" -> FabState.NewCourse
         route == "course/{courseId}" && courseId != null -> FabState.NewRecord(courseId)
         route == "record/{recordId}" && recordId != null && !selectionMode -> FabState.StartListening(recordId)
@@ -313,6 +323,34 @@ fun ListenApp(
                         editingRecordCoursePrompt = currentCourse != null
                     }
                 )
+                route == "record/{recordId}/ai-result/{resultId}" || route == "ai-conversation/{conversationId}" -> TopAppBar(
+                    title = { Text(routeTitle(route)) },
+                    navigationIcon = {
+                        IconButton(onClick = { nav.popBackStack() }) {
+                            Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
+                        }
+                    },
+                    actions = {
+                        IconButton(onClick = { aiContextMenuExpanded = true }) {
+                            Icon(Icons.Outlined.MoreVert, contentDescription = "更多操作")
+                        }
+                        DropdownMenu(
+                            expanded = aiContextMenuExpanded,
+                            onDismissRequest = { aiContextMenuExpanded = false },
+                            modifier = Modifier.widthIn(min = 220.dp),
+                            shape = RoundedCornerShape(20.dp)
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("课堂原文上下文") },
+                                enabled = aiContextSnapshot != null,
+                                onClick = {
+                                    aiContextMenuExpanded = false
+                                    showAiContext = true
+                                }
+                            )
+                        }
+                    }
+                )
                 else -> TopAppBar(
                     title = { Text(routeTitle(route)) },
                     navigationIcon = {
@@ -367,7 +405,6 @@ fun ListenApp(
                             permissionLauncher.launch(permissions.toTypedArray())
                         }
                     }
-                    is FabState.StopListening -> stt.stopListening()
                     FabState.None -> Unit
                 }
             }
@@ -417,7 +454,8 @@ fun ListenApp(
                     requestedFullAction = requestedFullAiAction,
                     consumeFullAction = { requestedFullAiAction = null },
                     openResult = { nav.navigate("record/$id/ai-result/$it") },
-                    openConversation = { nav.navigate("ai-conversation/$it") }
+                    openConversation = { nav.navigate("ai-conversation/$it") },
+                    stopListening = stt::stopListening
                 )
             }
             composable("settings") {
@@ -570,54 +608,28 @@ private fun AnimatedAppFab(state: FabState, click: (FabState) -> Unit) {
     ) {
         when (state) {
             FabState.None -> Unit
-            FabState.NewCourse -> AnimatedFabContent("新建课程", Icons.Outlined.Add, false) { click(state) }
-            is FabState.NewRecord -> AnimatedFabContent("新建课堂记录", Icons.Outlined.Add, false) { click(state) }
-            is FabState.StartListening -> AnimatedFabContent("开始监听", Icons.Outlined.Mic, false) { click(state) }
-            is FabState.StopListening -> AnimatedFabContent(null, Icons.Outlined.Stop, true, state.startedAt) { click(state) }
+            FabState.NewCourse -> AnimatedFabContent("新建课程", Icons.Outlined.Add) { click(state) }
+            is FabState.NewRecord -> AnimatedFabContent("新建课堂记录", Icons.Outlined.Add) { click(state) }
+            is FabState.StartListening -> AnimatedFabContent("开始监听", Icons.Outlined.Mic) { click(state) }
         }
     }
 }
 
 @Composable
 private fun AnimatedFabContent(
-    label: String?,
+    label: String,
     icon: ImageVector,
-    stopping: Boolean,
-    startedAt: Long? = null,
     click: () -> Unit
 ) {
-    val container = androidx.compose.animation.animateColorAsState(
-        targetValue = if (stopping) Color(0xFFB3261E) else androidx.compose.material3.MaterialTheme.colorScheme.primaryContainer,
-        animationSpec = tween(FAB_ANIMATION_DURATION_MS, easing = FastOutSlowInEasing),
-        label = "悬浮按钮颜色"
-    ).value
-    val content = if (stopping) Color.White else androidx.compose.material3.MaterialTheme.colorScheme.onPrimaryContainer
     ExtendedFloatingActionButton(
         modifier = Modifier.testTag("global-fab").height(64.dp),
-        text = {
-            if (stopping) ListeningTimerLabel(startedAt)
-            else Text(label.orEmpty(), style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
-        },
-        icon = { Icon(icon, contentDescription = if (stopping) "停止监听" else label) },
+        text = { Text(label, style = androidx.compose.material3.MaterialTheme.typography.titleMedium) },
+        icon = { Icon(icon, contentDescription = label) },
         onClick = click,
-        containerColor = container,
-        contentColor = content,
+        containerColor = androidx.compose.material3.MaterialTheme.colorScheme.primaryContainer,
+        contentColor = androidx.compose.material3.MaterialTheme.colorScheme.onPrimaryContainer,
         shape = RoundedCornerShape(22.dp)
     )
-}
-
-@Composable
-private fun ListeningTimerLabel(startedAt: Long?) {
-    var elapsed by remember(startedAt) { mutableLongStateOf(0L) }
-    LaunchedEffect(startedAt) {
-        while (startedAt != null) {
-            elapsed = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
-            delay(1_000)
-        }
-    }
-    val seconds = elapsed / 1_000
-    val text = String.format(Locale.US, "%02d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60)
-    Text("停止监听 $text", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
 }
 
 @Composable
@@ -627,17 +639,5 @@ internal fun AppFab(label: String, icon: ImageVector, click: () -> Unit) {
         text = { Text(label) },
         icon = { Icon(icon, contentDescription = label) },
         onClick = click
-    )
-}
-
-@Composable
-internal fun ListeningStopFab(startedAt: Long?, modifier: Modifier = Modifier, stop: () -> Unit) {
-    ExtendedFloatingActionButton(
-        modifier = modifier.testTag("global-fab"),
-        text = { ListeningTimerLabel(startedAt) },
-        icon = { Icon(Icons.Outlined.Stop, contentDescription = "停止监听") },
-        onClick = stop,
-        containerColor = Color(0xFFB3261E),
-        contentColor = Color.White
     )
 }

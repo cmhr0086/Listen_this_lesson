@@ -2,6 +2,8 @@ package com.cmhr.listen.ui
 
 import android.content.ClipboardManager
 import android.graphics.BitmapFactory
+import android.text.method.LinkMovementMethod
+import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -17,6 +19,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -24,9 +27,12 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -34,6 +40,10 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.Surface
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CameraAlt
 import androidx.compose.material.icons.outlined.ContentCopy
@@ -46,14 +56,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.cmhr.listen.AiViewModel
 import com.cmhr.listen.AiContentKey
@@ -62,9 +76,11 @@ import com.cmhr.listen.data.ai.PendingAiPhoto
 import com.cmhr.listen.data.ai.AiImageAttachmentEntity
 import com.cmhr.listen.data.ai.AiActionType
 import com.cmhr.listen.data.ai.AiRequestStatus
+import com.cmhr.listen.data.ai.AiStreamPhase
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.flowOf
+import io.noties.markwon.Markwon
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -121,16 +137,26 @@ fun AiResultDetailScreen(resultId: Long, model: AiViewModel, developerMode: Bool
         .collectAsStateWithLifecycle(initialValue = emptyList())
     val attachments by model.resultAttachments(resultId).collectAsStateWithLifecycle(initialValue = emptyList())
     val aiState by model.uiState.collectAsStateWithLifecycle()
-    var showSnapshot by remember { mutableStateOf(false) }
     var question by remember { mutableStateOf("") }
     var photos by remember { mutableStateOf(emptyList<PendingAiPhoto>()) }
     val context = LocalContext.current
     val clipboard = remember(context) { context.getSystemService(ClipboardManager::class.java) }
     val latestPhotos by rememberUpdatedState(photos)
     DisposableEffect(resultId) { onDispose { latestPhotos.forEach(model::discardPhoto) } }
+    val listState = rememberLazyListState()
+    var followLatest by remember { mutableStateOf(true) }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress to listState.canScrollForward }.collect { (scrolling, canScrollForward) ->
+            if (scrolling) followLatest = !canScrollForward
+        }
+    }
+    LaunchedEffect(messages.size, messages.lastOrNull()?.content) {
+        if (followLatest && messages.isNotEmpty()) listState.scrollToItem(messages.size + 1)
+    }
     Column(Modifier.fillMaxSize()) {
         LazyColumn(
             Modifier.weight(1f).fillMaxWidth(),
+            state = listState,
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
@@ -140,22 +166,35 @@ fun AiResultDetailScreen(resultId: Long, model: AiViewModel, developerMode: Bool
                 item("result-heading") { Text(actionName(value.actionType), style = MaterialTheme.typography.titleLarge) }
                 item("result-summary") {
                     when (value.status) {
-                        AiRequestStatus.PENDING.name -> AssistantBubble("AI 正在处理，请稍候……", emptyList(), model, clipboard)
-                        AiRequestStatus.SUCCESS.name -> AssistantBubble(value.output.orEmpty(), attachments, model, clipboard)
-                        else -> Card(Modifier.fillMaxWidth()) {
-                            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Text(value.errorMessage ?: "AI 请求失败。", color = MaterialTheme.colorScheme.error)
-                                Button(onClick = { model.retryResult(value.id) }, enabled = !aiState.isBusy) { Text("重试") }
-                            }
-                        }
+                        AiRequestStatus.PENDING.name -> AssistantBubble(
+                            text = value.output.orEmpty(),
+                            status = value.status,
+                            phase = aiState.resultStreamPhases[value.id],
+                            photos = attachments,
+                            model = model,
+                            clipboard = clipboard
+                        )
+                        AiRequestStatus.SUCCESS.name -> AssistantBubble(
+                            text = value.output.orEmpty(),
+                            status = value.status,
+                            photos = attachments,
+                            model = model,
+                            clipboard = clipboard
+                        )
+                        else -> AssistantBubble(
+                            text = value.output.orEmpty(),
+                            status = value.status,
+                            error = value.errorMessage ?: "AI 请求失败。",
+                            photos = attachments,
+                            model = model,
+                            clipboard = clipboard,
+                            retry = { model.retryResult(value.id) },
+                            retryEnabled = !aiState.isBusy
+                        )
                     }
                 }
-                item("snapshot-toggle") { ExpandHeader("课堂原文上下文", showSnapshot) { showSnapshot = !showSnapshot } }
-                if (showSnapshot) item("snapshot-content") {
-                    Card(Modifier.fillMaxWidth()) { Text(value.sourceTextSnapshot, Modifier.padding(16.dp), style = MaterialTheme.typography.bodyLarge) }
-                }
                 items(messages, key = { "result-message-${it.id}" }) { message ->
-                    ChatMessageBubble(message, model, clipboard)
+                    ChatMessageBubble(message, aiState.messageStreamPhases[message.id], model, clipboard)
                 }
             }
             aiState.error?.let { item("result-error") { Text(it, color = MaterialTheme.colorScheme.error) } }
@@ -208,7 +247,6 @@ fun AiConversationScreen(conversationId: Long, model: AiViewModel, developerMode
     val messages by model.messages(conversationId).collectAsStateWithLifecycle(initialValue = emptyList())
     val aiState by model.uiState.collectAsStateWithLifecycle()
     var question by remember { mutableStateOf("") }
-    var showSource by remember { mutableStateOf(false) }
     var photos by remember { mutableStateOf(emptyList<PendingAiPhoto>()) }
     val context = LocalContext.current
     val clipboard = remember(context) { context.getSystemService(ClipboardManager::class.java) }
@@ -216,18 +254,30 @@ fun AiConversationScreen(conversationId: Long, model: AiViewModel, developerMode
     DisposableEffect(conversationId) {
         onDispose { latestPhotos.forEach(model::discardPhoto) }
     }
+    val listState = rememberLazyListState()
+    var followLatest by remember { mutableStateOf(true) }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress to listState.canScrollForward }.collect { (scrolling, canScrollForward) ->
+            if (scrolling) followLatest = !canScrollForward
+        }
+    }
+    LaunchedEffect(messages.size, messages.lastOrNull()?.content, conversation?.id) {
+        if (followLatest && messages.isNotEmpty()) {
+            val titleOffset = if (conversation != null) 1 else 0
+            listState.scrollToItem(messages.lastIndex + titleOffset)
+        }
+    }
     Column(Modifier.fillMaxSize()) {
         LazyColumn(
             Modifier.weight(1f).fillMaxWidth(),
+            state = listState,
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             conversation?.let { value -> item("conversation-title") { Text(value.title, style = MaterialTheme.typography.titleLarge) } }
-            item("conversation-source-toggle") { ExpandHeader("课堂原文上下文", showSource) { showSource = !showSource } }
-            if (showSource) item("conversation-source-snapshot") {
-                Card(Modifier.fillMaxWidth()) { Text(conversation?.sourceTextSnapshot.orEmpty(), Modifier.padding(16.dp)) }
+            items(messages, key = { "message-${it.id}" }) { message ->
+                ChatMessageBubble(message, aiState.messageStreamPhases[message.id], model, clipboard)
             }
-            items(messages, key = { "message-${it.id}" }) { message -> ChatMessageBubble(message, model, clipboard) }
             aiState.error?.let { item("conversation-error") { Text(it, color = MaterialTheme.colorScheme.error) } }
             if (developerMode) aiState.lastDiagnostics?.let { diagnostics ->
                 item("conversation-diagnostics") { AiDiagnosticsCard(diagnostics) }
@@ -267,6 +317,7 @@ private fun AiDiagnosticsCard(value: com.cmhr.listen.AiRequestDiagnostics) = Car
 @Composable
 private fun ChatMessageBubble(
     message: com.cmhr.listen.data.ai.AiMessageEntity,
+    phase: AiStreamPhase?,
     model: AiViewModel,
     clipboard: ClipboardManager?
 ) {
@@ -274,20 +325,22 @@ private fun ChatMessageBubble(
     val isUser = message.role == "user"
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start) {
         Card(
-            Modifier.widthIn(max = 340.dp),
+            modifier = if (isUser) Modifier.widthIn(max = 420.dp) else Modifier.fillMaxWidth(0.9f).widthIn(max = 620.dp),
+            shape = RoundedCornerShape(22.dp),
             colors = CardDefaults.cardColors(
                 containerColor = if (isUser) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
             )
         ) {
-            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(if (isUser) "我" else "AI", style = MaterialTheme.typography.labelLarge)
-                when (message.status) {
-                    AiRequestStatus.PENDING.name -> Text("正在生成回复……")
-                    AiRequestStatus.ERROR.name -> Text(message.errorMessage ?: "回复失败。", color = MaterialTheme.colorScheme.error)
-                    else -> Text(message.content, style = MaterialTheme.typography.bodyLarge)
+                if (isUser) {
+                    Text(message.content, style = MaterialTheme.typography.bodyLarge)
+                } else {
+                    if (message.content.isNotBlank()) MarkdownText(message.content)
+                    StreamStatus(message.status, phase, message.errorMessage)
                 }
                 if (photos.isNotEmpty()) PersistedPhotoRow(photos, model)
-                if (!isUser && message.status == AiRequestStatus.SUCCESS.name) CopyButton(message.content, clipboard)
+                if (!isUser && message.content.isNotBlank()) CopyButton(message.content, clipboard)
             }
         }
     }
@@ -296,18 +349,77 @@ private fun ChatMessageBubble(
 @Composable
 private fun AssistantBubble(
     text: String,
+    status: String,
+    phase: AiStreamPhase? = null,
+    error: String? = null,
     photos: List<AiImageAttachmentEntity>,
     model: AiViewModel,
-    clipboard: ClipboardManager?
+    clipboard: ClipboardManager?,
+    retry: (() -> Unit)? = null,
+    retryEnabled: Boolean = true
 ) = Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
-    Card(Modifier.widthIn(max = 340.dp)) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Card(
+        Modifier.fillMaxWidth(0.9f).widthIn(max = 620.dp),
+        shape = RoundedCornerShape(22.dp)
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("AI", style = MaterialTheme.typography.labelLarge)
-            Text(text, style = MaterialTheme.typography.bodyLarge)
+            if (text.isNotBlank()) MarkdownText(text)
+            StreamStatus(status, phase, error)
             if (photos.isNotEmpty()) PersistedPhotoRow(photos, model)
-            CopyButton(text, clipboard)
+            if (text.isNotBlank()) CopyButton(text, clipboard)
+            if (status == AiRequestStatus.ERROR.name && retry != null) {
+                Button(onClick = retry, enabled = retryEnabled) { Text("重试") }
+            }
         }
     }
+}
+
+@Composable
+private fun StreamStatus(status: String, phase: AiStreamPhase?, error: String?) {
+    when (status) {
+        AiRequestStatus.PENDING.name -> Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+            Text(
+                when (phase) {
+                    AiStreamPhase.THINKING -> "正在思考……"
+                    AiStreamPhase.GENERATING -> "正在生成……"
+                    else -> "正在连接 AI……"
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        AiRequestStatus.ERROR.name -> Text(error ?: "AI 请求失败。", color = MaterialTheme.colorScheme.error)
+    }
+}
+
+@Composable
+private fun MarkdownText(markdown: String, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val markwon = remember(context) { Markwon.create(context) }
+    val color = MaterialTheme.colorScheme.onSurface.toArgb()
+    val linkColor = MaterialTheme.colorScheme.primary.toArgb()
+    val fontSize = MaterialTheme.typography.bodyLarge.fontSize.value
+    AndroidView(
+        modifier = modifier.fillMaxWidth(),
+        factory = { viewContext ->
+            TextView(viewContext).apply {
+                movementMethod = LinkMovementMethod.getInstance()
+                setTextIsSelectable(true)
+                includeFontPadding = false
+            }
+        },
+        update = { view ->
+            view.setTextColor(color)
+            view.setLinkTextColor(linkColor)
+            view.textSize = fontSize
+            markwon.setMarkdown(view, markdown)
+        }
+    )
 }
 
 @Composable
@@ -341,8 +453,12 @@ private fun AiChatComposer(
             if (photo != null) updatePhotos(latestPhotos + photo)
         } else capture?.file?.delete()
     }
-    Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)) {
-        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Surface(
+        Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        tonalElevation = 3.dp
+    ) {
+        Column(Modifier.padding(horizontal = 10.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (photos.isNotEmpty()) LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(photos, key = { it.absolutePath }) { photo ->
                     Box {
@@ -351,7 +467,7 @@ private fun AiChatComposer(
                     }
                 }
             }
-            Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 IconButton(
                     onClick = { model.createCaptureTarget().also { target = it; launcher.launch(it.uri) } },
                     enabled = enabled && photos.size < com.cmhr.listen.data.ai.AiPhotoStore.MAX_PHOTOS_PER_REQUEST
@@ -362,10 +478,34 @@ private fun AiChatComposer(
                     modifier = Modifier.weight(1f),
                     placeholder = { Text("输入问题") },
                     minLines = 1,
-                    maxLines = 5
+                    maxLines = 6,
+                    shape = RoundedCornerShape(28.dp)
                 )
-                IconButton(onClick = send, enabled = enabled && value.isNotBlank()) {
+                FilledIconButton(onClick = send, enabled = enabled && value.isNotBlank()) {
                     Icon(Icons.AutoMirrored.Outlined.Send, contentDescription = "发送")
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AiContextBottomSheet(snapshot: String, dismiss: () -> Unit) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(onDismissRequest = dismiss, sheetState = sheetState) {
+        LazyColumn(
+            Modifier.fillMaxWidth().fillMaxHeight(0.9f),
+            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 32.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            item("context-title") { Text("课堂原文上下文", style = MaterialTheme.typography.titleLarge) }
+            item("context-help") {
+                Text("这是创建当前 AI 结果或对话时冻结的课堂原文。", style = MaterialTheme.typography.bodySmall)
+            }
+            item("context-body") {
+                Card(Modifier.fillMaxWidth()) {
+                    Text(snapshot.ifBlank { "没有可显示的课堂原文。" }, Modifier.padding(16.dp), style = MaterialTheme.typography.bodyLarge)
                 }
             }
         }

@@ -19,6 +19,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import com.cmhr.listen.data.course.TranscriptEntity
 import com.cmhr.listen.SettingsUiState
+import com.cmhr.listen.ListeningUiState
 import com.cmhr.listen.ui.theme.ListenTheme
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -38,12 +39,33 @@ class UiInteractionTest {
     }
 
     @Test
-    fun listeningFabShowsStopAndElapsedDuration() {
+    fun listeningStopUsesFixedRecordActionBar() {
         composeRule.setContent {
-            ListenTheme { ListeningStopFab(SystemClock.elapsedRealtime() - 2_000, stop = {}) }
+            ListenTheme { RecordListeningStopBar(stop = {}) }
         }
-        composeRule.onNodeWithText("停止监听", substring = true, useUnmergedTree = true)
-            .assertTextContains("停止监听", substring = true)
+        composeRule.onNodeWithTag("record-stop-listening").assertExists()
+        composeRule.onNodeWithText("停止监听").assertTextContains("停止监听")
+    }
+
+    @Test
+    fun compactListeningStatusShowsCaptureAndQueueState() {
+        composeRule.setContent {
+            ListenTheme {
+                CompactListeningStatus(
+                    listening = ListeningUiState(
+                        isListening = true,
+                        isSpeechDetected = true,
+                        isRecognizing = true,
+                        pendingQueueCount = 3,
+                        listeningStartedAtElapsedRealtimeMs = SystemClock.elapsedRealtime() - 2_000
+                    ),
+                    active = true
+                )
+            }
+        }
+        composeRule.onNodeWithTag("compact-listening-status").assertExists()
+        composeRule.onNodeWithText("正在收音").assertExists()
+        composeRule.onNodeWithText("队列：3", substring = true).assertExists()
     }
 
     @Test

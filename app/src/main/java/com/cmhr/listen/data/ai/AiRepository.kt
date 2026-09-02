@@ -43,6 +43,7 @@ class AiRepository(
 
     suspend fun resultOnce(id: Long) = dao.resultOnce(id)
     suspend fun markResultPending(id: Long) = dao.markResultPending(id)
+    suspend fun updateResultDraft(id: Long, output: String) = dao.updateResultDraft(id, output)
     suspend fun completeResult(id: Long, output: String) = dao.completeResult(id, output, System.currentTimeMillis())
     suspend fun failResult(id: Long, message: String) = dao.failResult(id, message, System.currentTimeMillis())
     suspend fun resultAttachmentsOnce(id: Long) = dao.resultAttachmentsOnce(id)
@@ -116,6 +117,8 @@ class AiRepository(
             dao.touchConversation(conversationId, now)
         }
     }
+
+    suspend fun updateMessageDraft(messageId: Long, content: String) = dao.updateMessageDraft(messageId, content)
 
     suspend fun failMessage(conversationId: Long, messageId: Long, message: String) {
         val now = System.currentTimeMillis()

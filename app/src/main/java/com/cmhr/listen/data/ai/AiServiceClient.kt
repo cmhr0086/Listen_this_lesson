@@ -7,7 +7,11 @@ import java.io.IOException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.job
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -48,6 +52,17 @@ data class AiCompletion(
     val completionTokens: Int?,
     val reasoningPresent: Boolean,
     val durationMs: Long
+)
+
+enum class AiStreamPhase { CONNECTING, THINKING, GENERATING }
+
+data class AiStreamUpdate(
+    val content: String,
+    val phase: AiStreamPhase,
+    val finishReason: String? = null,
+    val promptTokens: Int? = null,
+    val completionTokens: Int? = null,
+    val reasoningPresent: Boolean = false
 )
 
 sealed interface AiConnectionResult {
@@ -134,7 +149,7 @@ class AiServiceClient(
         val request = Request.Builder()
             .url("${credentials.baseUrl.trim().trimEnd('/')}/chat/completions")
             .header("Authorization", "Bearer ${credentials.apiKey.trim()}")
-            .post(buildRequest(credentials, messages, options).toString().toRequestBody(JSON_MEDIA_TYPE))
+            .post(buildRequest(credentials, messages, options, stream = false).toString().toRequestBody(JSON_MEDIA_TYPE))
             .build()
         val startedAt = System.nanoTime()
         httpClient.newCall(request).execute().use { response ->
@@ -144,12 +159,156 @@ class AiServiceClient(
         }
     }
 
-    private fun buildRequest(credentials: AiCredentials, messages: List<AiChatMessage>, options: AiRequestOptions): JsonObject {
+    suspend fun streamChat(
+        credentials: AiCredentials,
+        messages: List<AiChatMessage>,
+        options: AiRequestOptions = AiRequestOptions(),
+        onUpdate: suspend (AiStreamUpdate) -> Unit
+    ): AiCompletion {
+        validate(credentials.baseUrl, credentials.apiKey, credentials.model)?.let { throw IllegalStateException(it) }
+        require(messages.isNotEmpty()) { "AI 请求内容不能为空。" }
+        onUpdate(AiStreamUpdate(content = "", phase = AiStreamPhase.CONNECTING))
+        return withContext(Dispatchers.IO) {
+            val hasImages = messages.any { it.imageDataUrls.isNotEmpty() }
+            val request = Request.Builder()
+                .url("${credentials.baseUrl.trim().trimEnd('/')}/chat/completions")
+                .header("Authorization", "Bearer ${credentials.apiKey.trim()}")
+                .header("Accept", "text/event-stream")
+                .post(buildRequest(credentials, messages, options, stream = true).toString().toRequestBody(JSON_MEDIA_TYPE))
+                .build()
+            val call = httpClient.newCall(request)
+            val cancellationHandle = currentCoroutineContext().job.invokeOnCompletion { cause ->
+                if (cause is CancellationException) call.cancel()
+            }
+            val startedAt = System.nanoTime()
+            try {
+                call.execute().use { response ->
+                    if (!response.isSuccessful) throw IOException(httpFailure(response.code, hasImages))
+                    val body = response.body ?: throw IOException("AI 服务没有返回响应内容。")
+                    val source = body.source()
+                    var firstMeaningfulLine: String? = null
+                    while (firstMeaningfulLine == null && !source.exhausted()) {
+                        currentCoroutineContext().ensureActive()
+                        val line = source.readUtf8Line() ?: break
+                        if (line.isNotBlank() && !line.startsWith(":") && !line.startsWith("event:")) {
+                            firstMeaningfulLine = line
+                        }
+                    }
+                    val first = firstMeaningfulLine.orEmpty()
+                    if (!first.startsWith("data:")) {
+                        val rawBody = buildString {
+                            append(first)
+                            if (!source.exhausted()) {
+                                if (isNotEmpty()) append('\n')
+                                append(source.readUtf8())
+                            }
+                        }
+                        val completion = parseCompletion(rawBody, elapsedMs(startedAt))
+                        onUpdate(completion.asStreamUpdate(AiStreamPhase.GENERATING))
+                        return@use completion
+                    }
+                    parseEventStream(first, source, startedAt, onUpdate)
+                }
+            } finally {
+                cancellationHandle.dispose()
+            }
+        }
+    }
+
+    private suspend fun parseEventStream(
+        firstLine: String,
+        source: okio.BufferedSource,
+        startedAt: Long,
+        onUpdate: suspend (AiStreamUpdate) -> Unit
+    ): AiCompletion {
+        val content = StringBuilder()
+        var finishReason: String? = null
+        var promptTokens: Int? = null
+        var completionTokens: Int? = null
+        var reasoningPresent = false
+        var currentLine: String? = firstLine
+        var done = false
+        while (!done && currentLine != null) {
+            currentCoroutineContext().ensureActive()
+            val line = currentLine
+            currentLine = null
+            if (line.startsWith("data:")) {
+                val payload = line.removePrefix("data:").trim()
+                if (payload == "[DONE]") {
+                    done = true
+                } else if (payload.isNotEmpty()) {
+                    val root = runCatching { json.parseToJsonElement(payload).jsonObject }
+                        .getOrElse { throw IOException("AI 流式响应包含无法解析的数据。") }
+                    val choice = root["choices"]?.let {
+                        runCatching { it.jsonArray.firstOrNull()?.jsonObject }.getOrNull()
+                    }
+                    val delta = choice?.get("delta")?.let { runCatching { it.jsonObject }.getOrNull() }
+                    val reasoningChunk = delta?.get("reasoning_content")?.extractText().orEmpty()
+                    if (reasoningChunk.isNotBlank()) reasoningPresent = true
+                    val contentChunk = delta?.get("content")?.extractText().orEmpty().ifBlank {
+                        choice?.get("text")?.extractText().orEmpty()
+                    }
+                    if (contentChunk.isNotEmpty()) content.append(contentChunk)
+                    choice?.get("finish_reason")?.primitiveContent()?.let { finishReason = it }
+                    root["usage"]?.let { element ->
+                        runCatching { element.jsonObject }.getOrNull()?.let { usage ->
+                            usage["prompt_tokens"]?.jsonPrimitive?.intOrNull?.let { promptTokens = it }
+                            usage["completion_tokens"]?.jsonPrimitive?.intOrNull?.let { completionTokens = it }
+                        }
+                    }
+                    if (reasoningChunk.isNotBlank() || contentChunk.isNotEmpty() || finishReason != null) {
+                        onUpdate(
+                            AiStreamUpdate(
+                                content = content.toString(),
+                                phase = if (content.isNotEmpty()) AiStreamPhase.GENERATING else AiStreamPhase.THINKING,
+                                finishReason = finishReason,
+                                promptTokens = promptTokens,
+                                completionTokens = completionTokens,
+                                reasoningPresent = reasoningPresent
+                            )
+                        )
+                    }
+                }
+            }
+            if (!done) currentLine = source.readUtf8Line()
+        }
+        val finalContent = content.toString().trim()
+        if (finishReason in setOf("length", "content_filter", "insufficient_system_resource")) {
+            throw IOException(emptyContentMessage(finishReason, reasoningPresent))
+        }
+        if (finalContent.isBlank()) throw IOException(emptyContentMessage(finishReason, reasoningPresent))
+        return AiCompletion(
+            content = finalContent,
+            finishReason = finishReason,
+            promptTokens = promptTokens,
+            completionTokens = completionTokens,
+            reasoningPresent = reasoningPresent,
+            durationMs = elapsedMs(startedAt)
+        )
+    }
+
+    private fun AiCompletion.asStreamUpdate(phase: AiStreamPhase) = AiStreamUpdate(
+        content = content,
+        phase = phase,
+        finishReason = finishReason,
+        promptTokens = promptTokens,
+        completionTokens = completionTokens,
+        reasoningPresent = reasoningPresent
+    )
+
+    private fun elapsedMs(startedAt: Long): Long = (System.nanoTime() - startedAt) / 1_000_000
+
+    private fun buildRequest(
+        credentials: AiCredentials,
+        messages: List<AiChatMessage>,
+        options: AiRequestOptions,
+        stream: Boolean
+    ): JsonObject {
         val fields = linkedMapOf<String, JsonElement>(
             "model" to JsonPrimitive(credentials.model.trim()),
             "messages" to JsonArray(messages.map(::payload)),
             "max_tokens" to JsonPrimitive(options.maxTokens.coerceIn(512, 32_768)),
-            "stream" to JsonPrimitive(false)
+            "stream" to JsonPrimitive(stream)
         )
         val thinkingEnabled = credentials.provider == AiProvider.DEEPSEEK && options.thinkingMode == AiThinkingMode.ENABLED
         if (!thinkingEnabled) fields["temperature"] = JsonPrimitive(options.temperature.coerceIn(0.0, 2.0))

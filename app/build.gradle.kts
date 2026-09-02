@@ -60,6 +60,7 @@ dependencies {
     implementation(libs.androidx.compose.material.icons.extended)
     implementation(libs.okhttp)
     implementation(libs.kotlinx.serialization.json)
+    implementation(libs.markwon.core)
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.androidx.navigation.compose)
     implementation(libs.androidx.room.runtime)

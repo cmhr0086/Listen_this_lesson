@@ -17,6 +17,7 @@ import com.cmhr.listen.data.ai.AiResultEntity
 import com.cmhr.listen.data.ai.AiRepository
 import com.cmhr.listen.data.ai.AiRequestStatus
 import com.cmhr.listen.data.ai.AiServiceClient
+import com.cmhr.listen.data.ai.AiStreamPhase
 import com.cmhr.listen.data.ai.PendingAiPhoto
 import com.cmhr.listen.data.course.ListenDatabase
 import com.cmhr.listen.data.course.TranscriptEntity
@@ -26,6 +27,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -40,6 +42,8 @@ data class AiUiState(
     val contentSelectionRecordId: Long? = null,
     val selectedContentKeys: Set<AiContentKey> = emptySet(),
     val isBusy: Boolean = false,
+    val resultStreamPhases: Map<Long, AiStreamPhase> = emptyMap(),
+    val messageStreamPhases: Map<Long, AiStreamPhase> = emptyMap(),
     val lastDiagnostics: AiRequestDiagnostics? = null,
     val error: String? = null
 )
@@ -309,7 +313,8 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update { it.copy(isBusy = true, error = null) }
             try {
                 val images = repository.resultAttachmentsOnce(resultId).map { photoStore.dataUrl(it.relativePath, it.mimeType) }
-                val completion = client.chat(
+                val completion = streamResult(
+                    resultId,
                     credentials,
                     listOf(
                         AiChatMessage("system", prompt),
@@ -319,11 +324,14 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 repository.completeResult(resultId, completion.content)
                 recordDiagnostics(credentials, completion, snapshot, images.size)
+            } catch (exception: CancellationException) {
+                throw exception
             } catch (exception: Exception) {
                 val message = safeError(exception)
                 repository.failResult(resultId, message)
                 recordFailureDiagnostics(credentials, snapshot, photos.size, message)
             } finally {
+                clearResultStreamPhase(resultId)
                 _uiState.update { it.copy(isBusy = false) }
             }
         }
@@ -338,7 +346,8 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update { it.copy(isBusy = true, error = null) }
             try {
                 val images = repository.resultAttachmentsOnce(resultId).map { photoStore.dataUrl(it.relativePath, it.mimeType) }
-                val completion = client.chat(
+                val completion = streamResult(
+                    resultId,
                     credentials,
                     listOf(
                         AiChatMessage("system", result.requestPrompt),
@@ -348,11 +357,14 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 repository.completeResult(resultId, completion.content)
                 recordDiagnostics(credentials, completion, result.sourceTextSnapshot, images.size)
+            } catch (exception: CancellationException) {
+                throw exception
             } catch (exception: Exception) {
                 val message = safeError(exception)
                 repository.failResult(resultId, message)
                 recordFailureDiagnostics(credentials, result.sourceTextSnapshot, 0, message)
             } finally {
+                clearResultStreamPhase(resultId)
                 _uiState.update { it.copy(isBusy = false) }
             }
         }
@@ -509,20 +521,92 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
                 add(AiChatMessage("user", "以下内容是本对话冻结的课堂原文，只能依据它回答：\n\n${conversation.sourceTextSnapshot}"))
                 originResult?.output?.takeIf { it.isNotBlank() }?.let { add(AiChatMessage("assistant", it)) }
             }
-            val completion = client.chat(
+            val completion = streamMessage(
+                exchange.assistantMessageId,
                 credentials,
                 contextMessages + history,
                 requestOptions(chat = true)
             )
             repository.completeMessage(conversationId, exchange.assistantMessageId, completion.content)
             recordDiagnostics(credentials, completion, conversation.sourceTextSnapshot, photos.size)
+        } catch (exception: CancellationException) {
+            throw exception
         } catch (exception: Exception) {
             val message = safeError(exception)
             repository.failMessage(conversationId, exchange.assistantMessageId, message)
             recordFailureDiagnostics(credentials, conversation.sourceTextSnapshot, photos.size, message)
         } finally {
+            clearMessageStreamPhase(exchange.assistantMessageId)
             _uiState.update { it.copy(isBusy = false) }
         }
+    }
+
+    private suspend fun streamResult(
+        resultId: Long,
+        credentials: AiCredentials,
+        messages: List<AiChatMessage>,
+        options: AiRequestOptions
+    ): AiCompletion {
+        var lastDraft = ""
+        var latestDraft = ""
+        var lastWriteAt = 0L
+        return try {
+            client.streamChat(credentials, messages, options) { update ->
+                latestDraft = update.content
+                _uiState.update { state ->
+                    state.copy(resultStreamPhases = state.resultStreamPhases + (resultId to update.phase))
+                }
+                val now = android.os.SystemClock.elapsedRealtime()
+                if (latestDraft != lastDraft && now - lastWriteAt >= STREAM_DRAFT_INTERVAL_MS) {
+                    repository.updateResultDraft(resultId, latestDraft)
+                    lastDraft = latestDraft
+                    lastWriteAt = now
+                }
+            }
+        } catch (exception: Exception) {
+            if (exception !is CancellationException && latestDraft != lastDraft) {
+                repository.updateResultDraft(resultId, latestDraft)
+            }
+            throw exception
+        }
+    }
+
+    private suspend fun streamMessage(
+        messageId: Long,
+        credentials: AiCredentials,
+        messages: List<AiChatMessage>,
+        options: AiRequestOptions
+    ): AiCompletion {
+        var lastDraft = ""
+        var latestDraft = ""
+        var lastWriteAt = 0L
+        return try {
+            client.streamChat(credentials, messages, options) { update ->
+                latestDraft = update.content
+                _uiState.update { state ->
+                    state.copy(messageStreamPhases = state.messageStreamPhases + (messageId to update.phase))
+                }
+                val now = android.os.SystemClock.elapsedRealtime()
+                if (latestDraft != lastDraft && now - lastWriteAt >= STREAM_DRAFT_INTERVAL_MS) {
+                    repository.updateMessageDraft(messageId, latestDraft)
+                    lastDraft = latestDraft
+                    lastWriteAt = now
+                }
+            }
+        } catch (exception: Exception) {
+            if (exception !is CancellationException && latestDraft != lastDraft) {
+                repository.updateMessageDraft(messageId, latestDraft)
+            }
+            throw exception
+        }
+    }
+
+    private fun clearResultStreamPhase(resultId: Long) = _uiState.update { state ->
+        state.copy(resultStreamPhases = state.resultStreamPhases - resultId)
+    }
+
+    private fun clearMessageStreamPhase(messageId: Long) = _uiState.update { state ->
+        state.copy(messageStreamPhases = state.messageStreamPhases - messageId)
     }
 
     private fun selectedSegments(recordId: Long, available: List<TranscriptEntity>): List<TranscriptEntity>? {
@@ -621,6 +705,7 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
         SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(value))
 
     companion object {
+        private const val STREAM_DRAFT_INTERVAL_MS = 100L
         const val MAX_SOURCE_CODE_POINTS = 20_000
         fun isSourceWithinLimit(value: String): Boolean =
             value.codePointCount(0, value.length) <= MAX_SOURCE_CODE_POINTS

@@ -6,6 +6,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -329,6 +331,7 @@ fun AiPromptsSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun AsrPromptPolicySettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
     var config by remember(state.asrPromptAutoConfig) { mutableStateOf(state.asrPromptAutoConfig) }
@@ -341,12 +344,14 @@ fun AsrPromptPolicySettingsScreen(state: SettingsUiState, model: SettingsViewMod
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("全局提示词模式", style = MaterialTheme.typography.titleMedium)
-                    AsrPromptMode.entries.forEach { mode ->
-                        FilterChip(
-                            selected = state.globalAsrPromptMode == mode,
-                            onClick = { model.saveGlobalAsrPromptMode(mode) },
-                            label = { Text(mode.displayName) }
-                        )
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        AsrPromptMode.entries.forEach { mode ->
+                            FilterChip(
+                                selected = state.globalAsrPromptMode == mode,
+                                onClick = { model.saveGlobalAsrPromptMode(mode) },
+                                label = { Text(mode.displayName) }
+                            )
+                        }
                     }
                     Text("课程可以覆盖此设置；自动模式只给正常、较长且清晰的片段附带 Prompt。", style = MaterialTheme.typography.bodySmall)
                 }

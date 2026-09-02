@@ -5,10 +5,122 @@ import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AiServiceClientTest {
+    @Test
+    fun `stream chat joins deltas and hides reasoning content`() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(
+                MockResponse()
+                    .setHeader("Content-Type", "text/event-stream")
+                    .setBody(
+                        """data: {"choices":[{"delta":{"reasoning_content":"private reasoning"}}]}
+
+data: {"choices":[{"delta":{"content":"课堂"}}]}
+
+data: {"choices":[{"delta":{"content":"总结"},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":2}}
+
+data: [DONE]
+
+"""
+                    )
+            )
+            val updates = mutableListOf<AiStreamUpdate>()
+            val result = AiServiceClient(OkHttpClient(), enforceHttps = false).streamChat(
+                AiCredentials(server.url("/").toString().trimEnd('/'), "secret", "model"),
+                listOf(AiChatMessage("user", "测试"))
+            ) { updates += it }
+
+            assertEquals("课堂总结", result.content)
+            assertTrue(result.reasoningPresent)
+            assertEquals("stop", result.finishReason)
+            assertEquals(8, result.promptTokens)
+            assertTrue(updates.any { it.phase == AiStreamPhase.THINKING })
+            assertTrue(updates.any { it.phase == AiStreamPhase.GENERATING && it.content == "课堂总结" })
+            assertFalse(updates.any { it.content.contains("private reasoning") })
+            assertTrue(server.takeRequest().body.readUtf8().contains("\"stream\":true"))
+        }
+    }
+
+    @Test
+    fun `stream chat supports array deltas`() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(
+                """data: {"choices":[{"delta":{"content":[{"type":"text","text":"第一段"},{"type":"text","text":"第二段"}]},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+"""
+            ))
+            val result = AiServiceClient(OkHttpClient(), enforceHttps = false).streamChat(
+                AiCredentials(server.url("/").toString().trimEnd('/'), "secret", "model"),
+                listOf(AiChatMessage("user", "测试"))
+            ) {}
+            assertEquals("第一段第二段", result.content)
+        }
+    }
+
+    @Test
+    fun `stream chat falls back to ordinary json`() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody(
+                """{"choices":[{"message":{"content":"普通结果"},"finish_reason":"stop"}]}"""
+            ))
+            val updates = mutableListOf<AiStreamUpdate>()
+            val result = AiServiceClient(OkHttpClient(), enforceHttps = false).streamChat(
+                AiCredentials(server.url("/").toString().trimEnd('/'), "secret", "model"),
+                listOf(AiChatMessage("user", "测试"))
+            ) { updates += it }
+            assertEquals("普通结果", result.content)
+            assertEquals(AiStreamPhase.GENERATING, updates.last().phase)
+        }
+    }
+
+    @Test
+    fun `stream reasoning only response reports a clear error`() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(
+                """data: {"choices":[{"delta":{"reasoning_content":"hidden"}}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+"""
+            ))
+            val failure = runCatching {
+                AiServiceClient(OkHttpClient(), enforceHttps = false).streamChat(
+                    AiCredentials(server.url("/").toString().trimEnd('/'), "secret", "model"),
+                    listOf(AiChatMessage("user", "测试"))
+                ) {}
+            }.exceptionOrNull()
+            assertTrue(failure?.message.orEmpty().contains("思考"))
+        }
+    }
+
+    @Test
+    fun `stream length finish reason reports token limit`() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(
+                """data: {"choices":[{"delta":{"content":"未完成"},"finish_reason":"length"}]}
+
+data: [DONE]
+
+"""
+            ))
+            val failure = runCatching {
+                AiServiceClient(OkHttpClient(), enforceHttps = false).streamChat(
+                    AiCredentials(server.url("/").toString().trimEnd('/'), "secret", "model"),
+                    listOf(AiChatMessage("user", "测试"))
+                ) {}
+            }.exceptionOrNull()
+            assertTrue(failure?.message.orEmpty().contains("max_tokens"))
+        }
+    }
+
     @Test
     fun `chat sends OpenAI compatible request and parses content`() = runBlocking {
         MockWebServer().use { server ->
