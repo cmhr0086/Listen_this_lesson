@@ -33,13 +33,34 @@ cd Listen_this_lesson
 git lfs pull
 ```
 
-使用 Android Studio 打开项目，等待 Gradle Sync 完成。也可以在 Windows PowerShell 中执行：
+使用 Android Studio 打开项目，等待 Gradle Sync 完成。普通开发构建不需要正式签名文件：
 
 ```powershell
-.\gradlew.bat build
+.\gradlew.bat assembleDebug testDebugUnitTest
 ```
 
 Android Studio 会在未存在时创建本机专用的 `local.properties`。该文件可能包含 SDK 路径等本机信息，已被 Git 忽略，不应提交。
+
+## 正式发布签名
+
+正式 Release 使用仓库根目录下、未纳入 Git 的 `keystore.properties`。文件包含以下字段：
+
+```properties
+storeFile=C:/Users/your-name/.android/listen-this-lesson-release.jks
+storePassword=本机密钥库密码
+keyAlias=listen-this-lesson
+keyPassword=本机签名密码
+```
+
+配置完成后执行：
+
+```powershell
+.\gradlew.bat clean build
+```
+
+签名密钥决定 Android 后续版本的升级身份。请将 `.jks` 和对应密码保存在安全的离线位置；丢失后无法用新密钥覆盖安装已有版本。密钥、密码、API Key、`local.properties` 和 `keystore.properties` 均不得提交到仓库。
+
+正式版本及校验文件可从仓库的 [GitHub Releases](https://github.com/cmhr0086/Listen_this_lesson/releases) 下载。
 
 ## 应用配置
 
