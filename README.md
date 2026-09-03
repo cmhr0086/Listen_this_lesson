@@ -1,85 +1,78 @@
-# Listen_this_lesson
+# Listen This Lesson
 
-一个面向课堂场景的 Android 语音识别与 AI 辅助整理应用。应用持续采集课堂音频，使用本地 Silero VAD 完成自然语音分段，再将 WAV 片段发送到远程 Qwen3-ASR 服务。识别结果可按课程和课堂记录保存，并支持使用兼容 OpenAI 接口的 AI 服务进行总结、笔记整理、ASR 纠错、快速回答和对话。
+一款面向真实课堂场景的 Android 语音识别与 AI 辅助整理应用。它在设备端持续监听并用 Silero VAD 自然分段，再将语音发送到远程 ASR 服务；课程、课堂记录、识别文本和 AI 结果均按清晰层级保存在本机。
 
-## 当前功能
+## 软件特色
 
-- Kotlin、Jetpack Compose 与 Material 3 界面
-- AudioRecord 持续录音：16 kHz、单声道、PCM 16-bit
-- sherpa-onnx / Silero VAD 本地语音分段
-- FIFO 远程 ASR 请求队列
-- Course → Record → TranscriptSegment 的 Room 持久化结构
-- 每门课程独立的 ASR Context
-- OpenAI-compatible / DeepSeek AI 服务配置
-- AI 结果、课堂问答、片段多选、TXT 导出与照片补充
-- VAD 参数、预设和 AI 场景提示词运行时配置
-- API Key 使用 Android Keystore 加密保存
+- **持续课堂识别**：使用 AudioRecord 采集 16 kHz 单声道音频，ASR 处理期间不会停止监听。
+- **自然语音分段**：Android 端仅使用 sherpa-onnx / Silero VAD 判断语音区间，不在手机上运行 ASR 模型。
+- **课程化整理**：按照“课程 → 课堂记录 → 识别片段”保存内容，识别结果最新优先显示。
+- **课程 ASR Context**：每门课程可以维护专业词，并选择关闭、自动或始终使用提示词。
+- **持久识别队列**：待处理片段会临时保存在应用私有目录，切到后台后仍可继续提交和查询异步任务。
+- **AI 会话与整理**：支持兼容 OpenAI 接口的服务和 DeepSeek，可进行课堂问答、笔记整理、快速回答和 ASR 纠错。
+- **原文安全保留**：AI 纠错作为独立纠正版应用，原始识别文本不会被覆盖，并可随时恢复。
+- **丰富内容展示**：AI 回复支持流式生成、思考内容、Markdown、表格、代码块、图片及文本附件。
+- **导出与诊断**：课堂记录可导出 UTF-8 TXT；开发者模式提供 VAD、队列和完整 ASR 生命周期诊断。
+- **本地安全存储**：API Key 使用 Android Keystore 保护，不写入 Room、日志或导出文件。
 
-## 环境要求
+## 安装
 
-- Android Studio（包含 JDK 17 或更高版本）
-- Android SDK 36
-- minSdk 26
-- Git LFS
-- arm64-v8a Android 设备或模拟器
+1. 打开 [GitHub Releases](https://github.com/cmhr0086/Listen_this_lesson/releases)。
+2. 下载 `Listen_this_lesson-v1.0.1-arm64-v8a.apk`。
+3. 在 Android 设备上允许当前安装来源，然后安装 APK。
 
-项目当前只打包 `arm64-v8a`，并随 APK 离线提供 Silero VAD 模型。Android 端的 sherpa-onnx 仅用于 VAD，语音识别仍由远程 Qwen3-ASR 服务完成。
+当前正式安装包仅支持 `arm64-v8a`，最低系统版本为 Android 8.0（API 26）。
 
-## 获取与构建
+## 首次配置
 
-```bash
-git clone https://github.com/cmhr0086/Listen_this_lesson.git
-cd Listen_this_lesson
-git lfs pull
-```
+### 1. 配置语音识别服务
 
-使用 Android Studio 打开项目，等待 Gradle Sync 完成。普通开发构建不需要正式签名文件：
+进入“设置 → STT 服务器”，填写服务器地址和 API Key，保存后点击“测试连接”。1.0.1 使用异步任务式 STT 服务，请确保服务端版本与本版本客户端兼容。
 
-```powershell
-.\gradlew.bat assembleDebug testDebugUnitTest
-```
+### 2. 配置 AI 服务（可选）
 
-Android Studio 会在未存在时创建本机专用的 `local.properties`。该文件可能包含 SDK 路径等本机信息，已被 Git 忽略，不应提交。
+进入“设置 → AI 配置”，选择 OpenAI-compatible 或 DeepSeek，填写 API 地址、模型名称和 API Key。可通过模型输入框右侧入口获取模型列表，并使用“测试连接”验证配置。
 
-## 正式发布签名
+不配置 AI 服务不会影响课堂录音、VAD 分段和语音识别。
 
-正式 Release 使用仓库根目录下、未纳入 Git 的 `keystore.properties`。文件包含以下字段：
+### 3. 调整开发者选项（可选）
 
-```properties
-storeFile=C:/Users/your-name/.android/listen-this-lesson-release.jks
-storePassword=本机密钥库密码
-keyAlias=listen-this-lesson
-keyPassword=本机签名密码
-```
+在设置页开启开发者模式后，可以调整 VAD 参数、场景预设、ASR Prompt 策略、AI 生成参数，并进入 ASR 诊断页面查看队列和网络阶段。
 
-配置完成后执行：
+## 使用教程
 
-```powershell
-.\gradlew.bat clean build
-```
+### 创建并开始一节课堂记录
 
-签名密钥决定 Android 后续版本的升级身份。请将 `.jks` 和对应密码保存在安全的离线位置；丢失后无法用新密钥覆盖安装已有版本。密钥、密码、API Key、`local.properties` 和 `keystore.properties` 均不得提交到仓库。
+1. 在“课程”页点击“新建课程”。
+2. 进入课程后点击“新建课堂记录”。
+3. 进入具体记录，点击右下角“开始监听”。
+4. 首次使用时授予麦克风权限；通知权限用于显示持续监听状态。
+5. 监听期间可以切换页面，录音和识别会继续运行。
+6. 点击全局红色“停止监听”按钮或通知中的停止操作结束监听。
 
-正式版本及校验文件可从仓库的 [GitHub Releases](https://github.com/cmhr0086/Listen_this_lesson/releases) 下载。
+### 设置课程专业词
 
-## 应用配置
+在课程卡片右侧点击编辑提示词图标，填写课程中的人名、术语或专业词。自动模式只会为质量合适的语音片段附带 Context，降低短片段和噪声触发错误提示的概率。
 
-首次启动后在“设置”中配置：
+### 整理和纠正识别内容
 
-1. STT 服务器地址与 API Key。
-2. AI 服务地址、模型与 API Key（如需 AI 功能）。
-3. 开发者模式下可调整 VAD 参数、预设与 AI 场景提示词。
+- 长按识别片段进入多选模式，继续滑动可以选择连续范围。
+- 可对选中片段执行快速回答、ASR 纠错或自定义提问。
+- 结构化纠错结果需要手动点击“应用全部纠正”；应用后仍可查看并恢复原文。
+- 记录右上角菜单可以整理成笔记、导出 TXT、查看 AI 结果或进入选择模式。
 
-默认 STT 地址用于私有网络测试。请保证 Android 设备能够访问所配置的服务；不要把真实 API Key 写入源码、日志或提交到 Git。
+### 使用 AI 会话
 
-## 数据与隐私
+底栏“AI 会话”汇总所有课程的 AI 结果和对话，也可以新建不绑定课程的通用对话。聊天输入栏支持选择图片以及 TXT、MD、CSV、JSON 文本附件。
 
-- 课程、课堂记录、转写和 AI 结果保存在应用本地数据库。
-- 原始识别文本不会被 AI 输出覆盖。
-- 当前不长期保存原始课堂音频。
-- AI 补充照片保存在应用私有目录，并在相关数据删除时清理。
-- API Key 不存入 Room，也不会导出到 TXT。
+### 导出课堂内容
 
-## 许可
+进入记录详情右上角菜单，选择“导出 TXT”，再通过系统文件选择器指定保存位置。导出内容包含课程、课堂记录时间以及按真实时间排列的识别文本。
 
-当前仓库暂未提供开源许可证。未经明确授权，不代表授予复制、修改或再分发本项目代码的权利。
+## 更多文档
+
+- [Android 客户端构建](docs/ANDROID_BUILD.md)
+- [STT 服务端构建（待补充）](docs/SERVER_BUILD.md)
+- [更新日志](CHANGELOG.md)
+- [第三方软件声明](THIRD_PARTY_NOTICES.md)
+- [Apache-2.0 许可证](LICENSE)
