@@ -9,10 +9,12 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
+import com.cmhr.listen.data.stt.AsrQueueRuntime
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 
@@ -23,6 +25,8 @@ object ListeningControlBus {
 }
 
 class ListeningForegroundService : Service() {
+    private var wakeLock: PowerManager.WakeLock? = null
+
     override fun onCreate() {
         super.onCreate()
         val manager = getSystemService(NotificationManager::class.java)
@@ -53,6 +57,8 @@ class ListeningForegroundService : Service() {
             queueCount = request.getIntExtra(EXTRA_QUEUE_COUNT, 0)
         )
         if (request.action == ACTION_START) {
+            acquireWakeLock()
+            AsrQueueRuntime.get(applicationContext).kick()
             ServiceCompat.startForeground(
                 this,
                 NOTIFICATION_ID,
@@ -68,8 +74,21 @@ class ListeningForegroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        wakeLock?.let { lock -> if (lock.isHeld) lock.release() }
+        wakeLock = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         super.onDestroy()
+    }
+
+    @Suppress("WakelockTimeout")
+    private fun acquireWakeLock() {
+        if (wakeLock?.isHeld == true) return
+        wakeLock = (getSystemService(POWER_SERVICE) as PowerManager)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$packageName:classroom-listening")
+            .apply {
+                setReferenceCounted(false)
+                acquire()
+            }
     }
 
     private fun buildNotification(

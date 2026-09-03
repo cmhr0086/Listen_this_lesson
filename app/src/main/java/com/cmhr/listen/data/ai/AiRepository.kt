@@ -7,14 +7,19 @@ data class PendingAiExchange(val userMessageId: Long, val assistantMessageId: Lo
 
 class AiRepository(
     private val database: ListenDatabase,
-    private val photoStore: AiPhotoStore? = null
+    private val attachmentStore: AiAttachmentStore? = null
 ) {
     private val dao = database.aiDao()
 
+    fun globalTimeline() = dao.globalTimeline()
+
     fun results(recordId: Long) = dao.results(recordId)
+    fun allResults() = dao.allResults()
     fun result(id: Long) = dao.result(id)
     fun resultSourceSegments(id: Long) = dao.resultSourceSegments(id)
+    suspend fun resultSourceSegmentsOnce(id: Long) = database.transcriptDao().segmentsForResult(id)
     fun conversations(recordId: Long) = dao.conversations(recordId)
+    fun allConversations() = dao.allConversations()
     fun conversation(id: Long) = dao.conversation(id)
     fun conversationForResult(resultId: Long) = dao.conversationForResult(resultId)
     fun conversationSourceSegments(id: Long) = dao.conversationSourceSegments(id)
@@ -28,7 +33,7 @@ class AiRepository(
         prompt: String,
         snapshot: String,
         segmentIds: List<Long>,
-        photos: List<PendingAiPhoto> = emptyList()
+        attachments: List<PendingAiAttachment> = emptyList()
     ): Long = database.withTransaction {
         val id = dao.insertResult(AiResultEntity(
             recordId = recordId,
@@ -39,22 +44,53 @@ class AiRepository(
         ))
         dao.insertResultSegments(segmentIds.distinct().map { AiResultSegmentEntity(id, it) })
         id
-    }.also { resultId -> attachPhotos(recordId, resultId, null, "result_$resultId", photos) }
+    }.also { resultId -> attach(recordId, resultId, null, "record_$recordId/result_$resultId", attachments) }
 
     suspend fun resultOnce(id: Long) = dao.resultOnce(id)
     suspend fun markResultPending(id: Long) = dao.markResultPending(id)
-    suspend fun updateResultDraft(id: Long, output: String) = dao.updateResultDraft(id, output)
-    suspend fun completeResult(id: Long, output: String) = dao.completeResult(id, output, System.currentTimeMillis())
+    suspend fun updateResultDraft(id: Long, output: String, reasoningContent: String) =
+        dao.updateResultDraft(id, output, reasoningContent)
+    suspend fun completeResult(
+        id: Long,
+        output: String,
+        reasoningContent: String = "",
+        correctionPayload: String? = null
+    ) = dao.completeResult(id, output, reasoningContent, correctionPayload, System.currentTimeMillis())
     suspend fun failResult(id: Long, message: String) = dao.failResult(id, message, System.currentTimeMillis())
     suspend fun resultAttachmentsOnce(id: Long) = dao.resultAttachmentsOnce(id)
     suspend fun deleteResult(id: Long) {
         val paths = dao.resultAttachmentPaths(id)
-        dao.deleteResult(id)
-        photoStore?.deleteRelativePaths(paths)
+        database.withTransaction {
+            database.transcriptDao().detachCorrectionResult(id)
+            dao.deleteResult(id)
+        }
+        attachmentStore?.deleteRelativePaths(paths)
+    }
+
+    suspend fun applyCorrections(resultId: Long, payload: CorrectionPayload) = database.withTransaction {
+        val result = requireNotNull(dao.resultOnce(resultId)) { "AI 纠错结果不存在。" }
+        require(result.actionType == AiActionType.CORRECT_ASR.name) { "该结果不是 ASR 纠错结果。" }
+        val source = database.transcriptDao().segmentsForResult(resultId)
+        val expected = source.map { it.id }.toSet()
+        require(payload.segments.map { it.segmentId }.toSet() == expected) { "纠错内容与来源片段不一致。" }
+        val appliedAt = System.currentTimeMillis()
+        payload.segments.forEach { correction ->
+            check(database.transcriptDao().applyCorrection(
+                recordId = result.recordId,
+                segmentId = correction.segmentId,
+                resultId = resultId,
+                correctedText = correction.correctedText.trim(),
+                correctedAt = appliedAt
+            ) == 1) { "无法应用片段 #${correction.segmentId} 的纠错。" }
+        }
+    }
+
+    suspend fun restoreOriginal(segmentId: Long) {
+        database.transcriptDao().restoreOriginal(segmentId)
     }
 
     suspend fun createConversation(
-        recordId: Long,
+        recordId: Long?,
         title: String,
         snapshot: String,
         segmentIds: List<Long>,
@@ -82,10 +118,10 @@ class AiRepository(
     suspend fun conversationAttachmentsOnce(id: Long) = dao.conversationAttachmentsOnce(id)
     suspend fun insertUserAndPendingAssistant(
         conversationId: Long,
-        recordId: Long,
+        recordId: Long?,
         question: String,
         contextPrompt: String = "",
-        photos: List<PendingAiPhoto> = emptyList()
+        attachments: List<PendingAiAttachment> = emptyList()
     ): PendingAiExchange {
         val exchange = database.withTransaction {
         val now = System.currentTimeMillis()
@@ -106,19 +142,21 @@ class AiRepository(
         dao.touchConversation(conversationId, now)
         PendingAiExchange(userId, pendingId)
         }
-        attachPhotos(recordId, null, exchange.userMessageId, "conversation_${conversationId}/message_${exchange.userMessageId}", photos)
+        val owner = recordId?.let { "record_$it" } ?: "general"
+        attach(recordId, null, exchange.userMessageId, "$owner/conversation_$conversationId/message_${exchange.userMessageId}", attachments)
         return exchange
     }
 
-    suspend fun completeMessage(conversationId: Long, messageId: Long, content: String) {
+    suspend fun completeMessage(conversationId: Long, messageId: Long, content: String, reasoningContent: String = "") {
         val now = System.currentTimeMillis()
         database.withTransaction {
-            dao.completeMessage(messageId, content, now)
+            dao.completeMessage(messageId, content, reasoningContent, now)
             dao.touchConversation(conversationId, now)
         }
     }
 
-    suspend fun updateMessageDraft(messageId: Long, content: String) = dao.updateMessageDraft(messageId, content)
+    suspend fun updateMessageDraft(messageId: Long, content: String, reasoningContent: String) =
+        dao.updateMessageDraft(messageId, content, reasoningContent)
 
     suspend fun failMessage(conversationId: Long, messageId: Long, message: String) {
         val now = System.currentTimeMillis()
@@ -131,28 +169,31 @@ class AiRepository(
     suspend fun deleteConversation(id: Long) {
         val paths = dao.conversationAttachmentPaths(id)
         dao.deleteConversation(id)
-        photoStore?.deleteRelativePaths(paths)
+        attachmentStore?.deleteRelativePaths(paths)
     }
 
-    private suspend fun attachPhotos(
-        recordId: Long,
+    private suspend fun attach(
+        recordId: Long?,
         resultId: Long?,
         messageId: Long?,
         ownerDirectory: String,
-        photos: List<PendingAiPhoto>
+        attachments: List<PendingAiAttachment>
     ) {
-        if (photos.isEmpty()) return
-        val store = requireNotNull(photoStore) { "照片存储未初始化。" }
-        val persisted = store.persist(recordId, ownerDirectory, photos)
-        dao.insertImageAttachments(persisted.map { photo ->
-            AiImageAttachmentEntity(
+        if (attachments.isEmpty()) return
+        val store = requireNotNull(attachmentStore) { "附件存储未初始化。" }
+        val persisted = store.persist(ownerDirectory, attachments)
+        dao.insertAttachments(persisted.map { attachment ->
+            AiAttachmentEntity(
                 recordId = recordId,
                 resultId = resultId,
                 messageId = messageId,
-                relativePath = photo.absolutePath,
-                mimeType = photo.mimeType,
-                width = photo.width,
-                height = photo.height,
+                kind = attachment.kind.name,
+                displayName = attachment.displayName,
+                relativePath = attachment.absolutePath,
+                mimeType = attachment.mimeType,
+                sizeBytes = attachment.sizeBytes,
+                width = attachment.width,
+                height = attachment.height,
                 createdAt = System.currentTimeMillis()
             )
         })

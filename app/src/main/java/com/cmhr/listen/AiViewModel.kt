@@ -2,7 +2,6 @@ package com.cmhr.listen
 
 import android.app.Application
 import android.net.Uri
-import java.io.File
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.cmhr.listen.data.ai.AiActionType
@@ -11,14 +10,17 @@ import com.cmhr.listen.data.ai.AiCredentials
 import com.cmhr.listen.data.ai.AiCompletion
 import com.cmhr.listen.data.ai.AiRequestOptions
 import com.cmhr.listen.data.ai.AiConversationEntity
-import com.cmhr.listen.data.ai.AiImageAttachmentEntity
-import com.cmhr.listen.data.ai.AiPhotoStore
+import com.cmhr.listen.data.ai.AiAttachmentEntity
+import com.cmhr.listen.data.ai.AiAttachmentKind
+import com.cmhr.listen.data.ai.AiAttachmentStore
 import com.cmhr.listen.data.ai.AiResultEntity
 import com.cmhr.listen.data.ai.AiRepository
 import com.cmhr.listen.data.ai.AiRequestStatus
 import com.cmhr.listen.data.ai.AiServiceClient
 import com.cmhr.listen.data.ai.AiStreamPhase
-import com.cmhr.listen.data.ai.PendingAiPhoto
+import com.cmhr.listen.data.ai.CorrectionPayload
+import com.cmhr.listen.data.ai.CorrectionPayloadCodec
+import com.cmhr.listen.data.ai.PendingAiAttachment
 import com.cmhr.listen.data.course.ListenDatabase
 import com.cmhr.listen.data.course.TranscriptEntity
 import com.cmhr.listen.data.settings.AppSettingsRepository
@@ -33,13 +35,14 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 data class AiUiState(
     val selectionRecordId: Long? = null,
     val selectedSegmentIds: Set<Long> = emptySet(),
-    val contentSelectionRecordId: Long? = null,
+    val contentSelectionScope: AiContentSelectionScope? = null,
     val selectedContentKeys: Set<AiContentKey> = emptySet(),
     val isBusy: Boolean = false,
     val resultStreamPhases: Map<Long, AiStreamPhase> = emptyMap(),
@@ -62,19 +65,21 @@ data class AiRequestDiagnostics(
 
 enum class AiContentKind { RESULT, CONVERSATION }
 data class AiContentKey(val kind: AiContentKind, val id: Long)
+data class AiContentSelectionScope(val recordId: Long?)
 data class AiContentItem(
     val key: AiContentKey,
+    val recordId: Long?,
+    val courseName: String,
     val title: String,
     val updatedAt: Long,
     val status: String,
     val preview: String
 )
-data class AiCaptureTarget(val file: File, val uri: Uri)
 
 class AiViewModel(application: Application) : AndroidViewModel(application) {
     private val database = ListenDatabase.get(application)
-    private val photoStore = AiPhotoStore(application)
-    private val repository = AiRepository(database, photoStore)
+    private val attachmentStore = AiAttachmentStore(application)
+    private val repository = AiRepository(database, attachmentStore)
     private val settingsRepository = AppSettingsRepository(application)
     private val client = AiServiceClient()
     private val _uiState = MutableStateFlow(AiUiState())
@@ -91,11 +96,13 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
     fun messages(conversationId: Long) = repository.messages(conversationId)
     fun resultAttachments(resultId: Long) = repository.resultAttachments(resultId)
     fun messageAttachments(messageId: Long) = repository.messageAttachments(messageId)
-    fun attachmentFile(value: AiImageAttachmentEntity) = photoStore.resolve(value.relativePath)
+    fun attachmentFile(value: AiAttachmentEntity) = attachmentStore.resolve(value.relativePath)
     fun contents(recordId: Long) = combine(repository.results(recordId), repository.conversations(recordId)) { results, conversations ->
         (results.map { result ->
             AiContentItem(
                 key = AiContentKey(AiContentKind.RESULT, result.id),
+                recordId = result.recordId,
+                courseName = "",
                 title = runCatching { AiActionType.valueOf(result.actionType).displayName }.getOrDefault(result.actionType),
                 updatedAt = result.finishedAt ?: result.createdAt,
                 status = result.status,
@@ -104,12 +111,31 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
         } + conversations.map { conversation ->
             AiContentItem(
                 key = AiContentKey(AiContentKind.CONVERSATION, conversation.id),
+                recordId = conversation.recordId,
+                courseName = "",
                 title = conversation.title,
                 updatedAt = conversation.updatedAt,
                 status = AiRequestStatus.SUCCESS.name,
                 preview = "AI 对话"
             )
         }).sortedByDescending { it.updatedAt }
+    }
+
+    fun globalContents() = repository.globalTimeline().map { rows ->
+        rows.map { row ->
+            val kind = AiContentKind.valueOf(row.kind)
+            AiContentItem(
+                key = AiContentKey(kind, row.id),
+                recordId = row.recordId,
+                courseName = row.courseName,
+                title = if (kind == AiContentKind.RESULT) {
+                    runCatching { AiActionType.valueOf(row.title).displayName }.getOrDefault(row.title)
+                } else row.title,
+                updatedAt = row.updatedAt,
+                status = row.status,
+                preview = row.preview
+            )
+        }
     }
 
     fun beginSelection(recordId: Long) {
@@ -130,44 +156,81 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun clearSelection() = _uiState.update { it.copy(selectionRecordId = null, selectedSegmentIds = emptySet()) }
-    fun clearError() = _uiState.update { it.copy(error = null) }
-
-    fun beginContentSelection(recordId: Long) = _uiState.update {
-        it.copy(contentSelectionRecordId = recordId, selectedContentKeys = emptySet(), error = null)
+    fun replaceSelection(recordId: Long, segmentIds: Set<Long>) {
+        _uiState.update { state ->
+            state.copy(selectionRecordId = recordId, selectedSegmentIds = segmentIds, error = null)
+        }
     }
 
-    fun toggleContentSelection(recordId: Long, key: AiContentKey) = _uiState.update { state ->
-        val current = if (state.contentSelectionRecordId == recordId) state.selectedContentKeys else emptySet()
+    fun clearSelection() = _uiState.update { it.copy(selectionRecordId = null, selectedSegmentIds = emptySet()) }
+    fun clearError() = _uiState.update { it.copy(error = null) }
+    fun reportError(message: String) = _uiState.update { it.copy(error = message) }
+
+    fun beginContentSelection(recordId: Long?) = _uiState.update {
+        it.copy(contentSelectionScope = AiContentSelectionScope(recordId), selectedContentKeys = emptySet(), error = null)
+    }
+
+    fun toggleContentSelection(recordId: Long?, key: AiContentKey) = _uiState.update { state ->
+        val scope = AiContentSelectionScope(recordId)
+        val current = if (state.contentSelectionScope == scope) state.selectedContentKeys else emptySet()
         state.copy(
-            contentSelectionRecordId = recordId,
+            contentSelectionScope = scope,
             selectedContentKeys = if (key in current) current - key else current + key,
             error = null
         )
     }
 
+    fun replaceContentSelection(recordId: Long?, keys: Set<AiContentKey>) = _uiState.update { state ->
+        state.copy(
+            contentSelectionScope = AiContentSelectionScope(recordId),
+            selectedContentKeys = keys,
+            error = null
+        )
+    }
+
     fun clearContentSelection() = _uiState.update {
-        it.copy(contentSelectionRecordId = null, selectedContentKeys = emptySet())
+        it.copy(contentSelectionScope = null, selectedContentKeys = emptySet())
     }
 
-    fun createCaptureTarget(): AiCaptureTarget {
-        val file = photoStore.createCaptureFile()
-        return AiCaptureTarget(file, photoStore.captureUri(file))
+    fun applyCorrections(resultId: Long, onComplete: (Boolean) -> Unit = {}) = viewModelScope.launch {
+        val result = repository.resultOnce(resultId)
+        val encoded = result?.correctionPayload
+        if (result == null || encoded.isNullOrBlank()) {
+            _uiState.update { it.copy(error = "该 AI 结果没有可应用的结构化纠错内容。") }
+            onComplete(false)
+            return@launch
+        }
+        val source = database.transcriptDao().segmentsForResult(resultId)
+        val outcome = runCatching {
+            val payload = CorrectionPayloadCodec.decode(encoded, source)
+            repository.applyCorrections(resultId, payload)
+        }
+        outcome.exceptionOrNull()?.let { exception ->
+            _uiState.update { it.copy(error = safeError(exception as? Exception ?: Exception(exception))) }
+        }
+        onComplete(outcome.isSuccess)
     }
 
-    fun prepareCapturedPhoto(file: File, onReady: (PendingAiPhoto?) -> Unit) = viewModelScope.launch {
-        val result = runCatching { photoStore.prepareCapture(file) }
+    fun restoreOriginal(segmentId: Long) = viewModelScope.launch {
+        runCatching { repository.restoreOriginal(segmentId) }
+            .onFailure { exception ->
+                _uiState.update { it.copy(error = safeError(exception as? Exception ?: Exception(exception))) }
+            }
+    }
+
+    fun prepareAttachment(uri: Uri, kind: AiAttachmentKind, onReady: (PendingAiAttachment?) -> Unit) = viewModelScope.launch {
+        val result = runCatching { attachmentStore.prepare(uri, kind) }
         result.exceptionOrNull()?.let { exception ->
             _uiState.update { it.copy(error = safeError(exception as? Exception ?: Exception(exception))) }
         }
         onReady(result.getOrNull())
     }
 
-    fun discardPhoto(photo: PendingAiPhoto) = photoStore.discard(photo)
+    fun discardAttachment(attachment: PendingAiAttachment) = attachmentStore.discard(attachment)
 
-    fun deleteSelectedContents(recordId: Long, onComplete: () -> Unit = {}) {
+    fun deleteSelectedContents(recordId: Long?, onComplete: () -> Unit = {}) {
         val state = _uiState.value
-        if (state.contentSelectionRecordId != recordId || state.selectedContentKeys.isEmpty()) return
+        if (state.contentSelectionScope != AiContentSelectionScope(recordId) || state.selectedContentKeys.isEmpty()) return
         if (state.isBusy) {
             _uiState.update { it.copy(error = "AI 正在处理，请完成后再删除。") }
             return
@@ -192,7 +255,7 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
         onReady: (String?) -> Unit
     ) {
         val state = _uiState.value
-        if (state.contentSelectionRecordId != recordId || state.selectedContentKeys.isEmpty()) {
+        if (state.contentSelectionScope != AiContentSelectionScope(recordId) || state.selectedContentKeys.isEmpty()) {
             onReady(null)
             return
         }
@@ -240,51 +303,103 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun buildSelectedGlobalContentsTxt(onReady: (String?) -> Unit) {
+        val state = _uiState.value
+        if (state.contentSelectionScope != AiContentSelectionScope(null) || state.selectedContentKeys.isEmpty()) {
+            onReady(null)
+            return
+        }
+        val keys = state.selectedContentKeys
+        viewModelScope.launch {
+            data class ExportEntry(val time: Long, val body: String)
+            val entries = keys.mapNotNull { key ->
+                when (key.kind) {
+                    AiContentKind.RESULT -> repository.resultOnce(key.id)?.let { result ->
+                        val (courseName, recordName) = ownerNames(result.recordId)
+                        ExportEntry(result.createdAt, buildString {
+                            appendLine("课程：$courseName")
+                            appendLine("记录：$recordName")
+                            appendLine("类型：${runCatching { AiActionType.valueOf(result.actionType).displayName }.getOrDefault(result.actionType)}")
+                            appendLine("时间：${formatExportTime(result.createdAt)}")
+                            appendLine(result.output ?: result.errorMessage ?: "尚无输出")
+                        })
+                    }
+                    AiContentKind.CONVERSATION -> repository.conversationOnce(key.id)?.let { conversation ->
+                        val (courseName, recordName) = conversation.recordId?.let { ownerNames(it) }
+                            ?: Pair("通用对话", "—")
+                        val messages = repository.messagesOnce(conversation.id)
+                        ExportEntry(conversation.createdAt, buildString {
+                            appendLine("课程：$courseName")
+                            appendLine("记录：$recordName")
+                            appendLine("类型：AI 对话")
+                            appendLine("标题：${conversation.title}")
+                            appendLine("时间：${formatExportTime(conversation.createdAt)}")
+                            messages.filter { it.status == AiRequestStatus.SUCCESS.name }.forEach { message ->
+                                appendLine()
+                                appendLine(if (message.role == "user") "我：" else "AI：")
+                                appendLine(message.content)
+                            }
+                        })
+                    }
+                }
+            }.sortedBy { it.time }
+            onReady(buildString {
+                appendLine("Listen This Lesson · AI 内容导出")
+                appendLine()
+                entries.forEachIndexed { index, entry ->
+                    if (index > 0) appendLine("--------------------")
+                    appendLine(entry.body.trimEnd())
+                    appendLine()
+                }
+            })
+        }
+    }
+
     fun runFixedAction(
         recordId: Long,
         action: AiActionType,
         availableSegments: List<TranscriptEntity>,
-        photos: List<PendingAiPhoto> = emptyList(),
+        attachments: List<PendingAiAttachment> = emptyList(),
         onCreated: (Long) -> Unit
     ) {
         if (aiJob?.isActive == true) {
-            discardPhotos(photos)
+            discardAttachments(attachments)
             _uiState.update { it.copy(error = "已有 AI 请求正在处理。") }
             return
         }
         val selected = selectedSegments(recordId, availableSegments) ?: run {
-            discardPhotos(photos)
+            discardAttachments(attachments)
             return
         }
-        runAction(recordId, action, selected, photos, clearSelectionAfterCreate = true, onCreated)
+        runAction(recordId, action, selected, attachments, clearSelectionAfterCreate = true, onCreated)
     }
 
     fun runFullRecordAction(
         recordId: Long,
         action: AiActionType,
         availableSegments: List<TranscriptEntity>,
-        photos: List<PendingAiPhoto> = emptyList(),
+        attachments: List<PendingAiAttachment> = emptyList(),
         onCreated: (Long) -> Unit
     ) {
         if (aiJob?.isActive == true) {
-            discardPhotos(photos)
+            discardAttachments(attachments)
             _uiState.update { it.copy(error = "已有 AI 请求正在处理。") }
             return
         }
         val segments = availableSegments.sortedBy { it.startTime }
         if (segments.isEmpty()) {
-            discardPhotos(photos)
+            discardAttachments(attachments)
             _uiState.update { it.copy(error = "当前课堂记录还没有识别内容。") }
             return
         }
-        runAction(recordId, action, segments, photos, clearSelectionAfterCreate = false, onCreated)
+        runAction(recordId, action, segments, attachments, clearSelectionAfterCreate = false, onCreated)
     }
 
     private fun runAction(
         recordId: Long,
         action: AiActionType,
         segments: List<TranscriptEntity>,
-        photos: List<PendingAiPhoto>,
+        attachments: List<PendingAiAttachment>,
         clearSelectionAfterCreate: Boolean,
         onCreated: (Long) -> Unit
     ) {
@@ -292,19 +407,23 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
             val selected = segments.sortedBy { it.startTime }
             val snapshot = buildSourceSnapshot(selected)
             if (!validateSnapshot(snapshot, clearSelectionAfterCreate)) {
-                discardPhotos(photos)
+                discardAttachments(attachments)
                 return@launch
             }
             val credentials = credentialsOrReport() ?: run {
-                discardPhotos(photos)
+                discardAttachments(attachments)
                 return@launch
             }
             val promptSettings = settingsRepository.settings.first().aiPrompts
-            val prompt = promptFor(action, promptSettings) + if (photos.isNotEmpty()) "\n\n${promptSettings.imageContext}" else ""
+            val prompt = buildActionPrompt(
+                action = action,
+                prompts = promptSettings,
+                coursePrompt = if (action == AiActionType.CORRECT_ASR) courseAsrPrompt(recordId) else ""
+            )
             val resultId = runCatching {
-                repository.createResult(recordId, action, prompt, snapshot, selected.map { it.id }, photos)
+                repository.createResult(recordId, action, prompt, snapshot, selected.map { it.id }, attachments)
             }.getOrElse { exception ->
-                discardPhotos(photos)
+                discardAttachments(attachments)
                 _uiState.update { it.copy(error = safeError(exception as? Exception ?: Exception(exception))) }
                 return@launch
             }
@@ -312,24 +431,35 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
             onCreated(resultId)
             _uiState.update { it.copy(isBusy = true, error = null) }
             try {
-                val images = repository.resultAttachmentsOnce(resultId).map { photoStore.dataUrl(it.relativePath, it.mimeType) }
+                val images = repository.resultAttachmentsOnce(resultId)
+                    .filter { it.kind == AiAttachmentKind.IMAGE.name }
+                    .map { attachment -> attachmentStore.imageDataUrl(attachment) }
                 val completion = streamResult(
                     resultId,
                     credentials,
                     listOf(
                         AiChatMessage("system", prompt),
-                        AiChatMessage("user", "以下是按时间排列的课堂原文：\n\n$snapshot", images)
+                        AiChatMessage("user", actionUserMessage(action, selected, snapshot), images)
                     ),
                     requestOptions(chat = false)
                 )
-                repository.completeResult(resultId, completion.content)
+                val correction = if (action == AiActionType.CORRECT_ASR) {
+                    CorrectionPayloadCodec.decode(completion.content, selected)
+                } else null
+                val output = correction?.let { CorrectionPayloadCodec.toMarkdown(it, selected) } ?: completion.content
+                repository.completeResult(
+                    id = resultId,
+                    output = output,
+                    reasoningContent = completion.reasoningContent,
+                    correctionPayload = correction?.let(CorrectionPayloadCodec::encode)
+                )
                 recordDiagnostics(credentials, completion, snapshot, images.size)
             } catch (exception: CancellationException) {
                 throw exception
             } catch (exception: Exception) {
                 val message = safeError(exception)
                 repository.failResult(resultId, message)
-                recordFailureDiagnostics(credentials, snapshot, photos.size, message)
+                recordFailureDiagnostics(credentials, snapshot, attachments.count { it.kind == AiAttachmentKind.IMAGE }, message)
             } finally {
                 clearResultStreamPhase(resultId)
                 _uiState.update { it.copy(isBusy = false) }
@@ -345,17 +475,34 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
             repository.markResultPending(resultId)
             _uiState.update { it.copy(isBusy = true, error = null) }
             try {
-                val images = repository.resultAttachmentsOnce(resultId).map { photoStore.dataUrl(it.relativePath, it.mimeType) }
+                val action = runCatching { AiActionType.valueOf(result.actionType) }.getOrNull()
+                val source = repository.resultSourceSegmentsOnce(resultId)
+                val images = repository.resultAttachmentsOnce(resultId)
+                    .filter { it.kind == AiAttachmentKind.IMAGE.name }
+                    .map { attachment -> attachmentStore.imageDataUrl(attachment) }
                 val completion = streamResult(
                     resultId,
                     credentials,
                     listOf(
                         AiChatMessage("system", result.requestPrompt),
-                        AiChatMessage("user", "以下是按时间排列的课堂原文：\n\n${result.sourceTextSnapshot}", images)
+                        AiChatMessage(
+                            "user",
+                            actionUserMessage(action, source, result.sourceTextSnapshot),
+                            images
+                        )
                     ),
                     requestOptions(chat = false)
                 )
-                repository.completeResult(resultId, completion.content)
+                val correction = if (action == AiActionType.CORRECT_ASR) {
+                    CorrectionPayloadCodec.decode(completion.content, source)
+                } else null
+                val output = correction?.let { CorrectionPayloadCodec.toMarkdown(it, source) } ?: completion.content
+                repository.completeResult(
+                    id = resultId,
+                    output = output,
+                    reasoningContent = completion.reasoningContent,
+                    correctionPayload = correction?.let(CorrectionPayloadCodec::encode)
+                )
                 recordDiagnostics(credentials, completion, result.sourceTextSnapshot, images.size)
             } catch (exception: CancellationException) {
                 throw exception
@@ -374,26 +521,26 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
         recordId: Long,
         question: String,
         availableSegments: List<TranscriptEntity>,
-        photos: List<PendingAiPhoto> = emptyList(),
+        attachments: List<PendingAiAttachment> = emptyList(),
         onCreated: (Long) -> Unit
     ) {
         if (aiJob?.isActive == true || question.isBlank()) {
-            discardPhotos(photos)
+            discardAttachments(attachments)
             if (aiJob?.isActive == true) _uiState.update { it.copy(error = "已有 AI 请求正在处理。") }
             return
         }
         aiJob = viewModelScope.launch {
             val selected = selectedSegments(recordId, availableSegments) ?: run {
-                discardPhotos(photos)
+                discardAttachments(attachments)
                 return@launch
             }
             val snapshot = buildSourceSnapshot(selected)
             if (!validateSnapshot(snapshot)) {
-                discardPhotos(photos)
+                discardAttachments(attachments)
                 return@launch
             }
             credentialsOrReport() ?: run {
-                discardPhotos(photos)
+                discardAttachments(attachments)
                 return@launch
             }
             val promptSettings = settingsRepository.settings.first().aiPrompts
@@ -401,13 +548,13 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
             val conversationId = runCatching {
                 repository.createConversation(recordId, title, snapshot, selected.map { it.id }, promptSettings.customConversation)
             }.getOrElse { exception ->
-                discardPhotos(photos)
+                discardAttachments(attachments)
                 _uiState.update { it.copy(error = safeError(exception as? Exception ?: Exception(exception))) }
                 return@launch
             }
             clearSelection()
             onCreated(conversationId)
-            sendMessageInternal(conversationId, question.trim(), photos)
+            sendMessageInternal(conversationId, question.trim(), attachments)
         }
     }
 
@@ -437,19 +584,19 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun sendResultFollowUp(resultId: Long, question: String, photos: List<PendingAiPhoto> = emptyList()) {
+    fun sendResultFollowUp(resultId: Long, question: String, attachments: List<PendingAiAttachment> = emptyList()) {
         if (aiJob?.isActive == true || question.isBlank()) {
-            discardPhotos(photos)
+            discardAttachments(attachments)
             if (aiJob?.isActive == true) _uiState.update { it.copy(error = "已有 AI 请求正在处理。") }
             return
         }
         aiJob = viewModelScope.launch {
             val result = repository.resultOnce(resultId) ?: run {
-                discardPhotos(photos)
+                discardAttachments(attachments)
                 return@launch
             }
             if (result.status != AiRequestStatus.SUCCESS.name || result.output.isNullOrBlank()) {
-                discardPhotos(photos)
+                discardAttachments(attachments)
                 _uiState.update { it.copy(error = "AI 结果尚未成功生成，暂时不能继续追问。") }
                 return@launch
             }
@@ -465,52 +612,90 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
                     originResultId = result.id
                 )
                 repository.conversationOnce(id) ?: run {
-                    discardPhotos(photos)
+                    discardAttachments(attachments)
                     return@launch
                 }
             }
-            sendMessageInternal(conversation.id, question.trim(), photos)
+            sendMessageInternal(conversation.id, question.trim(), attachments)
         }
     }
 
-    fun sendMessage(conversationId: Long, question: String, photos: List<PendingAiPhoto> = emptyList()) {
+    fun sendMessage(conversationId: Long, question: String, attachments: List<PendingAiAttachment> = emptyList()) {
         if (aiJob?.isActive == true || question.isBlank()) {
-            discardPhotos(photos)
+            discardAttachments(attachments)
             if (aiJob?.isActive == true) _uiState.update { it.copy(error = "已有 AI 请求正在处理。") }
             return
         }
-        aiJob = viewModelScope.launch { sendMessageInternal(conversationId, question.trim(), photos) }
+        aiJob = viewModelScope.launch { sendMessageInternal(conversationId, question.trim(), attachments) }
     }
 
-    private suspend fun sendMessageInternal(conversationId: Long, question: String, photos: List<PendingAiPhoto>) {
+    fun createGeneralConversation(
+        question: String,
+        attachments: List<PendingAiAttachment> = emptyList(),
+        onCreated: (Long) -> Unit
+    ) {
+        if (aiJob?.isActive == true || question.isBlank()) {
+            discardAttachments(attachments)
+            if (aiJob?.isActive == true) _uiState.update { it.copy(error = "已有 AI 请求正在处理。") }
+            return
+        }
+        aiJob = viewModelScope.launch {
+            credentialsOrReport() ?: run {
+                discardAttachments(attachments)
+                return@launch
+            }
+            val conversationId = repository.createConversation(
+                recordId = null,
+                title = conversationTitle(question, "新对话"),
+                snapshot = "",
+                segmentIds = emptyList(),
+                systemPrompt = settingsRepository.settings.first().aiPrompts.generalConversation
+            )
+            onCreated(conversationId)
+            sendMessageInternal(conversationId, question.trim(), attachments)
+        }
+    }
+
+    private suspend fun sendMessageInternal(conversationId: Long, question: String, attachments: List<PendingAiAttachment>) {
         val conversation = repository.conversationOnce(conversationId) ?: run {
-            discardPhotos(photos)
+            discardAttachments(attachments)
             return
         }
         val credentials = credentialsOrReport() ?: run {
-            discardPhotos(photos)
+            discardAttachments(attachments)
             return
         }
         val messagesBefore = repository.messagesOnce(conversationId)
-        val imagePrompt = if (photos.isNotEmpty()) settingsRepository.settings.first().aiPrompts.imageContext else ""
-        val exchange = repository.insertUserAndPendingAssistant(
-            conversationId = conversationId,
-            recordId = conversation.recordId,
-            question = question,
-            contextPrompt = imagePrompt,
-            photos = photos
-        )
+        val imagePrompt = if (attachments.any { it.kind == AiAttachmentKind.IMAGE }) {
+            settingsRepository.settings.first().aiPrompts.imageContext
+        } else ""
+        val exchange = try {
+            repository.insertUserAndPendingAssistant(
+                conversationId = conversationId,
+                recordId = conversation.recordId,
+                question = question,
+                contextPrompt = imagePrompt,
+                attachments = attachments
+            )
+        } catch (exception: Exception) {
+            discardAttachments(attachments)
+            _uiState.update { it.copy(error = safeError(exception)) }
+            return
+        }
         if (messagesBefore.none { it.role == "user" } && conversation.originResultId == null) {
-            repository.renameConversation(conversationId, question.replace('\n', ' ').take(24).ifBlank { "课堂问答" })
+            repository.renameConversation(conversationId, conversationTitle(question, "课堂问答"))
         }
         _uiState.update { it.copy(isBusy = true, error = null) }
         try {
-            val attachments = repository.conversationAttachmentsOnce(conversationId).groupBy { it.messageId }
+            val persistedAttachments = repository.conversationAttachmentsOnce(conversationId).groupBy { it.messageId }
             val history = repository.messagesOnce(conversationId)
                 .filter { it.status == AiRequestStatus.SUCCESS.name }
                 .map { message ->
-                    val images = attachments[message.id].orEmpty().map { photoStore.dataUrl(it.relativePath, it.mimeType) }
-                    val content = if (message.contextPrompt.isBlank()) message.content else "${message.content}\n\n${message.contextPrompt}"
+                    val messageAttachments = persistedAttachments[message.id].orEmpty()
+                    val images = messageAttachments.filter { it.kind == AiAttachmentKind.IMAGE.name }
+                        .map { attachment -> attachmentStore.imageDataUrl(attachment) }
+                    val textFiles = messageAttachments.filter { it.kind == AiAttachmentKind.TEXT.name }
+                    val content = buildMessageContent(message.content, message.contextPrompt, textFiles)
                     AiChatMessage(message.role, content, images)
                 }
             val originResult = conversation.originResultId?.let { resultId ->
@@ -518,7 +703,9 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
             }
             val contextMessages = buildList {
                 add(AiChatMessage("system", conversation.systemPrompt))
-                add(AiChatMessage("user", "以下内容是本对话冻结的课堂原文，只能依据它回答：\n\n${conversation.sourceTextSnapshot}"))
+                if (conversation.sourceTextSnapshot.isNotBlank()) {
+                    add(AiChatMessage("user", "以下内容是本对话冻结的课堂原文，只能依据它回答：\n\n${conversation.sourceTextSnapshot}"))
+                }
                 originResult?.output?.takeIf { it.isNotBlank() }?.let { add(AiChatMessage("assistant", it)) }
             }
             val completion = streamMessage(
@@ -527,14 +714,19 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
                 contextMessages + history,
                 requestOptions(chat = true)
             )
-            repository.completeMessage(conversationId, exchange.assistantMessageId, completion.content)
-            recordDiagnostics(credentials, completion, conversation.sourceTextSnapshot, photos.size)
+            repository.completeMessage(
+                conversationId,
+                exchange.assistantMessageId,
+                completion.content,
+                completion.reasoningContent
+            )
+            recordDiagnostics(credentials, completion, conversation.sourceTextSnapshot, attachments.count { it.kind == AiAttachmentKind.IMAGE })
         } catch (exception: CancellationException) {
             throw exception
         } catch (exception: Exception) {
             val message = safeError(exception)
             repository.failMessage(conversationId, exchange.assistantMessageId, message)
-            recordFailureDiagnostics(credentials, conversation.sourceTextSnapshot, photos.size, message)
+            recordFailureDiagnostics(credentials, conversation.sourceTextSnapshot, attachments.count { it.kind == AiAttachmentKind.IMAGE }, message)
         } finally {
             clearMessageStreamPhase(exchange.assistantMessageId)
             _uiState.update { it.copy(isBusy = false) }
@@ -548,24 +740,32 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
         options: AiRequestOptions
     ): AiCompletion {
         var lastDraft = ""
+        var lastReasoningDraft = ""
         var latestDraft = ""
+        var latestReasoningDraft = ""
         var lastWriteAt = 0L
         return try {
             client.streamChat(credentials, messages, options) { update ->
                 latestDraft = update.content
+                latestReasoningDraft = update.reasoningContent
                 _uiState.update { state ->
                     state.copy(resultStreamPhases = state.resultStreamPhases + (resultId to update.phase))
                 }
                 val now = android.os.SystemClock.elapsedRealtime()
-                if (latestDraft != lastDraft && now - lastWriteAt >= STREAM_DRAFT_INTERVAL_MS) {
-                    repository.updateResultDraft(resultId, latestDraft)
+                if ((latestDraft != lastDraft || latestReasoningDraft != lastReasoningDraft) &&
+                    now - lastWriteAt >= STREAM_DRAFT_INTERVAL_MS
+                ) {
+                    repository.updateResultDraft(resultId, latestDraft, latestReasoningDraft)
                     lastDraft = latestDraft
+                    lastReasoningDraft = latestReasoningDraft
                     lastWriteAt = now
                 }
             }
         } catch (exception: Exception) {
-            if (exception !is CancellationException && latestDraft != lastDraft) {
-                repository.updateResultDraft(resultId, latestDraft)
+            if (exception !is CancellationException &&
+                (latestDraft != lastDraft || latestReasoningDraft != lastReasoningDraft)
+            ) {
+                repository.updateResultDraft(resultId, latestDraft, latestReasoningDraft)
             }
             throw exception
         }
@@ -578,24 +778,32 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
         options: AiRequestOptions
     ): AiCompletion {
         var lastDraft = ""
+        var lastReasoningDraft = ""
         var latestDraft = ""
+        var latestReasoningDraft = ""
         var lastWriteAt = 0L
         return try {
             client.streamChat(credentials, messages, options) { update ->
                 latestDraft = update.content
+                latestReasoningDraft = update.reasoningContent
                 _uiState.update { state ->
                     state.copy(messageStreamPhases = state.messageStreamPhases + (messageId to update.phase))
                 }
                 val now = android.os.SystemClock.elapsedRealtime()
-                if (latestDraft != lastDraft && now - lastWriteAt >= STREAM_DRAFT_INTERVAL_MS) {
-                    repository.updateMessageDraft(messageId, latestDraft)
+                if ((latestDraft != lastDraft || latestReasoningDraft != lastReasoningDraft) &&
+                    now - lastWriteAt >= STREAM_DRAFT_INTERVAL_MS
+                ) {
+                    repository.updateMessageDraft(messageId, latestDraft, latestReasoningDraft)
                     lastDraft = latestDraft
+                    lastReasoningDraft = latestReasoningDraft
                     lastWriteAt = now
                 }
             }
         } catch (exception: Exception) {
-            if (exception !is CancellationException && latestDraft != lastDraft) {
-                repository.updateMessageDraft(messageId, latestDraft)
+            if (exception !is CancellationException &&
+                (latestDraft != lastDraft || latestReasoningDraft != lastReasoningDraft)
+            ) {
+                repository.updateMessageDraft(messageId, latestDraft, latestReasoningDraft)
             }
             throw exception
         }
@@ -607,6 +815,11 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun clearMessageStreamPhase(messageId: Long) = _uiState.update { state ->
         state.copy(messageStreamPhases = state.messageStreamPhases - messageId)
+    }
+
+    private suspend fun courseAsrPrompt(recordId: Long): String {
+        val record = database.recordDao().record(recordId).first() ?: return ""
+        return database.courseDao().course(record.courseId).first()?.asrPrompt.orEmpty()
     }
 
     private fun selectedSegments(recordId: Long, available: List<TranscriptEntity>): List<TranscriptEntity>? {
@@ -699,7 +912,28 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
     private fun safeError(exception: Exception): String =
         exception.message?.takeIf { it.isNotBlank() } ?: "AI 请求失败。"
 
-    private fun discardPhotos(photos: List<PendingAiPhoto>) = photos.forEach(photoStore::discard)
+    private suspend fun ownerNames(recordId: Long): Pair<String, String> {
+        val record = database.recordDao().record(recordId).first() ?: return Pair("未知课程", "未知记录")
+        val course = database.courseDao().course(record.courseId).first()
+        return Pair(course?.name ?: "未知课程", record.name)
+    }
+
+    private suspend fun buildMessageContent(
+        content: String,
+        contextPrompt: String,
+        textAttachments: List<AiAttachmentEntity>
+    ): String = buildString {
+        append(content)
+        if (contextPrompt.isNotBlank()) append("\n\n").append(contextPrompt)
+        textAttachments.forEach { attachment ->
+            val text = attachmentStore.textContent(attachment)
+            append("\n\n附件：").append(attachment.displayName).append("\n```\n")
+            append(text)
+            append("\n```")
+        }
+    }
+
+    private fun discardAttachments(attachments: List<PendingAiAttachment>) = attachments.forEach(attachmentStore::discard)
 
     private fun formatExportTime(value: Long): String =
         SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(value))
@@ -709,12 +943,52 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
         const val MAX_SOURCE_CODE_POINTS = 20_000
         fun isSourceWithinLimit(value: String): Boolean =
             value.codePointCount(0, value.length) <= MAX_SOURCE_CODE_POINTS
+
+        fun conversationTitle(question: String, fallback: String = "新对话"): String {
+            val normalized = question.trim().replace(Regex("\\s+"), " ")
+            if (normalized.isBlank()) return fallback
+            val count = normalized.codePointCount(0, normalized.length).coerceAtMost(24)
+            return normalized.substring(0, normalized.offsetByCodePoints(0, count))
+        }
+
         fun buildSourceSnapshot(segments: List<TranscriptEntity>): String {
             val formatter = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
             return segments.sortedBy { it.startTime }.joinToString("\n\n") { segment ->
-                "[${formatter.format(Date(segment.startTime))}]\n${segment.text}"
+                "[${formatter.format(Date(segment.startTime))}]\n${segment.effectiveText}"
             }
         }
+
+        fun buildCorrectionSource(segments: List<TranscriptEntity>): String {
+            val formatter = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+            return segments.sortedBy { it.startTime }.joinToString("\n\n") { segment ->
+                "<segment id=\"${segment.id}\" time=\"${formatter.format(Date(segment.startTime))}\">\n" +
+                    segment.effectiveText + "\n</segment>"
+            }
+        }
+
+        fun buildActionPrompt(action: AiActionType, prompts: AiPromptSettings, coursePrompt: String = ""): String {
+            if (action != AiActionType.CORRECT_ASR) return promptFor(action, prompts)
+            return buildString {
+                appendLine("你是严谨的中文课堂 ASR 校对器。必须逐段审校明显的错字、同音词、专业术语、断句和标点，同时严格保持原意。")
+                appendLine("不要复述时间标签，不要用（?）或类似占位符代替校对；无法可靠判断时保留原词，并在 changes 中说明不确定。")
+                appendLine("只返回一个 JSON 对象，不得使用 Markdown 代码围栏或附加说明。格式必须是：")
+                appendLine("{\"segments\":[{\"segmentId\":123,\"correctedText\":\"纠正后的完整片段\",\"changes\":[\"原词 → 新词：理由\"]}]}")
+                appendLine("每个输入 segment 必须且只能出现一次，segmentId 必须原样返回；即使无需修改也必须返回该片段，changes 使用空数组。")
+                appendLine()
+                appendLine("补充校对规则：${prompts.correctAsr.trim()}")
+                if (coursePrompt.isNotBlank()) {
+                    appendLine()
+                    appendLine("课程专业词参考（只能用于辅助判断，不得凭空插入）：${coursePrompt.trim()}")
+                }
+            }.trim()
+        }
+
+        fun actionUserMessage(action: AiActionType?, segments: List<TranscriptEntity>, snapshot: String): String =
+            if (action == AiActionType.CORRECT_ASR) {
+                "请按协议校对以下课堂转写：\n\n${buildCorrectionSource(segments)}"
+            } else {
+                "以下是按时间排列的课堂原文：\n\n$snapshot"
+            }
 
         fun promptFor(action: AiActionType): String = promptFor(action, AiPromptSettings())
 

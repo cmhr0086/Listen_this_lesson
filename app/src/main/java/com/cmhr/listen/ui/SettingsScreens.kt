@@ -64,7 +64,8 @@ fun SettingsScreen(
     onVadPresets: () -> Unit,
     onAiPrompts: () -> Unit,
     onAsrPromptPolicy: () -> Unit,
-    onAiGeneration: () -> Unit
+    onAiGeneration: () -> Unit,
+    onAsrDiagnostics: () -> Unit = {}
 ) = SettingsOverview(
     state = state,
     setDeveloperMode = model::setDeveloperMode,
@@ -74,7 +75,8 @@ fun SettingsScreen(
     onVadPresets = onVadPresets,
     onAiPrompts = onAiPrompts,
     onAsrPromptPolicy = onAsrPromptPolicy,
-    onAiGeneration = onAiGeneration
+    onAiGeneration = onAiGeneration,
+    onAsrDiagnostics = onAsrDiagnostics
 )
 
 @Composable
@@ -87,7 +89,8 @@ internal fun SettingsOverview(
     onVadPresets: () -> Unit,
     onAiPrompts: () -> Unit,
     onAsrPromptPolicy: () -> Unit,
-    onAiGeneration: () -> Unit
+    onAiGeneration: () -> Unit,
+    onAsrDiagnostics: () -> Unit = {}
 ) {
     LazyColumn(
         Modifier.fillMaxSize(),
@@ -117,16 +120,17 @@ internal fun SettingsOverview(
                 Row(Modifier.padding(16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text("开发者模式", style = MaterialTheme.typography.titleMedium)
-                        Text("开启后显示 VAD 设置，并在记录页显示实时诊断。", style = MaterialTheme.typography.bodySmall)
+                        Text("开启后显示 VAD 设置和独立的 ASR 诊断页面。", style = MaterialTheme.typography.bodySmall)
                     }
                     Switch(state.developerMode, setDeveloperMode)
                 }
             }
         }
         if (state.developerMode) {
+            item("asr-diagnostics-link") { SettingsLink("ASR 诊断", "查看持久队列、异步任务、网络阶段和前后台状态。", onAsrDiagnostics) }
             item("vad-parameters-link") { SettingsLink("VAD 参数", "调整阈值、静音、前后保留和时长限制。", onVadParameters) }
             item("vad-presets-link") { SettingsLink("VAD 预设", "选择默认、远距离、近距离或高噪声配置。", onVadPresets) }
-            item("ai-prompts-link") { SettingsLink("AI 提示词", "编辑总结、笔记、纠错、回答、对话和图片场景提示词。", onAiPrompts) }
+            item("ai-prompts-link") { SettingsLink("AI 提示词", "编辑笔记、纠错、回答、对话和图片场景提示词。", onAiPrompts) }
             item("ai-generation-link") { SettingsLink("AI 生成参数", "调整输出长度、温度、思考模式与推理强度。", onAiGeneration) }
         }
     }
@@ -303,7 +307,7 @@ fun AiServiceSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
 @Composable
 fun AiPromptsSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
     var value by remember(state.aiPrompts) { mutableStateOf(state.aiPrompts) }
-    val valid = listOf(value.summary, value.organizeNotes, value.correctAsr, value.quickAnswer, value.customConversation, value.imageContext)
+    val valid = listOf(value.organizeNotes, value.correctAsr, value.quickAnswer, value.customConversation, value.generalConversation, value.imageContext)
         .all { it.isNotBlank() }
     LazyColumn(
         Modifier.fillMaxSize(),
@@ -313,11 +317,11 @@ fun AiPromptsSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
         item("prompt-help") {
             Text("新设置只影响后续 AI 请求；已经生成的结果与现有对话继续使用创建时冻结的提示词。", style = MaterialTheme.typography.bodyMedium)
         }
-        item("prompt-summary") { PromptField("总结", value.summary) { value = value.copy(summary = it) } }
         item("prompt-notes") { PromptField("整理成笔记", value.organizeNotes) { value = value.copy(organizeNotes = it) } }
         item("prompt-correct") { PromptField("修正明显 ASR 错误", value.correctAsr) { value = value.copy(correctAsr = it) } }
         item("prompt-quick") { PromptField("快速回答", value.quickAnswer) { value = value.copy(quickAnswer = it) } }
         item("prompt-chat") { PromptField("自定义对话", value.customConversation) { value = value.copy(customConversation = it) } }
+        item("prompt-general-chat") { PromptField("通用对话", value.generalConversation) { value = value.copy(generalConversation = it) } }
         item("prompt-image") { PromptField("图片补充", value.imageContext) { value = value.copy(imageContext = it) } }
         item("prompt-actions") {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -385,7 +389,7 @@ fun AiGenerationSettingsScreen(state: SettingsUiState, model: SettingsViewModel)
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("仅影响后续 AI 请求。诊断不会记录密钥或思维链。", style = MaterialTheme.typography.bodySmall)
                     IntParameter("最大输出 Tokens", value.maxTokens, 512..32768, 512) { value = value.copy(maxTokens = it) }
-                    FloatParameter("固定任务温度", "总结、笔记和纠错", value.fixedTemperature, 0f..1.5f, 0.1f) { value = value.copy(fixedTemperature = it) }
+                    FloatParameter("固定任务温度", "笔记、纠错和快速回答", value.fixedTemperature, 0f..1.5f, 0.1f) { value = value.copy(fixedTemperature = it) }
                     FloatParameter("对话温度", "课堂问答和追问", value.chatTemperature, 0f..1.5f, 0.1f) { value = value.copy(chatTemperature = it) }
                     Text("DeepSeek 思考", style = MaterialTheme.typography.titleSmall)
                     HorizontalChoiceSelector(

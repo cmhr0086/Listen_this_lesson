@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Description
@@ -45,6 +46,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.unit.dp
 import com.cmhr.listen.AiUiState
 import com.cmhr.listen.AiViewModel
@@ -173,32 +175,32 @@ fun RecordDetailsScreen(
     requestedFullAction: AiActionType?,
     consumeFullAction: () -> Unit,
     openResult: (Long) -> Unit,
-    openConversation: (Long) -> Unit,
-    stopListening: () -> Unit = {}
+    openConversation: (Long) -> Unit
 ) {
-    var debugExpanded by remember { mutableStateOf(false) }
-    var pendingAction by remember { mutableStateOf<AiActionType?>(null) }
-    var pendingActionUsesFullRecord by remember { mutableStateOf(false) }
-    var pendingPhotos by remember { mutableStateOf(emptyList<com.cmhr.listen.data.ai.PendingAiPhoto>()) }
-    val currentPendingPhotos by rememberUpdatedState(pendingPhotos)
     val record = state.selectedRecord?.takeIf { it.id == recordId }
     val course = record?.let { selected -> state.courses.firstOrNull { it.id == selected.courseId } }
     val segments = state.detailSegments.filter { it.recordId == recordId }
     val selectedIds = aiState.takeIf { it.selectionRecordId == recordId }?.selectedSegmentIds.orEmpty()
     val selectionMode = aiState.selectionRecordId == recordId
     val isThisRecordListening = listening.activeRecordId == recordId && listening.isListening
+    val displayedSegments = segments.asReversed()
+    val listState = rememberLazyListState()
+    val dragSelection = rememberDragSelectionController(
+        listState = listState,
+        orderedKeys = displayedSegments.map { it.id },
+        selectedKeys = selectedIds,
+        onSelectionChanged = { aiModel.replaceSelection(recordId, it) }
+    )
 
     DisposableEffect(recordId) {
         onDispose {
             if (aiModel.uiState.value.selectionRecordId == recordId) aiModel.clearSelection()
-            currentPendingPhotos.forEach(aiModel::discardPhoto)
         }
     }
 
     androidx.compose.runtime.LaunchedEffect(requestedFullAction) {
         requestedFullAction?.let {
-            pendingAction = it
-            pendingActionUsesFullRecord = true
+            aiModel.runFullRecordAction(recordId, it, segments, onCreated = openResult)
             consumeFullAction()
         }
     }
@@ -214,8 +216,7 @@ fun RecordDetailsScreen(
                     OutlinedButton(
                         onClick = {
                             dismissAiActions()
-                            pendingAction = action
-                            pendingActionUsesFullRecord = false
+                            aiModel.runFixedAction(recordId, action, segments, onCreated = openResult)
                         },
                         enabled = !aiState.isBusy,
                         modifier = Modifier.fillMaxWidth()
@@ -233,83 +234,41 @@ fun RecordDetailsScreen(
         }
     }
 
-    pendingAction?.let { action ->
-        ModalBottomSheet(onDismissRequest = {
-            pendingPhotos.forEach(aiModel::discardPhoto)
-            pendingPhotos = emptyList()
-            pendingAction = null
-        }) {
-            Column(
-                Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 24.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Text(action.displayName, style = MaterialTheme.typography.titleLarge)
-                Text("可选拍摄最多 3 张黑板或课件照片，与课堂原文一起交给 AI。", style = MaterialTheme.typography.bodyMedium)
-                PhotoAttachmentEditor(pendingPhotos, aiModel) { pendingPhotos = it }
-                Button(
-                    onClick = {
-                        val submittedPhotos = pendingPhotos
-                        pendingPhotos = emptyList()
-                        pendingAction = null
-                        if (pendingActionUsesFullRecord) {
-                            aiModel.runFullRecordAction(recordId, action, segments, submittedPhotos, openResult)
-                        } else {
-                            aiModel.runFixedAction(recordId, action, segments, submittedPhotos, openResult)
-                        }
-                    },
-                    enabled = !aiState.isBusy,
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("开始处理") }
-            }
-        }
-    }
-
     Column(Modifier.fillMaxSize()) {
         LazyColumn(
-            Modifier.weight(1f).fillMaxWidth(),
+            Modifier.weight(1f).fillMaxWidth().dragSelectionViewport(dragSelection),
+            state = listState,
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             if (record == null || course == null) item("loading-record") { Text("正在加载课堂记录……") }
             else {
                 item("record-summary") {
-                    RecordDetailCard(course, record, segments, developerMode)
+                    RecordDetailCard(course, record)
                 }
                 item("listening-status") {
                     CompactListeningStatus(listening, isThisRecordListening)
                 }
                 listening.error?.let { item("listening-error") { ErrorCard(it) } }
                 aiState.error?.let { item("ai-error") { ErrorCard(it) } }
-                if (developerMode) {
-                    item("vad-debug-header") { ExpandHeader("VAD 调试", debugExpanded) { debugExpanded = !debugExpanded } }
-                    if (debugExpanded) item("vad-debug-content") { VadDebugCard(listening) }
-                }
                 item("segment-heading") { Text("识别内容", style = MaterialTheme.typography.titleLarge) }
                 if (segments.isEmpty()) item("empty-segments") { Text("该课堂记录暂无识别内容。") }
-                items(segments.asReversed(), key = { "segment-${it.id}" }) { segment ->
+                items(displayedSegments, key = { "segment-${it.id}" }) { segment ->
                     val selected = segment.id in selectedIds
-                    SelectableTranscriptCard(segment, selected, selectionMode) {
-                        aiModel.toggleSelection(recordId, segment.id)
-                    }
+                    SelectableTranscriptCard(
+                        segment = segment,
+                        selected = selected,
+                        selectionMode = selectionMode,
+                        developerMode = false,
+                        dragSelectionEnabled = true,
+                        modifier = Modifier.dragSelectableItem(segment.id, dragSelection),
+                        toggle = { aiModel.toggleSelection(recordId, segment.id) },
+                        restoreOriginal = { aiModel.restoreOriginal(segment.id) }
+                    )
                 }
             }
         }
-        if (isThisRecordListening) {
-            RecordListeningStopBar(stopListening)
-        }
     }
-}
-
-@Composable
-internal fun RecordListeningStopBar(stop: () -> Unit) = Surface(tonalElevation = 4.dp) {
-    Button(
-        onClick = stop,
-        modifier = Modifier.fillMaxWidth().padding(12.dp).testTag("record-stop-listening"),
-        colors = androidx.compose.material3.ButtonDefaults.buttonColors(
-            containerColor = MaterialTheme.colorScheme.error,
-            contentColor = MaterialTheme.colorScheme.onError
-        )
-    ) { Text("停止监听") }
 }
 
 @Composable
@@ -327,10 +286,7 @@ internal fun CompactListeningStatus(listening: ListeningUiState, active: Boolean
                 ListeningElapsedText(if (active) listening.listeningStartedAtElapsedRealtimeMs else null)
             }
             Text(status, color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(
-                "检测到语音：${if (active && listening.isSpeechDetected) "是" else "否"}  ·  正在识别：${if (active && listening.isRecognizing) "是" else "否"}  ·  队列：${if (active) listening.pendingQueueCount else 0}",
-                style = MaterialTheme.typography.bodySmall
-            )
+            Text("检测到语音：${if (active && listening.isSpeechDetected) "是" else "否"}", style = MaterialTheme.typography.bodySmall)
         }
     }
 }
@@ -357,16 +313,43 @@ internal fun SelectableTranscriptCard(
     segment: TranscriptEntity,
     selected: Boolean,
     selectionMode: Boolean,
+    developerMode: Boolean = false,
+    dragSelectionEnabled: Boolean = false,
+    modifier: Modifier = Modifier,
+    restoreOriginal: () -> Unit = {},
     toggle: () -> Unit
 ) {
+    var showCorrection by remember(segment.id) { mutableStateOf(false) }
+    if (showCorrection && segment.correctedText != null) {
+        AlertDialog(
+            onDismissRequest = { showCorrection = false },
+            title = { Text("AI 纠错对照") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("原始 ASR", style = MaterialTheme.typography.labelLarge)
+                    Text(segment.text)
+                    Text("当前纠正文", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                    Text(segment.correctedText)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { restoreOriginal(); showCorrection = false }) { Text("恢复原文") }
+            },
+            dismissButton = { TextButton(onClick = { showCorrection = false }) { Text("关闭") } }
+        )
+    }
     Card(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .testTag("segment-${segment.id}")
             .semantics { this.selected = selected }
-            .combinedClickable(
-                onClick = { if (selectionMode) toggle() },
-                onLongClick = toggle
+            .semantics { onLongClick("选择片段") { toggle(); true } }
+            .then(
+                if (dragSelectionEnabled) Modifier.clickable(enabled = selectionMode) { toggle() }
+                else Modifier.combinedClickable(
+                    onClick = { if (selectionMode) toggle() },
+                    onLongClick = toggle
+                )
             ),
         colors = CardDefaults.cardColors(
             containerColor = if (selected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceVariant
@@ -375,7 +358,24 @@ internal fun SelectableTranscriptCard(
     ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(formatDateTime(segment.startTime), style = MaterialTheme.typography.titleSmall)
-            Text(segment.text, style = MaterialTheme.typography.bodyLarge)
+            if (developerMode) {
+                Text(
+                    "开始：${formatDateTime(segment.startTime)}  ·  结束：${formatDateTime(segment.endTime)}",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Text(
+                    "音频：${formatDuration(segment.audioDurationMs)}  ·  ASR：${segment.recognitionDurationMs?.let(::formatDuration) ?: "—"}",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            Text(segment.effectiveText, style = MaterialTheme.typography.bodyLarge)
+            if (segment.correctedText != null) {
+                TextButton(
+                    onClick = { showCorrection = true },
+                    enabled = !selectionMode,
+                    modifier = Modifier.align(Alignment.End)
+                ) { Text("AI 已纠错") }
+            }
         }
     }
 }
@@ -499,19 +499,12 @@ private fun RecordCard(
 @Composable
 private fun RecordDetailCard(
     course: CourseEntity,
-    record: ClassRecordEntity,
-    segments: List<TranscriptEntity>,
-    developerMode: Boolean
+    record: ClassRecordEntity
 ) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(course.name, style = MaterialTheme.typography.titleSmall)
             Text(record.name, style = MaterialTheme.typography.titleLarge)
-            if (developerMode) {
-                Text("开始：${formatDateTime(record.startedAt)}")
-                Text("结束：${record.endedAt?.let(::formatDateTime) ?: "进行中"}")
-                Text("识别片段：${segments.size} 条")
-            }
         }
     }
 }
@@ -529,7 +522,7 @@ internal fun buildTxt(course: CourseEntity, record: ClassRecordEntity, segments:
     appendLine()
     segments.sortedBy { it.startTime }.forEach {
         appendLine(formatDateTime(it.startTime))
-        appendLine(it.text)
+        appendLine(it.effectiveText)
         appendLine()
     }
 }

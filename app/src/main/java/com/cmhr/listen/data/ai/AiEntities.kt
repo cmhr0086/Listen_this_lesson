@@ -37,7 +37,9 @@ data class AiResultEntity(
     val status: String = AiRequestStatus.PENDING.name,
     val errorMessage: String? = null,
     val createdAt: Long,
-    val finishedAt: Long? = null
+    val finishedAt: Long? = null,
+    val reasoningContent: String = "",
+    val correctionPayload: String? = null
 )
 
 @Entity(
@@ -71,7 +73,7 @@ data class AiResultSegmentEntity(val resultId: Long, val segmentId: Long)
 )
 data class AiConversationEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val recordId: Long,
+    val recordId: Long?,
     val title: String,
     val sourceTextSnapshot: String,
     val systemPrompt: String = DEFAULT_CONVERSATION_PROMPT,
@@ -110,11 +112,14 @@ data class AiMessageEntity(
     val status: String = AiRequestStatus.SUCCESS.name,
     val errorMessage: String? = null,
     val createdAt: Long,
-    val finishedAt: Long? = null
+    val finishedAt: Long? = null,
+    val reasoningContent: String = ""
 )
 
+enum class AiAttachmentKind { IMAGE, TEXT }
+
 @Entity(
-    tableName = "ai_image_attachments",
+    tableName = "ai_attachments",
     foreignKeys = [
         ForeignKey(entity = ClassRecordEntity::class, parentColumns = ["id"], childColumns = ["recordId"], onDelete = ForeignKey.CASCADE),
         ForeignKey(entity = AiResultEntity::class, parentColumns = ["id"], childColumns = ["resultId"], onDelete = ForeignKey.CASCADE),
@@ -122,17 +127,23 @@ data class AiMessageEntity(
     ],
     indices = [Index("recordId"), Index("resultId"), Index("messageId")]
 )
-data class AiImageAttachmentEntity(
+data class AiAttachmentEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val recordId: Long,
+    val recordId: Long? = null,
     val resultId: Long? = null,
     val messageId: Long? = null,
+    val kind: String,
+    val displayName: String,
     val relativePath: String,
-    val mimeType: String = "image/jpeg",
-    val width: Int,
-    val height: Int,
+    val mimeType: String,
+    val sizeBytes: Long,
+    val width: Int? = null,
+    val height: Int? = null,
     val createdAt: Long
 )
 
 const val DEFAULT_CONVERSATION_PROMPT =
     "你是课堂内容问答助手。只能依据提供的冻结课堂原文回答；若原文不足以回答，应明确说明，不得虚构。"
+
+const val DEFAULT_GENERAL_CONVERSATION_PROMPT =
+    "你是可靠、清晰的中文 AI 助手。准确回答用户问题；不确定时明确说明，不得虚构事实。"

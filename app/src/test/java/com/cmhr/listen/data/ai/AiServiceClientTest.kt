@@ -11,7 +11,7 @@ import org.junit.Test
 
 class AiServiceClientTest {
     @Test
-    fun `stream chat joins deltas and hides reasoning content`() = runBlocking {
+    fun `stream chat joins and exposes reasoning separately from final content`() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(
                 MockResponse()
@@ -35,12 +35,14 @@ data: [DONE]
             ) { updates += it }
 
             assertEquals("课堂总结", result.content)
+            assertEquals("private reasoning", result.reasoningContent)
             assertTrue(result.reasoningPresent)
             assertEquals("stop", result.finishReason)
             assertEquals(8, result.promptTokens)
             assertTrue(updates.any { it.phase == AiStreamPhase.THINKING })
             assertTrue(updates.any { it.phase == AiStreamPhase.GENERATING && it.content == "课堂总结" })
             assertFalse(updates.any { it.content.contains("private reasoning") })
+            assertTrue(updates.any { it.reasoningContent == "private reasoning" })
             assertTrue(server.takeRequest().body.readUtf8().contains("\"stream\":true"))
         }
     }
@@ -76,6 +78,24 @@ data: [DONE]
             ) { updates += it }
             assertEquals("普通结果", result.content)
             assertEquals(AiStreamPhase.GENERATING, updates.last().phase)
+        }
+    }
+
+    @Test
+    fun `ordinary json fallback exposes reasoning before empty answer error`() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody(
+                """{"choices":[{"message":{"reasoning_content":"仍在推理","content":""},"finish_reason":"stop"}]}"""
+            ))
+            val updates = mutableListOf<AiStreamUpdate>()
+            val failure = runCatching {
+                AiServiceClient(OkHttpClient(), enforceHttps = false).streamChat(
+                    AiCredentials(server.url("/").toString().trimEnd('/'), "secret", "model"),
+                    listOf(AiChatMessage("user", "测试"))
+                ) { updates += it }
+            }.exceptionOrNull()
+            assertTrue(failure?.message.orEmpty().contains("思考"))
+            assertTrue(updates.any { it.reasoningContent == "仍在推理" })
         }
     }
 
@@ -214,6 +234,21 @@ data: [DONE]
             assertEquals("stop", first.finishReason)
             assertEquals(9, first.promptTokens)
             assertEquals("旧式结果", second.content)
+        }
+    }
+
+    @Test
+    fun `ordinary json preserves reasoning separately`() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(
+                """{"choices":[{"message":{"reasoning_content":"先检查课堂上下文","content":"最终回答"},"finish_reason":"stop"}]}"""
+            ))
+            val result = AiServiceClient(OkHttpClient(), enforceHttps = false).chat(
+                AiCredentials(server.url("/").toString().trimEnd('/'), "secret", "model"),
+                listOf(AiChatMessage("user", "问"))
+            )
+            assertEquals("先检查课堂上下文", result.reasoningContent)
+            assertEquals("最终回答", result.content)
         }
     }
 

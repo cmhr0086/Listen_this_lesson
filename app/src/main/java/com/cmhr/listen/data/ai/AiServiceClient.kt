@@ -47,6 +47,7 @@ data class AiRequestOptions(
 
 data class AiCompletion(
     val content: String,
+    val reasoningContent: String,
     val finishReason: String?,
     val promptTokens: Int?,
     val completionTokens: Int?,
@@ -58,6 +59,7 @@ enum class AiStreamPhase { CONNECTING, THINKING, GENERATING }
 
 data class AiStreamUpdate(
     val content: String,
+    val reasoningContent: String = "",
     val phase: AiStreamPhase,
     val finishReason: String? = null,
     val promptTokens: Int? = null,
@@ -167,7 +169,7 @@ class AiServiceClient(
     ): AiCompletion {
         validate(credentials.baseUrl, credentials.apiKey, credentials.model)?.let { throw IllegalStateException(it) }
         require(messages.isNotEmpty()) { "AI 请求内容不能为空。" }
-        onUpdate(AiStreamUpdate(content = "", phase = AiStreamPhase.CONNECTING))
+        onUpdate(AiStreamUpdate(content = "", reasoningContent = "", phase = AiStreamPhase.CONNECTING))
         return withContext(Dispatchers.IO) {
             val hasImages = messages.any { it.imageDataUrls.isNotEmpty() }
             val request = Request.Builder()
@@ -203,7 +205,19 @@ class AiServiceClient(
                                 append(source.readUtf8())
                             }
                         }
-                        val completion = parseCompletion(rawBody, elapsedMs(startedAt))
+                        val completion = try {
+                            parseCompletion(rawBody, elapsedMs(startedAt))
+                        } catch (exception: AiResponseException) {
+                            if (exception.reasoningContent.isNotBlank()) {
+                                onUpdate(AiStreamUpdate(
+                                    content = "",
+                                    reasoningContent = exception.reasoningContent,
+                                    phase = AiStreamPhase.THINKING,
+                                    reasoningPresent = true
+                                ))
+                            }
+                            throw exception
+                        }
                         onUpdate(completion.asStreamUpdate(AiStreamPhase.GENERATING))
                         return@use completion
                     }
@@ -222,6 +236,7 @@ class AiServiceClient(
         onUpdate: suspend (AiStreamUpdate) -> Unit
     ): AiCompletion {
         val content = StringBuilder()
+        val reasoning = StringBuilder()
         var finishReason: String? = null
         var promptTokens: Int? = null
         var completionTokens: Int? = null
@@ -244,7 +259,10 @@ class AiServiceClient(
                     }
                     val delta = choice?.get("delta")?.let { runCatching { it.jsonObject }.getOrNull() }
                     val reasoningChunk = delta?.get("reasoning_content")?.extractText().orEmpty()
-                    if (reasoningChunk.isNotBlank()) reasoningPresent = true
+                    if (reasoningChunk.isNotEmpty()) {
+                        reasoningPresent = true
+                        reasoning.append(reasoningChunk)
+                    }
                     val contentChunk = delta?.get("content")?.extractText().orEmpty().ifBlank {
                         choice?.get("text")?.extractText().orEmpty()
                     }
@@ -260,6 +278,7 @@ class AiServiceClient(
                         onUpdate(
                             AiStreamUpdate(
                                 content = content.toString(),
+                                reasoningContent = reasoning.toString(),
                                 phase = if (content.isNotEmpty()) AiStreamPhase.GENERATING else AiStreamPhase.THINKING,
                                 finishReason = finishReason,
                                 promptTokens = promptTokens,
@@ -274,11 +293,12 @@ class AiServiceClient(
         }
         val finalContent = content.toString().trim()
         if (finishReason in setOf("length", "content_filter", "insufficient_system_resource")) {
-            throw IOException(emptyContentMessage(finishReason, reasoningPresent))
+            throw AiResponseException(emptyContentMessage(finishReason, reasoningPresent), reasoning.toString())
         }
-        if (finalContent.isBlank()) throw IOException(emptyContentMessage(finishReason, reasoningPresent))
+        if (finalContent.isBlank()) throw AiResponseException(emptyContentMessage(finishReason, reasoningPresent), reasoning.toString())
         return AiCompletion(
             content = finalContent,
+            reasoningContent = reasoning.toString().trim(),
             finishReason = finishReason,
             promptTokens = promptTokens,
             completionTokens = completionTokens,
@@ -289,6 +309,7 @@ class AiServiceClient(
 
     private fun AiCompletion.asStreamUpdate(phase: AiStreamPhase) = AiStreamUpdate(
         content = content,
+        reasoningContent = reasoningContent,
         phase = phase,
         finishReason = finishReason,
         promptTokens = promptTokens,
@@ -328,15 +349,17 @@ class AiServiceClient(
         val content = message?.get("content")?.extractText().orEmpty().ifBlank {
             choice["text"]?.extractText().orEmpty()
         }.trim()
-        val reasoningPresent = !message?.get("reasoning_content")?.extractText().isNullOrBlank()
+        val reasoningContent = message?.get("reasoning_content")?.extractText().orEmpty().trim()
+        val reasoningPresent = reasoningContent.isNotBlank()
         val finishReason = choice["finish_reason"]?.primitiveContent()
         val usage = root["usage"]?.let { runCatching { it.jsonObject }.getOrNull() }
         if (finishReason in setOf("length", "content_filter", "insufficient_system_resource")) {
-            throw IOException(emptyContentMessage(finishReason, reasoningPresent))
+            throw AiResponseException(emptyContentMessage(finishReason, reasoningPresent), reasoningContent)
         }
-        if (content.isBlank()) throw IOException(emptyContentMessage(finishReason, reasoningPresent))
+        if (content.isBlank()) throw AiResponseException(emptyContentMessage(finishReason, reasoningPresent), reasoningContent)
         return AiCompletion(
             content = content,
+            reasoningContent = reasoningContent,
             finishReason = finishReason,
             promptTokens = usage?.get("prompt_tokens")?.jsonPrimitive?.intOrNull,
             completionTokens = usage?.get("completion_tokens")?.jsonPrimitive?.intOrNull,
@@ -407,3 +430,5 @@ class AiServiceClient(
             .build()
     }
 }
+
+private class AiResponseException(message: String, val reasoningContent: String) : IOException(message)

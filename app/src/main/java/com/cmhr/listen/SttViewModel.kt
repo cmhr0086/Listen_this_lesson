@@ -10,82 +10,49 @@ import com.cmhr.listen.audio.PcmRecorder
 import com.cmhr.listen.audio.VadConfig
 import com.cmhr.listen.audio.VadSegmenter
 import com.cmhr.listen.audio.VadPreset
-import com.cmhr.listen.audio.WavEncoder
 import com.cmhr.listen.data.settings.VadConfigRepository
 import com.cmhr.listen.data.settings.AppSettingsRepository
 import com.cmhr.listen.data.settings.ServerSettings
 import com.cmhr.listen.data.course.CourseRepository
 import com.cmhr.listen.data.course.ListenDatabase
-import com.cmhr.listen.data.stt.SttApiClient
-import com.cmhr.listen.data.stt.SttCredentials
+import com.cmhr.listen.data.stt.AsrHealthSnapshot
+import com.cmhr.listen.data.stt.AsrHealthRefreshResult
+import com.cmhr.listen.data.stt.AsrDiagnosticStateCounts
+import com.cmhr.listen.data.stt.AsrNetworkEventEntity
 import com.cmhr.listen.data.stt.AsrPromptAutoConfig
 import com.cmhr.listen.data.stt.AsrPromptMode
 import com.cmhr.listen.data.stt.AsrPromptPolicy
-import com.cmhr.listen.data.stt.PromptDecision
-import com.cmhr.listen.data.stt.SegmentQuality
+import com.cmhr.listen.data.stt.AsrQueueRuntime
+import com.cmhr.listen.data.stt.AsrSegmentDiagnosticEntity
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-enum class TranscriptStatus { QUEUED, RECOGNIZING, SUCCESS, ERROR, DROPPED }
-
-data class TranscriptSegment(
-    val id: Long,
-    val recordId: Long,
-    val audioStartTime: Long,
-    val audioEndTime: Long,
-    val audioDurationMs: Long,
-    val text: String? = null,
-    val queuedAt: Long,
-    val recognitionStartedAt: Long? = null,
-    val recognitionFinishedAt: Long? = null,
-    val recognitionDurationMs: Long? = null,
-    val status: TranscriptStatus,
-    val gapFromPreviousMs: Long? = null,
-    val hitMaxDuration: Boolean = false,
-    val startReason: String? = null,
-    val endReason: String? = null,
-    val error: String? = null
-)
-
 data class ListeningUiState(
     val isListening: Boolean = false,
     val isSpeechDetected: Boolean = false,
     val isRecognizing: Boolean = false,
-    val vadProbability: Float = 0f,
     val configuredVadConfig: VadConfig = VadConfig.Default,
-    val effectiveVadConfig: VadConfig = VadConfig.Default,
     val selectedVadPreset: VadPreset? = VadPreset.DEFAULT,
-    val silenceDurationMs: Long = 0,
-    val segmentStartReason: String? = null,
-    val segmentEndReason: String? = null,
     val pendingQueueCount: Int = 0,
-    val transcriptSegments: List<TranscriptSegment> = emptyList(),
-    val droppedSegments: Int = 0,
-    val discardedShortSegments: Int = 0,
-    val audioReadErrors: Int = 0,
     val activeRecordId: Long? = null,
     val listeningStartedAtElapsedRealtimeMs: Long? = null,
     val currentCourseName: String? = null,
     val currentRecordName: String? = null,
-    val lastSegmentQuality: SegmentQuality? = null,
-    val lastPromptDecision: PromptDecision? = null,
+    val asrHealth: AsrHealthSnapshot? = null,
     val error: String? = null
-)
-
-private data class PendingSegment(
-    val transcript: TranscriptSegment,
-    val pcm: ByteArray,
-    val asrPrompt: String?
 )
 
 class SttViewModel(application: Application) : AndroidViewModel(application) {
@@ -93,17 +60,23 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
     private val vadConfigRepository = VadConfigRepository(application)
     private val appSettingsRepository = AppSettingsRepository(application)
     private val courseRepository = CourseRepository(ListenDatabase.get(application))
-    private val sttApiClient = SttApiClient(credentialsProvider = {
-        SttCredentials(currentServer.baseUrl, appSettingsRepository.readApiKey().orEmpty())
-    })
+    private val asrRuntime = AsrQueueRuntime.get(application)
     private val _uiState = MutableStateFlow(ListeningUiState())
     val uiState: StateFlow<ListeningUiState> = _uiState.asStateFlow()
+    private val _vadDiagnosticsState = MutableStateFlow(VadDiagnosticsUiState())
+    val vadDiagnosticsState: StateFlow<VadDiagnosticsUiState> = _vadDiagnosticsState.asStateFlow()
+    private val _isAsrHealthRefreshing = MutableStateFlow(false)
+    val isAsrHealthRefreshing: StateFlow<Boolean> = _isAsrHealthRefreshing.asStateFlow()
+    private val _asrMessages = MutableSharedFlow<String>(extraBufferCapacity = 2)
+    val asrMessages: SharedFlow<String> = _asrMessages.asSharedFlow()
 
     private var listeningJob: Job? = null
-    private var nextSegmentId = 1L
     private var sessionStartedAtMs = 0L
-    private var previousAudioEndTimeMs: Long? = null
     private var sessionRecordId: Long? = null
+    private var currentCapturingSegmentId: String? = null
+    private var currentCaptureStartedAt: Long? = null
+    private var currentCaptureStartedAtElapsedMs: Long? = null
+    private var lastVadUiPublishElapsedMs = 0L
     @Volatile private var currentVadConfig = VadConfig.Default
     @Volatile private var currentServer = ServerSettings()
     @Volatile private var currentCourseAsrPrompt = ""
@@ -112,10 +85,28 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
     @Volatile private var currentPromptAutoConfig = AsrPromptAutoConfig()
 
     init {
+        asrRuntime.kick()
+        viewModelScope.launch {
+            asrRuntime.observeRuntimeSummary().collect { summary ->
+                _uiState.update {
+                    it.copy(
+                        pendingQueueCount = summary.activeCount,
+                        isRecognizing = summary.recognizingCount > 0
+                    )
+                }
+                ListeningForegroundService.update(getApplication(), _uiState.value)
+            }
+        }
+        viewModelScope.launch {
+            asrRuntime.health.collect { health -> _uiState.update { it.copy(asrHealth = health) } }
+        }
         viewModelScope.launch {
             vadConfigRepository.config.collect { config ->
                 currentVadConfig = config
                 _uiState.update { it.copy(configuredVadConfig = config) }
+                if (!_uiState.value.isListening) {
+                    _vadDiagnosticsState.update { it.copy(effectiveVadConfig = config) }
+                }
             }
         }
         viewModelScope.launch {
@@ -167,8 +158,6 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
             val course = courseRepository.course(record.courseId).first()
             currentCourseAsrPrompt = course?.asrPrompt.orEmpty()
             currentCoursePromptModeOverride = course?.asrPromptModeOverride
-            val queue = Channel<PendingSegment>(capacity = QUEUE_CAPACITY)
-            val worker = launch { consumeQueue(queue) }
             val promptObserver = launch {
                 courseRepository.course(record.courseId).collect { updatedCourse ->
                     currentCourseAsrPrompt = updatedCourse?.asrPrompt.orEmpty()
@@ -176,19 +165,37 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             sessionStartedAtMs = System.currentTimeMillis()
-            previousAudioEndTimeMs = null
             sessionRecordId = recordId
+            currentCapturingSegmentId = null
+            currentCaptureStartedAt = null
+            currentCaptureStartedAtElapsedMs = null
+            lastVadUiPublishElapsedMs = 0L
             courseRepository.reopenRecord(recordId)
-            _uiState.value = ListeningUiState(
-                isListening = true,
-                activeRecordId = recordId,
-                listeningStartedAtElapsedRealtimeMs = SystemClock.elapsedRealtime(),
-                configuredVadConfig = currentVadConfig,
-                effectiveVadConfig = currentVadConfig,
-                selectedVadPreset = _uiState.value.selectedVadPreset,
-                currentCourseName = course?.name,
-                currentRecordName = record.name
-            )
+            _uiState.update {
+                it.copy(
+                    isListening = true,
+                    isSpeechDetected = false,
+                    activeRecordId = recordId,
+                    listeningStartedAtElapsedRealtimeMs = SystemClock.elapsedRealtime(),
+                    configuredVadConfig = currentVadConfig,
+                    currentCourseName = course?.name,
+                    currentRecordName = record.name,
+                    error = null
+                )
+            }
+            _vadDiagnosticsState.update {
+                it.copy(
+                    vadProbability = 0f,
+                    effectiveVadConfig = currentVadConfig,
+                    isSpeechDetected = false,
+                    silenceDurationMs = 0,
+                    segmentStartReason = null,
+                    segmentEndReason = null,
+                    capturingSegmentId = null,
+                    capturingStartedAt = null,
+                    capturingStartedAtElapsedRealtimeMs = null
+                )
+            }
 
             try {
                 ListeningForegroundService.start(getApplication(), _uiState.value)
@@ -197,19 +204,74 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
                         recorder.listen(
                             onPcmChunk = { pcmChunk ->
                                 val vadResult = segmenter.acceptPcm(pcmChunk)
-                                _uiState.update { state ->
-                                    state.copy(
-                                        isSpeechDetected = vadResult.isSpeechDetected,
-                                        vadProbability = vadResult.probability,
-                                        effectiveVadConfig = vadResult.effectiveConfig,
-                                        silenceDurationMs = vadResult.silenceDurationMs,
-                                        segmentStartReason = vadResult.segmentStartReason,
-                                        segmentEndReason = vadResult.segmentEndReason,
-                                        discardedShortSegments = state.discardedShortSegments +
-                                            vadResult.discardedShortDurationsMs.size
-                                    )
+                                val uiElapsedNow = SystemClock.elapsedRealtime()
+                                if (vadResult.isSpeechDetected && currentCapturingSegmentId == null) {
+                                    currentCapturingSegmentId = asrRuntime.newSegmentId()
+                                    currentCaptureStartedAt = System.currentTimeMillis()
+                                    currentCaptureStartedAtElapsedMs = uiElapsedNow
                                 }
-                                vadResult.completedSegments.forEach { enqueue(queue, it) }
+                                vadResult.completedSegments.forEach { captured ->
+                                    val segmentId = currentCapturingSegmentId ?: asrRuntime.newSegmentId()
+                                    enqueue(segmentId, captured)
+                                    if (vadResult.isSpeechDetected) {
+                                        currentCapturingSegmentId = asrRuntime.newSegmentId()
+                                        currentCaptureStartedAt = timestampForSample(captured.pcmSlice.endSample)
+                                        currentCaptureStartedAtElapsedMs = uiElapsedNow
+                                    } else {
+                                        currentCapturingSegmentId = null
+                                        currentCaptureStartedAt = null
+                                        currentCaptureStartedAtElapsedMs = null
+                                    }
+                                }
+                                if (vadResult.discardedShortDurationsMs.isNotEmpty()) {
+                                    val end = System.currentTimeMillis()
+                                    vadResult.discardedShortDurationsMs.forEachIndexed { index, duration ->
+                                        val droppedId = if (index == 0) currentCapturingSegmentId ?: asrRuntime.newSegmentId()
+                                            else asrRuntime.newSegmentId()
+                                        asrRuntime.recordDroppedCapture(
+                                            segmentId = droppedId,
+                                            recordId = recordId,
+                                            audioStartTime = end - duration,
+                                            audioEndTime = end,
+                                            reason = "低于最短片段时长，未提交识别。"
+                                        )
+                                    }
+                                    currentCapturingSegmentId = null
+                                    currentCaptureStartedAt = null
+                                    currentCaptureStartedAtElapsedMs = null
+                                } else if (!vadResult.isSpeechDetected && vadResult.completedSegments.isEmpty()) {
+                                    currentCapturingSegmentId = null
+                                    currentCaptureStartedAt = null
+                                    currentCaptureStartedAtElapsedMs = null
+                                }
+
+                                val speechChanged = _uiState.value.isSpeechDetected != vadResult.isSpeechDetected
+                                if (speechChanged) {
+                                    _uiState.update { it.copy(isSpeechDetected = vadResult.isSpeechDetected) }
+                                    ListeningForegroundService.update(getApplication(), _uiState.value)
+                                }
+                                val hasBoundaryEvent = vadResult.completedSegments.isNotEmpty() ||
+                                    vadResult.discardedShortDurationsMs.isNotEmpty()
+                                if (speechChanged || hasBoundaryEvent ||
+                                    uiElapsedNow - lastVadUiPublishElapsedMs >= VAD_UI_INTERVAL_MS
+                                ) {
+                                    lastVadUiPublishElapsedMs = uiElapsedNow
+                                    _vadDiagnosticsState.update { state ->
+                                        state.copy(
+                                            isSpeechDetected = vadResult.isSpeechDetected,
+                                            vadProbability = vadResult.probability,
+                                            effectiveVadConfig = vadResult.effectiveConfig,
+                                            silenceDurationMs = vadResult.silenceDurationMs,
+                                            segmentStartReason = vadResult.segmentStartReason,
+                                            segmentEndReason = vadResult.segmentEndReason,
+                                            discardedShortSegments = state.discardedShortSegments +
+                                                vadResult.discardedShortDurationsMs.size,
+                                            capturingSegmentId = currentCapturingSegmentId,
+                                            capturingStartedAt = currentCaptureStartedAt,
+                                            capturingStartedAtElapsedRealtimeMs = currentCaptureStartedAtElapsedMs
+                                        )
+                                    }
+                                }
                             },
                             onReadError = ::recordAudioReadError
                         )
@@ -218,6 +280,17 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
             } catch (exception: CancellationException) {
                 throw exception
             } catch (exception: Exception) {
+                val failedSegmentId = currentCapturingSegmentId
+                val captureStart = currentCaptureStartedAt
+                if (failedSegmentId != null && captureStart != null) {
+                    asrRuntime.recordCaptureFailure(
+                        segmentId = failedSegmentId,
+                        recordId = recordId,
+                        audioStartTime = captureStart,
+                        exceptionClass = exception::class.java.simpleName,
+                        message = "音频采集异常终止。"
+                    )
+                }
                 _uiState.update {
                     it.copy(
                         isListening = false,
@@ -226,22 +299,31 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             } finally {
-                queue.close()
-                worker.cancel()
                 promptObserver.cancel()
                 currentCourseAsrPrompt = ""
                 currentCoursePromptModeOverride = null
                 withContext(NonCancellable) { courseRepository.finishRecord(recordId) }
                 ListeningForegroundService.stop(getApplication())
                 sessionRecordId = null
+                currentCapturingSegmentId = null
+                currentCaptureStartedAt = null
+                currentCaptureStartedAtElapsedMs = null
                 _uiState.update {
                     it.copy(
                         isListening = false,
                         activeRecordId = null,
                         listeningStartedAtElapsedRealtimeMs = null,
+                        isSpeechDetected = false
+                    )
+                }
+                _vadDiagnosticsState.update {
+                    it.copy(
                         isSpeechDetected = false,
-                        isRecognizing = false,
-                        pendingQueueCount = 0
+                        vadProbability = 0f,
+                        silenceDurationMs = 0,
+                        capturingSegmentId = null,
+                        capturingStartedAt = null,
+                        capturingStartedAtElapsedRealtimeMs = null
                     )
                 }
             }
@@ -249,7 +331,7 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun stopListening() {
-        _uiState.update { it.copy(segmentEndReason = "用户停止监听") }
+        _vadDiagnosticsState.update { it.copy(segmentEndReason = "用户停止监听") }
         listeningJob?.cancel()
         listeningJob = null
     }
@@ -281,136 +363,82 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
 
     fun restoreDefaultVadConfig() = applyVadPreset(VadPreset.DEFAULT)
 
-    private fun enqueue(queue: Channel<PendingSegment>, captured: CapturedPcmSegment) {
+    fun refreshAsrHealth() {
+        if (_isAsrHealthRefreshing.value) return
+        _isAsrHealthRefreshing.value = true
+        viewModelScope.launch {
+            try {
+                when (val result = asrRuntime.refreshHealth()) {
+                    is AsrHealthRefreshResult.Success -> _asrMessages.emit("服务状态已刷新。")
+                    is AsrHealthRefreshResult.Failure -> _asrMessages.emit(result.safeMessage)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                _asrMessages.emit("刷新服务状态失败。")
+            } finally {
+                _isAsrHealthRefreshing.value = false
+            }
+        }
+    }
+
+    fun confirmRetryUnknown(segmentId: String) {
+        viewModelScope.launch { asrRuntime.confirmRetryUnknown(segmentId) }
+    }
+
+    fun observeAsrEvents(segmentId: String): Flow<List<AsrNetworkEventEntity>> =
+        asrRuntime.observeEvents(segmentId)
+
+    fun observeRecentAsrDiagnostics(recordId: Long, limit: Int = RECENT_DIAGNOSTIC_LIMIT): Flow<List<AsrSegmentDiagnosticEntity>> =
+        asrRuntime.observeRecentForRecord(recordId, limit)
+
+    fun observeAsrDiagnostics(recordId: Long): Flow<List<AsrSegmentDiagnosticEntity>> =
+        asrRuntime.observeForRecord(recordId)
+
+    fun observeAsrDiagnosticCount(recordId: Long): Flow<Int> =
+        asrRuntime.observeCountForRecord(recordId)
+
+    fun observeActiveAsrDiagnostics(recordId: Long): Flow<List<AsrSegmentDiagnosticEntity>> =
+        asrRuntime.observeActiveForRecord(recordId)
+
+    fun observeAsrStateCounts(recordId: Long, since: Long): Flow<AsrDiagnosticStateCounts> =
+        asrRuntime.observeStateCountsForRecordSince(recordId, since)
+
+    private fun enqueue(segmentId: String, captured: CapturedPcmSegment) {
         val audioStart = timestampForSample(captured.pcmSlice.startSample)
         val audioEnd = timestampForSample(captured.pcmSlice.endSample)
-        val now = System.currentTimeMillis()
         val recordId = sessionRecordId ?: return
-        val transcript = TranscriptSegment(
-            id = nextSegmentId++,
-            recordId = recordId,
-            audioStartTime = audioStart,
-            audioEndTime = audioEnd,
-            audioDurationMs = audioEnd - audioStart,
-            queuedAt = now,
-            status = TranscriptStatus.QUEUED,
-            gapFromPreviousMs = previousAudioEndTimeMs?.let { audioStart - it },
-            hitMaxDuration = captured.hitMaxDuration,
-            startReason = _uiState.value.segmentStartReason,
-            endReason = captured.endReason
-        )
-        previousAudioEndTimeMs = audioEnd
+        val audioDurationMs = (audioEnd - audioStart).coerceAtLeast(0)
 
         val promptDecision = AsrPromptPolicy.decide(
             globalMode = currentGlobalPromptMode,
             courseOverride = currentCoursePromptModeOverride,
             coursePrompt = currentCourseAsrPrompt,
-            quality = captured.quality.copy(audioDurationMs = transcript.audioDurationMs),
+            quality = captured.quality.copy(audioDurationMs = audioDurationMs),
             config = currentPromptAutoConfig
         )
-        _uiState.update {
+        _vadDiagnosticsState.update {
             it.copy(
-                lastSegmentQuality = captured.quality.copy(audioDurationMs = transcript.audioDurationMs),
+                lastSegmentQuality = captured.quality.copy(audioDurationMs = audioDurationMs),
                 lastPromptDecision = promptDecision
             )
         }
-        val promptForSegment = promptDecision.prompt
-        if (queue.trySend(PendingSegment(transcript, captured.pcmSlice.pcm, promptForSegment)).isSuccess) {
-            appendTranscript(transcript)
-            _uiState.update { it.copy(pendingQueueCount = it.pendingQueueCount + 1) }
-            ListeningForegroundService.update(getApplication(), _uiState.value)
-            Log.d(TAG, "segment #${transcript.id} queued duration=${transcript.audioDurationMs}ms")
-        } else {
-            val dropped = transcript.copy(status = TranscriptStatus.DROPPED, error = "Queue full")
-            appendTranscript(dropped)
-            _uiState.update {
-                it.copy(
-                    droppedSegments = it.droppedSegments + 1,
-                    error = "识别队列已满，已丢弃 segment #${dropped.id}。"
-                )
-            }
-            ListeningForegroundService.update(getApplication(), _uiState.value)
-            Log.w(TAG, "segment #${dropped.id} dropped duration=${dropped.audioDurationMs}ms at=$now")
-        }
-    }
-
-    private suspend fun consumeQueue(queue: Channel<PendingSegment>) {
-        for (pending in queue) {
-            val startedAt = System.currentTimeMillis()
-            replaceTranscript(pending.transcript.id) {
-                it.copy(status = TranscriptStatus.RECOGNIZING, recognitionStartedAt = startedAt)
-            }
-            _uiState.update {
-                it.copy(
-                    pendingQueueCount = (it.pendingQueueCount - 1).coerceAtLeast(0),
-                    isRecognizing = true
-                )
-            }
-            try {
-                val text = withContext(Dispatchers.IO) {
-                    sttApiClient.transcribe(
-                        WavEncoder.encodePcm16Mono(pending.pcm),
-                        pending.asrPrompt
-                    )
-                }
-                val finishedAt = System.currentTimeMillis()
-                replaceTranscript(pending.transcript.id) {
-                    it.copy(
-                        text = text,
-                        recognitionFinishedAt = finishedAt,
-                        recognitionDurationMs = finishedAt - startedAt,
-                        status = TranscriptStatus.SUCCESS,
-                        error = null
-                    )
-                }
-                courseRepository.saveSegment(
-                    recordId = pending.transcript.recordId,
-                    start = pending.transcript.audioStartTime,
-                    end = pending.transcript.audioEndTime,
-                    duration = pending.transcript.audioDurationMs,
-                    recognitionDuration = finishedAt - startedAt,
-                    text = text
-                )
-                Log.d(TAG, "segment #${pending.transcript.id} recognized in ${finishedAt - startedAt}ms")
-            } catch (exception: CancellationException) {
-                throw exception
-            } catch (exception: Exception) {
-                val finishedAt = System.currentTimeMillis()
-                val message = exception.message ?: "语音识别请求失败。"
-                replaceTranscript(pending.transcript.id) {
-                    it.copy(
-                        recognitionFinishedAt = finishedAt,
-                        recognitionDurationMs = finishedAt - startedAt,
-                        status = TranscriptStatus.ERROR,
-                        error = message
-                    )
-                }
-                _uiState.update { it.copy(error = message) }
-                Log.e(TAG, "segment #${pending.transcript.id} recognition failed", exception)
-            } finally {
-                _uiState.update { it.copy(isRecognizing = false) }
-                ListeningForegroundService.update(getApplication(), _uiState.value)
-            }
-        }
+        asrRuntime.persistAndEnqueue(
+            segmentId = segmentId,
+            recordId = recordId,
+            audioStartTime = audioStart,
+            audioEndTime = audioEnd,
+            captureStartedAt = audioStart,
+            captureFinishedAt = audioEnd,
+            pcm = captured.pcmSlice.pcm,
+            contextSnapshot = promptDecision.prompt
+        )
+        Log.d(TAG, "segment $segmentId persisted duration=${audioDurationMs}ms")
     }
 
     private fun recordAudioReadError(code: Int) {
-        _uiState.update { it.copy(audioReadErrors = it.audioReadErrors + 1) }
+        _vadDiagnosticsState.update { it.copy(audioReadErrors = it.audioReadErrors + 1) }
         Log.e(TAG, "AudioRecord.read returned $code")
-    }
-
-    private fun appendTranscript(segment: TranscriptSegment) {
-        _uiState.update { state ->
-            state.copy(transcriptSegments = (state.transcriptSegments + segment).takeLast(MAX_VISIBLE_SEGMENTS))
-        }
-    }
-
-    private fun replaceTranscript(id: Long, transform: (TranscriptSegment) -> TranscriptSegment) {
-        _uiState.update { state ->
-            state.copy(transcriptSegments = state.transcriptSegments.map {
-                if (it.id == id) transform(it) else it
-            })
-        }
     }
 
     private fun timestampForSample(sample: Long): Long =
@@ -422,8 +450,8 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private companion object {
-        const val QUEUE_CAPACITY = 5
-        const val MAX_VISIBLE_SEGMENTS = 30
+        const val RECENT_DIAGNOSTIC_LIMIT = 15
+        const val VAD_UI_INTERVAL_MS = 100L
         const val TAG = "ListenDebug"
     }
 }

@@ -10,7 +10,7 @@ import com.cmhr.listen.data.course.ListenDatabase
 import com.cmhr.listen.data.course.RecordNameGenerator
 import com.cmhr.listen.data.course.TranscriptEntity
 import com.cmhr.listen.data.settings.AppSettingsRepository
-import com.cmhr.listen.data.ai.AiPhotoStore
+import com.cmhr.listen.data.ai.AiAttachmentStore
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -31,7 +31,7 @@ data class CourseUiState(
 
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class CourseViewModel(application: Application) : AndroidViewModel(application) {
-    private val repository = CourseRepository(ListenDatabase.get(application), AiPhotoStore(application))
+    private val repository = CourseRepository(ListenDatabase.get(application), AiAttachmentStore(application))
     private val settings = AppSettingsRepository(application)
     private val _uiState = MutableStateFlow(CourseUiState())
     val uiState: StateFlow<CourseUiState> = _uiState.asStateFlow()

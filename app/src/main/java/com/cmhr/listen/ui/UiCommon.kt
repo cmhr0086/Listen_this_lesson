@@ -24,8 +24,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
-import com.cmhr.listen.ListeningUiState
-import com.cmhr.listen.TranscriptSegment
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -116,44 +114,6 @@ fun ExpandHeader(title: String, expanded: Boolean, click: () -> Unit) =
         Text("$title ${if (expanded) "▲" else "▼"}", Modifier.padding(16.dp), style = MaterialTheme.typography.titleMedium)
     }
 
-@Composable
-fun VadDebugCard(state: ListeningUiState) = Card(Modifier.fillMaxWidth()) {
-    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text("VAD 语音概率：${formatFloat(state.vadProbability)}")
-        Text("当前实际 VAD 阈值：${formatFloat(state.effectiveVadConfig.threshold)}")
-        Text("当前语音片段：${if (state.isSpeechDetected) "活动中" else "未活动"}")
-        Text("当前连续静音时间：${state.silenceDurationMs} ms")
-        Text("片段开始原因：${state.segmentStartReason ?: "无"}")
-        Text("片段结束原因：${state.segmentEndReason ?: "无"}")
-        Text("识别队列数量：${state.pendingQueueCount}")
-        Text("已丢弃片段：${state.droppedSegments}")
-        Text("已丢弃过短片段：${state.discardedShortSegments}")
-        Text("AudioRecord 读取错误：${state.audioReadErrors}")
-        state.lastSegmentQuality?.let { quality ->
-            Text("最近片段音频：${quality.audioDurationMs} ms")
-            Text("最近有效语音：${quality.voicedDurationMs} ms")
-            Text("最近平均 VAD：${formatFloat(quality.meanSpeechProbability)}")
-            Text("最近语音帧占比：${formatFloat(quality.speechFrameRatio * 100)}%")
-            Text("最近估算 SNR：${quality.estimatedSnrDb?.let { "${formatFloat(it)} dB" } ?: "不可估算"}")
-        }
-        state.lastPromptDecision?.let { decision ->
-            Text("ASR 提示词模式：${decision.effectiveMode.displayName}")
-            Text("最近请求携带 Prompt：${if (decision.included) "是" else "否"}")
-            Text("Prompt 决策原因：${decision.reason}")
-        }
-    }
-}
-
-@Composable
-fun RuntimeTranscriptCard(segment: TranscriptSegment) = Card(Modifier.fillMaxWidth()) {
-    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-        Text("#${segment.id}   ${formatTime(segment.audioStartTime)}", style = MaterialTheme.typography.titleMedium)
-        Text("音频 ${formatDuration(segment.audioDurationMs)} · ASR ${segment.recognitionDurationMs?.let(::formatDuration) ?: "—"}")
-        Text(segment.text ?: segment.error ?: "等待识别…", style = MaterialTheme.typography.bodyLarge)
-    }
-}
-
-fun formatTime(value: Long): String = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(value))
 fun formatDateTime(value: Long): String = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(value))
 fun formatDuration(value: Long): String = String.format(Locale.US, "%.1fs", value / 1000.0)
 fun formatFloat(value: Float): String = String.format(Locale.US, "%.2f", value)

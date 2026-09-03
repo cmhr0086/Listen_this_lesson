@@ -21,6 +21,20 @@ class AiSourceSnapshotTest {
     }
 
     @Test
+    fun `snapshot uses applied correction while retaining raw text`() {
+        val value = segment(1, 1_000, "创新创业").copy(correctedText = "创新创业教育")
+        assertTrue(AiViewModel.buildSourceSnapshot(listOf(value)).contains("创新创业教育"))
+        assertEquals("创新创业", value.text)
+    }
+
+    @Test
+    fun `correction source carries stable ids`() {
+        val source = AiViewModel.buildCorrectionSource(listOf(segment(42, 1_000, "原文")))
+        assertTrue(source.contains("id=\"42\""))
+        assertTrue(source.contains("原文"))
+    }
+
+    @Test
     fun `source limit counts Unicode code points without truncation`() {
         assertTrue(AiViewModel.isSourceWithinLimit("问".repeat(20_000)))
         assertTrue(AiViewModel.isSourceWithinLimit("😀".repeat(20_000)))
@@ -39,6 +53,13 @@ class AiSourceSnapshotTest {
     @Test
     fun `legacy extract questions action remains displayable`() {
         assertEquals("提取老师的问题", AiActionType.valueOf("EXTRACT_QUESTIONS").displayName)
+    }
+
+    @Test
+    fun `general conversation title is whitespace normalized and Unicode safe`() {
+        assertEquals("请 帮我回答", AiViewModel.conversationTitle("  请\n帮我回答  "))
+        assertEquals(24, AiViewModel.conversationTitle("😀".repeat(30)).codePointCount(0, AiViewModel.conversationTitle("😀".repeat(30)).length))
+        assertEquals("新对话", AiViewModel.conversationTitle("   "))
     }
 
     private fun segment(id: Long, start: Long, text: String) = TranscriptEntity(

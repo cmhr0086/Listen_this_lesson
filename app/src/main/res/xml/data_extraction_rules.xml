@@ -7,6 +7,7 @@
     <cloud-backup>
         <exclude domain="file" path="datastore/app_settings.preferences_pb" />
         <exclude domain="file" path="ai_photos/" />
+        <exclude domain="file" path="ai_attachments/" />
         <!-- TODO: Use <include> and <exclude> to control what is backed up.
         <include .../>
         <exclude .../>
@@ -15,5 +16,6 @@
     <device-transfer>
         <exclude domain="file" path="datastore/app_settings.preferences_pb" />
         <exclude domain="file" path="ai_photos/" />
+        <exclude domain="file" path="ai_attachments/" />
     </device-transfer>
 </data-extraction-rules>

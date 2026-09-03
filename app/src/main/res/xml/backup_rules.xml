@@ -8,6 +8,7 @@
 <full-backup-content>
     <exclude domain="file" path="datastore/app_settings.preferences_pb" />
     <exclude domain="file" path="ai_photos/" />
+    <exclude domain="file" path="ai_attachments/" />
     <!--
    <include domain="sharedpref" path="."/>
    <exclude domain="sharedpref" path="device.xml"/>

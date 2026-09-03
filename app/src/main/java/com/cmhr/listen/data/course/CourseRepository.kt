@@ -1,11 +1,11 @@
 package com.cmhr.listen.data.course
 
 import kotlinx.coroutines.flow.Flow
-import com.cmhr.listen.data.ai.AiPhotoStore
+import com.cmhr.listen.data.ai.AiAttachmentStore
 
 class CourseRepository(
     private val database: ListenDatabase,
-    private val photoStore: AiPhotoStore? = null
+    private val attachmentStore: AiAttachmentStore? = null
 ) {
     val courses: Flow<List<CourseEntity>> = database.courseDao().courses()
     fun course(id: Long) = database.courseDao().course(id)
@@ -20,13 +20,13 @@ class CourseRepository(
     suspend fun deleteCourse(id: Long) {
         val recordIds = database.recordDao().idsForCourse(id)
         database.courseDao().delete(id)
-        recordIds.forEach { photoStore?.deleteRecord(it) }
+        recordIds.forEach { attachmentStore?.deleteRecord(it) }
     }
     suspend fun createRecord(courseId: Long, name: String): Long = database.recordDao().insert(ClassRecordEntity(courseId = courseId, name = name.trim(), startedAt = System.currentTimeMillis()))
     suspend fun renameRecord(id: Long, name: String) = database.recordDao().rename(id, name.trim())
     suspend fun deleteRecord(id: Long) {
         database.recordDao().delete(id)
-        photoStore?.deleteRecord(id)
+        attachmentStore?.deleteRecord(id)
     }
     suspend fun reopenRecord(id: Long) = database.recordDao().reopen(id)
     suspend fun finishRecord(id: Long) = database.recordDao().end(id, System.currentTimeMillis())

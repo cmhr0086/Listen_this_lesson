@@ -3,6 +3,7 @@ package com.cmhr.listen.ui
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.SystemClock
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -11,9 +12,14 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
@@ -23,6 +29,8 @@ import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.School
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.SmartToy
+import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -47,11 +55,15 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.core.content.ContextCompat
@@ -67,12 +79,41 @@ import com.cmhr.listen.CourseViewModel
 import com.cmhr.listen.SettingsViewModel
 import com.cmhr.listen.SttViewModel
 import com.cmhr.listen.data.ai.AiActionType
+import com.cmhr.listen.data.stt.AsrDiagnosticStateCounts
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.delay
+import java.util.Locale
 
 private enum class MainDestination(val route: String, val label: String) {
     COURSES("courses", "课程"),
+    AI("ai", "AI 会话"),
     SETTINGS("settings", "设置")
+}
+
+internal val AppBottomNavigationHeight = 80.dp
+
+internal data class BottomChromeLayout(
+    val navigationContainerHeight: Dp,
+    val composerBottomPadding: Dp
+)
+
+/**
+ * Keeps the app navigation bar mounted while moving only the chat composer.
+ * The IME height is read from the current animated WindowInsets value; no
+ * keyboard height is guessed or hard-coded.
+ */
+@Composable
+internal fun bottomChromeLayout(): BottomChromeLayout {
+    val density = LocalDensity.current
+    val rawImeBottom = with(density) { WindowInsets.ime.getBottom(this).toDp() }
+    val systemNavigationBottom = with(density) { WindowInsets.navigationBars.getBottom(this).toDp() }
+    val fullNavigationReservation = AppBottomNavigationHeight + systemNavigationBottom
+    return BottomChromeLayout(
+        navigationContainerHeight = fullNavigationReservation,
+        composerBottomPadding =
+            (rawImeBottom - fullNavigationReservation).coerceAtLeast(0.dp)
+    )
 }
 
 private sealed interface FabState {
@@ -80,14 +121,25 @@ private sealed interface FabState {
     data object NewCourse : FabState
     data class NewRecord(val courseId: Long) : FabState
     data class StartListening(val recordId: Long) : FabState
+    data object NewConversation : FabState
+    data class StopListening(val startedAtElapsedRealtimeMs: Long) : FabState
 }
 
 private fun isSettingsRoute(route: String?): Boolean = route == "settings" || route?.startsWith("settings/") == true
 private fun isAiWorkspaceRoute(route: String?): Boolean =
     route?.contains("ai-results") == true || route?.contains("ai-result/") == true || route?.startsWith("ai-conversation/") == true
 
+private fun mainDestinationForRoute(route: String?): MainDestination = when {
+    isSettingsRoute(route) -> MainDestination.SETTINGS
+    route == "ai" || route == "ai/new" || route?.startsWith("ai-conversation/") == true || route?.startsWith("ai/result/") == true -> MainDestination.AI
+    else -> MainDestination.COURSES
+}
+
 private fun routeTitle(route: String?): String = when (route) {
     "courses" -> "课程"
+    "ai" -> "AI 会话"
+    "ai/new" -> "新对话"
+    "ai/result/{recordId}/{resultId}" -> "AI 结果详情"
     "course/{courseId}" -> "课堂记录"
     "record/{recordId}" -> "记录详情"
     "settings" -> "设置"
@@ -98,6 +150,8 @@ private fun routeTitle(route: String?): String = when (route) {
     "settings/ai-prompts" -> "AI 提示词"
     "settings/asr-prompt-policy" -> "ASR 提示词模式"
     "settings/ai-generation" -> "AI 生成参数"
+    "settings/asr-diagnostics" -> "ASR 诊断"
+    "settings/asr-diagnostics/history/{recordId}" -> "ASR 诊断历史"
     "record/{recordId}/ai-results" -> "AI 结果"
     "record/{recordId}/ai-result/{resultId}" -> "AI 结果详情"
     "record/{recordId}/ai-conversations" -> "AI 对话"
@@ -150,7 +204,12 @@ fun ListenApp(
     }.collectAsStateWithLifecycle(initialValue = null)
     val aiContextSnapshot = headerResult?.sourceTextSnapshot ?: headerConversation?.sourceTextSnapshot
     val selectionMode = route == "record/{recordId}" && recordId != null && aiState.selectionRecordId == recordId
-    val contentSelectionMode = route == "record/{recordId}/ai-results" && recordId != null && aiState.contentSelectionRecordId == recordId
+    val contentSelectionMode = when {
+        route == "record/{recordId}/ai-results" && recordId != null ->
+            aiState.contentSelectionScope == com.cmhr.listen.AiContentSelectionScope(recordId)
+        route == "ai" -> aiState.contentSelectionScope == com.cmhr.listen.AiContentSelectionScope(null)
+        else -> false
+    }
     val currentRecord = courseState.selectedRecord?.takeIf { it.id == recordId }
     val currentCourse = currentRecord?.let { record -> courseState.courses.firstOrNull { it.id == record.courseId } }
     val currentSegments = courseState.detailSegments.filter { it.recordId == recordId }
@@ -164,6 +223,11 @@ fun ListenApp(
     LaunchedEffect(settings) {
         settings.messages.collectLatest { message ->
             snackbarHostState.showSnackbar(message.text, duration = SnackbarDuration.Short)
+        }
+    }
+    LaunchedEffect(stt) {
+        stt.asrMessages.collectLatest { message ->
+            snackbarHostState.showSnackbar(message, duration = SnackbarDuration.Short)
         }
     }
     LaunchedEffect(route) {
@@ -233,11 +297,11 @@ fun ListenApp(
             dismiss = { editingRecordCoursePrompt = false }
         )
     }
-    if (confirmDeleteAiContents && recordId != null) TimedDeleteDialog(
+    if (confirmDeleteAiContents && contentSelectionMode) TimedDeleteDialog(
         title = "删除 AI 内容",
         message = "将删除选中的 ${aiState.selectedContentKeys.size} 项 AI 结果或对话，原始识别文本不会受影响。",
         confirm = {
-                ai.deleteSelectedContents(recordId)
+                ai.deleteSelectedContents(if (route == "ai") null else recordId)
                 confirmDeleteAiContents = false
         },
         dismiss = { confirmDeleteAiContents = false }
@@ -255,17 +319,23 @@ fun ListenApp(
         AiContextBottomSheet(snapshot = aiContextSnapshot, dismiss = { showAiContext = false })
     }
 
-    val nested = route != "courses" && route != "settings"
+    val nested = route !in setOf("courses", "ai", "settings")
+    val bottomChrome = bottomChromeLayout()
     val fabState: FabState = when {
-        isAiWorkspaceRoute(route) -> FabState.None
-        sttState.isListening -> FabState.None
+        sttState.isListening && sttState.listeningStartedAtElapsedRealtimeMs != null ->
+            FabState.StopListening(requireNotNull(sttState.listeningStartedAtElapsedRealtimeMs))
         route == "courses" -> FabState.NewCourse
+        route == "ai" && !contentSelectionMode -> FabState.NewConversation
         route == "course/{courseId}" && courseId != null -> FabState.NewRecord(courseId)
         route == "record/{recordId}" && recordId != null && !selectionMode -> FabState.StartListening(recordId)
         else -> FabState.None
     }
 
     Scaffold(
+        // The chat composer is the single owner of IME avoidance. Keeping IME
+        // insets out of Scaffold prevents its content padding from changing at
+        // the same time as the bottom navigation is removed.
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             when {
@@ -273,10 +343,19 @@ fun ListenApp(
                     selectedCount = aiState.selectedContentKeys.size,
                     close = ai::clearContentSelection,
                     export = {
+                        if (route == "ai") {
+                            ai.buildSelectedGlobalContentsTxt { content ->
+                                if (content != null) {
+                                    exportContent = content
+                                    exportLauncher.launch("Listen_this_lesson-AI内容.txt")
+                                }
+                            }
+                            return@AiContentSelectionTopBar
+                        }
                         val record = currentRecord
                         val course = currentCourse
                         if (record != null && course != null) {
-                            ai.buildSelectedContentsTxt(recordId, course.name, record.name) { content ->
+                            ai.buildSelectedContentsTxt(record.id, course.name, record.name) { content ->
                                 if (content != null) {
                                     exportContent = content
                                     exportLauncher.launch("${record.name} AI结果.txt")
@@ -297,10 +376,6 @@ fun ListenApp(
                     menuExpanded = recordMenuExpanded,
                     setMenuExpanded = { recordMenuExpanded = it },
                     back = { nav.popBackStack() },
-                    summary = {
-                        recordMenuExpanded = false
-                        requestedFullAiAction = AiActionType.SUMMARY
-                    },
                     organizeNotes = {
                         recordMenuExpanded = false
                         requestedFullAiAction = AiActionType.ORGANIZE_NOTES
@@ -323,7 +398,7 @@ fun ListenApp(
                         editingRecordCoursePrompt = currentCourse != null
                     }
                 )
-                route == "record/{recordId}/ai-result/{resultId}" || route == "ai-conversation/{conversationId}" -> TopAppBar(
+                route == "record/{recordId}/ai-result/{resultId}" || route == "ai/result/{recordId}/{resultId}" || route == "ai-conversation/{conversationId}" -> TopAppBar(
                     title = { Text(routeTitle(route)) },
                     navigationIcon = {
                         IconButton(onClick = { nav.popBackStack() }) {
@@ -362,50 +437,70 @@ fun ListenApp(
             }
         },
         bottomBar = {
-            NavigationBar {
-                MainDestination.entries.forEach { destination ->
-                    val selected = if (destination == MainDestination.SETTINGS) isSettingsRoute(route) else !isSettingsRoute(route)
-                    NavigationBarItem(
-                        selected = selected,
-                        onClick = {
-                            nav.navigate(destination.route) {
-                                launchSingleTop = true
-                                popUpTo("courses") { saveState = true }
-                                restoreState = true
-                            }
-                        },
-                        icon = {
-                            Icon(
-                                if (destination == MainDestination.COURSES) Icons.Outlined.School else Icons.Outlined.Settings,
-                                contentDescription = destination.label
-                            )
-                        },
-                        label = { Text(destination.label) }
-                    )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(bottomChrome.navigationContainerHeight),
+                contentAlignment = Alignment.TopCenter
+            ) {
+                NavigationBar(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(AppBottomNavigationHeight),
+                    windowInsets = WindowInsets(0, 0, 0, 0)
+                ) {
+                    MainDestination.entries.forEach { destination ->
+                        val selected = destination == mainDestinationForRoute(route)
+                        NavigationBarItem(
+                            selected = selected,
+                            onClick = {
+                                nav.navigate(destination.route) {
+                                    launchSingleTop = true
+                                    popUpTo("courses") { saveState = true }
+                                    restoreState = true
+                                }
+                            },
+                            icon = {
+                                Icon(
+                                    when (destination) {
+                                        MainDestination.COURSES -> Icons.Outlined.School
+                                        MainDestination.AI -> Icons.Outlined.SmartToy
+                                        MainDestination.SETTINGS -> Icons.Outlined.Settings
+                                    },
+                                    contentDescription = destination.label
+                                )
+                            },
+                            label = { Text(destination.label) }
+                        )
+                    }
                 }
             }
         },
         floatingActionButton = {
-            AnimatedAppFab(state = fabState) { action ->
-                when (action) {
-                    FabState.NewCourse -> { newName = ""; creatingCourse = true }
-                    is FabState.NewRecord -> { newName = ""; creatingRecordForCourse = action.courseId }
-                    is FabState.StartListening -> {
-                        val microphoneGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-                        val notificationGranted = Build.VERSION.SDK_INT < 33 ||
-                            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
-                        if (microphoneGranted && notificationGranted) {
-                            stt.startListening(action.recordId)
-                        } else {
-                            pendingPermissionRecordId = action.recordId
-                            val permissions = buildList {
-                                if (!microphoneGranted) add(Manifest.permission.RECORD_AUDIO)
-                                if (Build.VERSION.SDK_INT >= 33 && !notificationGranted) add(Manifest.permission.POST_NOTIFICATIONS)
+            Box(Modifier.padding(bottom = if (route == "ai/new" || route?.startsWith("ai-conversation/") == true || route?.contains("ai-result/") == true || route?.startsWith("ai/result/") == true) 112.dp else 0.dp)) {
+                AnimatedAppFab(state = fabState) { action ->
+                    when (action) {
+                        FabState.NewCourse -> { newName = ""; creatingCourse = true }
+                        is FabState.NewRecord -> { newName = ""; creatingRecordForCourse = action.courseId }
+                        FabState.NewConversation -> nav.navigate("ai/new")
+                        is FabState.StopListening -> stt.stopListening()
+                        is FabState.StartListening -> {
+                            val microphoneGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                            val notificationGranted = Build.VERSION.SDK_INT < 33 ||
+                                ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+                            if (microphoneGranted && notificationGranted) {
+                                stt.startListening(action.recordId)
+                            } else {
+                                pendingPermissionRecordId = action.recordId
+                                val permissions = buildList {
+                                    if (!microphoneGranted) add(Manifest.permission.RECORD_AUDIO)
+                                    if (Build.VERSION.SDK_INT >= 33 && !notificationGranted) add(Manifest.permission.POST_NOTIFICATIONS)
+                                }
+                                permissionLauncher.launch(permissions.toTypedArray())
                             }
-                            permissionLauncher.launch(permissions.toTypedArray())
                         }
+                        FabState.None -> Unit
                     }
-                    FabState.None -> Unit
                 }
             }
         }
@@ -415,12 +510,12 @@ fun ListenApp(
             startDestination = "courses",
             modifier = Modifier.padding(padding),
             enterTransition = {
-                val direction = if (isSettingsRoute(targetState.destination.route).toInt() >= isSettingsRoute(initialState.destination.route).toInt())
+                val direction = if (mainDestinationForRoute(targetState.destination.route).ordinal >= mainDestinationForRoute(initialState.destination.route).ordinal)
                     AnimatedContentTransitionScope.SlideDirection.Left else AnimatedContentTransitionScope.SlideDirection.Right
                 slideIntoContainer(direction, tween(220))
             },
             exitTransition = {
-                val direction = if (isSettingsRoute(targetState.destination.route).toInt() >= isSettingsRoute(initialState.destination.route).toInt())
+                val direction = if (mainDestinationForRoute(targetState.destination.route).ordinal >= mainDestinationForRoute(initialState.destination.route).ordinal)
                     AnimatedContentTransitionScope.SlideDirection.Left else AnimatedContentTransitionScope.SlideDirection.Right
                 slideOutOfContainer(direction, tween(220))
             },
@@ -431,6 +526,23 @@ fun ListenApp(
                 CoursesScreen(courseState, sttState, courses) { id ->
                     courses.enterCourse(id)
                     nav.navigate("course/$id")
+                }
+            }
+            composable("ai") {
+                GlobalAiScreen(ai) { key, ownerRecordId ->
+                    when (key.kind) {
+                        com.cmhr.listen.AiContentKind.RESULT -> ownerRecordId?.let {
+                            nav.navigate("ai/result/$it/${key.id}")
+                        }
+                        com.cmhr.listen.AiContentKind.CONVERSATION -> nav.navigate("ai-conversation/${key.id}")
+                    }
+                }
+            }
+            composable("ai/new") {
+                NewAiConversationScreen(ai) { conversation ->
+                    nav.navigate("ai-conversation/$conversation") {
+                        popUpTo("ai/new") { inclusive = true }
+                    }
                 }
             }
             composable("course/{courseId}") { entry ->
@@ -454,8 +566,7 @@ fun ListenApp(
                     requestedFullAction = requestedFullAiAction,
                     consumeFullAction = { requestedFullAiAction = null },
                     openResult = { nav.navigate("record/$id/ai-result/$it") },
-                    openConversation = { nav.navigate("ai-conversation/$it") },
-                    stopListening = stt::stopListening
+                    openConversation = { nav.navigate("ai-conversation/$it") }
                 )
             }
             composable("settings") {
@@ -466,7 +577,8 @@ fun ListenApp(
                     onVadPresets = { nav.navigate("settings/vad-presets") },
                     onAiPrompts = { nav.navigate("settings/ai-prompts") },
                     onAsrPromptPolicy = { nav.navigate("settings/asr-prompt-policy") },
-                    onAiGeneration = { nav.navigate("settings/ai-generation") }
+                    onAiGeneration = { nav.navigate("settings/ai-generation") },
+                    onAsrDiagnostics = { nav.navigate("settings/asr-diagnostics") }
                 )
             }
             composable("settings/stt-service") { SttServiceSettingsScreen(settingsState, settings) }
@@ -474,6 +586,73 @@ fun ListenApp(
             composable("settings/ai-prompts") { AiPromptsSettingsScreen(settingsState, settings) }
             composable("settings/asr-prompt-policy") { AsrPromptPolicySettingsScreen(settingsState, settings) }
             composable("settings/ai-generation") { AiGenerationSettingsScreen(settingsState, settings) }
+            composable("settings/asr-diagnostics") {
+                if (!settingsState.developerMode) {
+                    LaunchedEffect(Unit) { nav.navigate("settings") { popUpTo("settings/asr-diagnostics") { inclusive = true } } }
+                } else {
+                    val diagnosticRecordId = sttState.activeRecordId ?: courseState.selectedRecord?.id
+                    val diagnosticRecordName = if (sttState.activeRecordId != null) {
+                        sttState.currentRecordName
+                    } else {
+                        courseState.selectedRecord?.name
+                    }
+                    val diagnostics by remember(diagnosticRecordId) {
+                        diagnosticRecordId?.let { stt.observeRecentAsrDiagnostics(it) }
+                            ?: flowOf(emptyList())
+                    }.collectAsStateWithLifecycle(initialValue = emptyList())
+                    val diagnosticCount by remember(diagnosticRecordId) {
+                        diagnosticRecordId?.let(stt::observeAsrDiagnosticCount) ?: flowOf(0)
+                    }.collectAsStateWithLifecycle(initialValue = 0)
+                    val activeDiagnostics by remember(diagnosticRecordId) {
+                        diagnosticRecordId?.let(stt::observeActiveAsrDiagnostics) ?: flowOf(emptyList())
+                    }.collectAsStateWithLifecycle(initialValue = emptyList())
+                    val recentCountsSince = remember(diagnosticRecordId) {
+                        System.currentTimeMillis() - 24L * 60L * 60L * 1_000L
+                    }
+                    val recentCounts by remember(diagnosticRecordId, recentCountsSince) {
+                        diagnosticRecordId?.let { stt.observeAsrStateCounts(it, recentCountsSince) }
+                            ?: flowOf(AsrDiagnosticStateCounts(0, 0, 0))
+                    }.collectAsStateWithLifecycle(initialValue = AsrDiagnosticStateCounts(0, 0, 0))
+                    val vadDiagnostics by stt.vadDiagnosticsState.collectAsStateWithLifecycle()
+                    val healthRefreshing by stt.isAsrHealthRefreshing.collectAsStateWithLifecycle()
+                    AsrDiagnosticsScreen(
+                        state = sttState,
+                        vadState = vadDiagnostics,
+                        currentRecordId = diagnosticRecordId,
+                        currentRecordName = diagnosticRecordName,
+                        diagnostics = diagnostics,
+                        totalCount = diagnosticCount,
+                        events = stt::observeAsrEvents,
+                        refreshHealth = stt::refreshAsrHealth,
+                        confirmRetryUnknown = stt::confirmRetryUnknown,
+                        openHistory = { nav.navigate("settings/asr-diagnostics/history/$it") },
+                        activeDiagnostics = activeDiagnostics,
+                        recentCounts = recentCounts,
+                        healthRefreshing = healthRefreshing
+                    )
+                }
+            }
+            composable("settings/asr-diagnostics/history/{recordId}") { entry ->
+                if (!settingsState.developerMode) {
+                    LaunchedEffect(Unit) {
+                        nav.navigate("settings") {
+                            popUpTo("settings/asr-diagnostics/history/{recordId}") { inclusive = true }
+                        }
+                    }
+                } else {
+                    val id = entry.arguments?.getString("recordId")?.toLongOrNull() ?: return@composable
+                    val diagnostics by remember(id) { stt.observeAsrDiagnostics(id) }
+                        .collectAsStateWithLifecycle(initialValue = emptyList())
+                    val recordName = courseState.selectedRecord?.takeIf { it.id == id }?.name
+                        ?: sttState.currentRecordName?.takeIf { sttState.activeRecordId == id }
+                    AsrDiagnosticsHistoryScreen(
+                        recordName = recordName,
+                        diagnostics = diagnostics,
+                        events = stt::observeAsrEvents,
+                        confirmRetryUnknown = stt::confirmRetryUnknown
+                    )
+                }
+            }
             composable("settings/vad-parameters") { VadParametersScreen(sttState.configuredVadConfig, stt) }
             composable("settings/vad-presets") { VadPresetsScreen(sttState.selectedVadPreset, stt) }
             composable("record/{recordId}/ai-results") { entry ->
@@ -486,6 +665,10 @@ fun ListenApp(
                 }
             }
             composable("record/{recordId}/ai-result/{resultId}") { entry ->
+                val resultId = entry.arguments?.getString("resultId")?.toLongOrNull() ?: return@composable
+                AiResultDetailScreen(resultId, ai, settingsState.developerMode)
+            }
+            composable("ai/result/{recordId}/{resultId}") { entry ->
                 val resultId = entry.arguments?.getString("resultId")?.toLongOrNull() ?: return@composable
                 AiResultDetailScreen(resultId, ai, settingsState.developerMode)
             }
@@ -554,7 +737,6 @@ internal fun RecordNormalTopBar(
     menuExpanded: Boolean,
     setMenuExpanded: (Boolean) -> Unit,
     back: () -> Unit,
-    summary: () -> Unit,
     organizeNotes: () -> Unit,
     exportTxt: () -> Unit,
     openResults: () -> Unit,
@@ -575,7 +757,6 @@ internal fun RecordNormalTopBar(
             modifier = Modifier.widthIn(min = 240.dp),
             shape = RoundedCornerShape(20.dp)
         ) {
-            DropdownMenuItem(text = { Text("总结") }, onClick = summary)
             DropdownMenuItem(text = { Text("整理成笔记") }, onClick = organizeNotes)
             HorizontalDivider()
             DropdownMenuItem(text = { Text("导出 TXT") }, onClick = exportTxt)
@@ -611,8 +792,32 @@ private fun AnimatedAppFab(state: FabState, click: (FabState) -> Unit) {
             FabState.NewCourse -> AnimatedFabContent("新建课程", Icons.Outlined.Add) { click(state) }
             is FabState.NewRecord -> AnimatedFabContent("新建课堂记录", Icons.Outlined.Add) { click(state) }
             is FabState.StartListening -> AnimatedFabContent("开始监听", Icons.Outlined.Mic) { click(state) }
+            FabState.NewConversation -> AnimatedFabContent("新建对话", Icons.Outlined.Add) { click(state) }
+            is FabState.StopListening -> ListeningStopFab(state.startedAtElapsedRealtimeMs) { click(state) }
         }
     }
+}
+
+@Composable
+internal fun ListeningStopFab(startedAt: Long, click: () -> Unit) {
+    var elapsedMs by remember(startedAt) { mutableLongStateOf(0L) }
+    LaunchedEffect(startedAt) {
+        while (true) {
+            elapsedMs = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
+            delay(1_000)
+        }
+    }
+    val seconds = elapsedMs / 1_000
+    val elapsed = String.format(Locale.US, "%02d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60)
+    ExtendedFloatingActionButton(
+        modifier = Modifier.testTag("global-stop-listening").height(64.dp),
+        text = { Text("停止监听 $elapsed", style = MaterialTheme.typography.titleMedium) },
+        icon = { Icon(Icons.Outlined.Stop, contentDescription = "停止监听") },
+        onClick = click,
+        containerColor = MaterialTheme.colorScheme.error,
+        contentColor = MaterialTheme.colorScheme.onError,
+        shape = RoundedCornerShape(22.dp)
+    )
 }
 
 @Composable

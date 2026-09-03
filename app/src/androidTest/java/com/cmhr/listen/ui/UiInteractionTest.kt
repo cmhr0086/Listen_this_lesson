@@ -2,19 +2,25 @@ package com.cmhr.listen.ui
 
 import android.os.SystemClock
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.longClick
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
@@ -25,7 +31,12 @@ import androidx.compose.ui.unit.dp
 import com.cmhr.listen.data.course.TranscriptEntity
 import com.cmhr.listen.SettingsUiState
 import com.cmhr.listen.ListeningUiState
+import com.cmhr.listen.VadDiagnosticsUiState
+import com.cmhr.listen.data.stt.AsrDiagnosticStateCounts
+import com.cmhr.listen.data.stt.AsrLifecycleState
+import com.cmhr.listen.data.stt.AsrSegmentDiagnosticEntity
 import com.cmhr.listen.ui.theme.ListenTheme
+import kotlinx.coroutines.flow.flowOf
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -33,6 +44,35 @@ import org.junit.Test
 
 class UiInteractionTest {
     @get:Rule val composeRule = createComposeRule()
+
+    @Test
+    fun floatingComposerOverlaysFullHeightContent() {
+        composeRule.setContent {
+            ListenTheme {
+                FloatingComposerLayout(
+                    modifier = Modifier.width(320.dp).height(480.dp),
+                    content = {
+                        Box(Modifier.fillMaxSize().testTag("floating-test-content"))
+                    },
+                    composer = { modifier ->
+                        Box(
+                            modifier
+                                .fillMaxWidth()
+                                .height(80.dp)
+                                .testTag("floating-test-composer")
+                        )
+                    }
+                )
+            }
+        }
+
+        val layoutBounds = composeRule.onNodeWithTag("floating-composer-layout").fetchSemanticsNode().boundsInRoot
+        val contentBounds = composeRule.onNodeWithTag("floating-test-content").fetchSemanticsNode().boundsInRoot
+        val composerBounds = composeRule.onNodeWithTag("floating-test-composer").fetchSemanticsNode().boundsInRoot
+        assertEquals(layoutBounds.bottom, contentBounds.bottom, 0.5f)
+        assertEquals(layoutBounds.bottom, composerBounds.bottom, 0.5f)
+        assertTrue(composerBounds.top > contentBounds.top)
+    }
 
     @Test
     fun extendedFabShowsActionNameAndHandlesClick() {
@@ -45,16 +85,16 @@ class UiInteractionTest {
     }
 
     @Test
-    fun listeningStopUsesFixedRecordActionBar() {
+    fun listeningStopUsesGlobalRedFab() {
         composeRule.setContent {
-            ListenTheme { RecordListeningStopBar(stop = {}) }
+            ListenTheme { ListeningStopFab(SystemClock.elapsedRealtime(), click = {}) }
         }
-        composeRule.onNodeWithTag("record-stop-listening").assertExists()
-        composeRule.onNodeWithText("停止监听").assertTextContains("停止监听")
+        composeRule.onNodeWithTag("global-stop-listening").assertExists()
+        composeRule.onNodeWithContentDescription("停止监听").assertExists()
     }
 
     @Test
-    fun compactListeningStatusShowsCaptureAndQueueState() {
+    fun compactListeningStatusShowsCaptureWithoutDiagnostics() {
         composeRule.setContent {
             ListenTheme {
                 CompactListeningStatus(
@@ -71,7 +111,136 @@ class UiInteractionTest {
         }
         composeRule.onNodeWithTag("compact-listening-status").assertExists()
         composeRule.onNodeWithText("正在收音").assertExists()
-        composeRule.onNodeWithText("队列：3", substring = true).assertExists()
+        composeRule.onNodeWithText("检测到语音：是", substring = true).assertExists()
+    }
+
+    @Test
+    fun currentRecordDiagnosticsShowLifecycleAndHealthRefreshIsManual() {
+        val now = System.currentTimeMillis()
+        val diagnostic = diagnostic(
+            id = "12345678-test",
+            recordId = 1,
+            capturedAt = now - 4_000,
+            state = AsrLifecycleState.QUEUED_LOCAL
+        )
+        var healthRefreshes = 0
+        composeRule.setContent {
+            ListenTheme {
+                AsrDiagnosticsScreen(
+                    state = ListeningUiState(pendingQueueCount = 1),
+                    vadState = VadDiagnosticsUiState(vadProbability = 0.42f),
+                    currentRecordId = 1,
+                    currentRecordName = "第一课",
+                    diagnostics = listOf(diagnostic),
+                    totalCount = 1,
+                    events = { flowOf(emptyList()) },
+                    refreshHealth = { healthRefreshes += 1 },
+                    confirmRetryUnknown = {},
+                    openHistory = {},
+                    activeDiagnostics = listOf(diagnostic),
+                    recentCounts = AsrDiagnosticStateCounts(0, 0, 0)
+                )
+            }
+        }
+
+        composeRule.waitForIdle()
+        composeRule.runOnIdle { assertEquals(0, healthRefreshes) }
+        composeRule.onNodeWithText("客户端队列：1 / 持久化").assertExists()
+        composeRule.onNodeWithText("#12345678 · 客户端排队").assertExists()
+        composeRule.onNodeWithTag("asr-capture-vad").assertExists()
+        composeRule.onNodeWithText("全部记录").assertDoesNotExist()
+        composeRule.onNodeWithTag("asr-health-refresh").performClick()
+        composeRule.runOnIdle { assertEquals(1, healthRefreshes) }
+    }
+
+    @Test
+    fun diagnosticsPreviewShowsFifteenThenOpensCurrentRecordHistory() {
+        val now = System.currentTimeMillis()
+        val preview = (16 downTo 2).map { index ->
+            diagnostic(
+                id = "preview-$index",
+                recordId = 8,
+                capturedAt = now + index,
+                state = AsrLifecycleState.COMPLETED
+            )
+        }
+        var openedRecordId: Long? = null
+        composeRule.setContent {
+            ListenTheme {
+                AsrDiagnosticsScreen(
+                    state = ListeningUiState(),
+                    vadState = VadDiagnosticsUiState(),
+                    currentRecordId = 8,
+                    currentRecordName = "课堂 A",
+                    diagnostics = preview,
+                    totalCount = 16,
+                    events = { flowOf(emptyList()) },
+                    refreshHealth = {},
+                    confirmRetryUnknown = {},
+                    openHistory = { openedRecordId = it },
+                    activeDiagnostics = emptyList(),
+                    recentCounts = AsrDiagnosticStateCounts(15, 0, 0)
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("asr-diagnostic-preview-16").assertExists()
+        composeRule.onNodeWithTag("asr-diagnostic-preview-1").assertDoesNotExist()
+        // record, capture/VAD, summary, fifteen diagnostics, then the more action
+        composeRule.onNodeWithTag("asr-diagnostics-list").performScrollToIndex(18)
+        composeRule.onNodeWithTag("asr-more-button").assertExists().performClick()
+        composeRule.runOnIdle { assertEquals(8L, openedRecordId) }
+    }
+
+    @Test
+    fun diagnosticsHistoryContainsTheSixteenthEntry() {
+        val now = System.currentTimeMillis()
+        val all = (16 downTo 1).map { index ->
+            diagnostic(
+                id = "history-$index",
+                recordId = 8,
+                capturedAt = now + index,
+                state = AsrLifecycleState.COMPLETED
+            )
+        }
+        composeRule.setContent {
+            ListenTheme {
+                AsrDiagnosticsHistoryScreen(
+                    recordName = "课堂 A",
+                    diagnostics = all,
+                    events = { flowOf(emptyList()) },
+                    confirmRetryUnknown = {}
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("asr-diagnostics-history-list").performScrollToIndex(16)
+        composeRule.onNodeWithTag("asr-diagnostic-history-1").assertExists()
+    }
+
+    @Test
+    fun smoothElapsedTextRefreshesAtTenthsOfASecond() {
+        var elapsedRealtime by mutableLongStateOf(10_000L)
+        composeRule.setContent {
+            ListenTheme {
+                SmoothElapsedText(
+                    label = "已等待：",
+                    startElapsedRealtimeMs = 10_000L,
+                    fallbackStartWallTimeMs = null,
+                    active = true,
+                    modifier = Modifier.testTag("smooth-elapsed-test"),
+                    elapsedRealtime = { elapsedRealtime },
+                    wallTime = { 0L }
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("已等待：0.0s").assertExists()
+        composeRule.runOnIdle { elapsedRealtime = 10_137L }
+        composeRule.waitUntil(timeoutMillis = 2_000) {
+            composeRule.onAllNodesWithText("已等待：0.1s").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithText("已等待：0.1s").assertExists()
     }
 
     @Test
@@ -159,7 +328,7 @@ class UiInteractionTest {
                 RecordNormalTopBar(
                     menuExpanded = expanded,
                     setMenuExpanded = { expanded = it },
-                    back = {}, summary = {}, organizeNotes = {}, exportTxt = {},
+                    back = {}, organizeNotes = {}, exportTxt = {},
                     openResults = {}, select = {}, editAsrPrompt = {}
                 )
             }
@@ -167,9 +336,21 @@ class UiInteractionTest {
 
         composeRule.onNodeWithText("记录详情").assertTextContains("记录详情")
         composeRule.onNodeWithContentDescription("更多操作").performClick()
-        listOf("总结", "整理成笔记", "导出 TXT", "AI 结果", "选择", "ASR 提示词").forEach {
+        listOf("整理成笔记", "导出 TXT", "AI 结果", "选择", "ASR 提示词").forEach {
             composeRule.onNodeWithText(it).assertExists()
         }
+        composeRule.onNodeWithText("总结").assertDoesNotExist()
+    }
+
+    @Test
+    fun markdownRendererAcceptsHeadingTableTaskListAndStrikethrough() {
+        composeRule.setContent {
+            ListenTheme {
+                MarkdownText("## 二级标题\n\n| 项目 | 内容 |\n| --- | --- |\n| 课程 | 数学 |\n\n- [x] 已完成\n\n~~删除线~~")
+            }
+        }
+
+        composeRule.onNodeWithTag("markdown-content").assertExists()
     }
 
     @Test
@@ -209,3 +390,26 @@ class UiInteractionTest {
         assertTrue(deleted)
     }
 }
+
+private fun diagnostic(
+    id: String,
+    recordId: Long,
+    capturedAt: Long,
+    state: AsrLifecycleState
+) = AsrSegmentDiagnosticEntity(
+    segmentId = id,
+    recordId = recordId,
+    state = state.name,
+    audioStartTime = capturedAt,
+    audioEndTime = capturedAt + 1_000,
+    audioDurationMs = 1_000,
+    captureStartedAt = capturedAt,
+    captureFinishedAt = capturedAt + 1_000,
+    queuedLocalAt = capturedAt + 1_000,
+    finishedAt = if (state in setOf(
+            AsrLifecycleState.COMPLETED,
+            AsrLifecycleState.FAILED,
+            AsrLifecycleState.DROPPED
+        )
+    ) capturedAt + 2_000 else null
+)

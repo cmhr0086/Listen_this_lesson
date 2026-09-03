@@ -35,6 +35,7 @@ data class AiPromptSettings(
     val correctAsr: String = "你是课堂语音转写校对助手。只修正原文中明显的 ASR 错字、同音词和标点，不改变原意；无法确认处保留原文并标记。只输出建议修正版。",
     val quickAnswer: String = "你是课堂问题快速回答助手。先从原文中识别老师明确提出的问题，再按出现顺序逐条给出简洁答案。只能依据原文和可靠的通用知识；原文不足、说话人或问题不确定时必须明确说明，不得虚构课堂内容。",
     val customConversation: String = "你是课堂内容问答助手。只能依据提供的冻结课堂原文回答；若原文不足以回答，应明确说明，不得虚构。",
+    val generalConversation: String = "你是可靠、清晰的中文 AI 助手。准确回答用户问题；不确定时明确说明，不得虚构事实。",
     val imageContext: String = "请结合附加课堂照片中清晰可见的黑板、课件、公式和图表补充判断；无法辨认的内容必须明确说明，不得猜测。"
 )
 data class AiGenerationSettings(
@@ -87,6 +88,7 @@ class AppSettingsRepository(private val context: Context) {
                 correctAsr = preferences[AI_PROMPT_CORRECT] ?: AiPromptSettings().correctAsr,
                 quickAnswer = preferences[AI_PROMPT_QUICK] ?: AiPromptSettings().quickAnswer,
                 customConversation = preferences[AI_PROMPT_CHAT] ?: AiPromptSettings().customConversation,
+                generalConversation = preferences[AI_PROMPT_GENERAL_CHAT] ?: AiPromptSettings().generalConversation,
                 imageContext = preferences[AI_PROMPT_IMAGE] ?: AiPromptSettings().imageContext
             ),
             aiGeneration = AiGenerationSettings(
@@ -147,7 +149,7 @@ class AppSettingsRepository(private val context: Context) {
     suspend fun readAiApiKey(): String? = context.appSettingsDataStore.data.first()[AI_API_KEY]?.let(aiApiKeyStore::decrypt)
 
     suspend fun saveAiPrompts(value: AiPromptSettings) {
-        require(listOf(value.summary, value.organizeNotes, value.correctAsr, value.quickAnswer, value.customConversation, value.imageContext).all { it.isNotBlank() }) {
+        require(listOf(value.organizeNotes, value.correctAsr, value.quickAnswer, value.customConversation, value.generalConversation, value.imageContext).all { it.isNotBlank() }) {
             "提示词不能为空。"
         }
         context.appSettingsDataStore.edit { preferences ->
@@ -156,12 +158,13 @@ class AppSettingsRepository(private val context: Context) {
             preferences[AI_PROMPT_CORRECT] = value.correctAsr.trim()
             preferences[AI_PROMPT_QUICK] = value.quickAnswer.trim()
             preferences[AI_PROMPT_CHAT] = value.customConversation.trim()
+            preferences[AI_PROMPT_GENERAL_CHAT] = value.generalConversation.trim()
             preferences[AI_PROMPT_IMAGE] = value.imageContext.trim()
         }
     }
 
     suspend fun restoreDefaultAiPrompts() = context.appSettingsDataStore.edit { preferences ->
-        listOf(AI_PROMPT_SUMMARY, AI_PROMPT_NOTES, AI_PROMPT_CORRECT, AI_PROMPT_QUICK, AI_PROMPT_CHAT, AI_PROMPT_IMAGE)
+        listOf(AI_PROMPT_SUMMARY, AI_PROMPT_NOTES, AI_PROMPT_CORRECT, AI_PROMPT_QUICK, AI_PROMPT_CHAT, AI_PROMPT_GENERAL_CHAT, AI_PROMPT_IMAGE)
             .forEach(preferences::remove)
     }
 
@@ -230,6 +233,7 @@ class AppSettingsRepository(private val context: Context) {
         val AI_PROMPT_CORRECT = stringPreferencesKey("ai_prompt_correct")
         val AI_PROMPT_QUICK = stringPreferencesKey("ai_prompt_quick")
         val AI_PROMPT_CHAT = stringPreferencesKey("ai_prompt_chat")
+        val AI_PROMPT_GENERAL_CHAT = stringPreferencesKey("ai_prompt_general_chat")
         val AI_PROMPT_IMAGE = stringPreferencesKey("ai_prompt_image")
         val AI_MAX_TOKENS = intPreferencesKey("ai_max_tokens")
         val AI_FIXED_TEMPERATURE = floatPreferencesKey("ai_fixed_temperature")
