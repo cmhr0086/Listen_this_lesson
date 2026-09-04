@@ -29,11 +29,13 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.cmhr.listen.ListeningUiState
 import com.cmhr.listen.VadDiagnosticsUiState
 import com.cmhr.listen.data.stt.ACTIVE_ASR_STATES
+import com.cmhr.listen.data.stt.AsrClockBasis
 import com.cmhr.listen.data.stt.AsrDiagnosticStateCounts
 import com.cmhr.listen.data.stt.AsrFailureStage
 import com.cmhr.listen.data.stt.AsrHealthSnapshot
 import com.cmhr.listen.data.stt.AsrLifecycleState
 import com.cmhr.listen.data.stt.AsrNetworkEventEntity
+import com.cmhr.listen.data.stt.AsrRuntimeSummary
 import com.cmhr.listen.data.stt.AsrSegmentDiagnosticEntity
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -59,6 +61,7 @@ fun AsrDiagnosticsScreen(
     openHistory: (Long) -> Unit,
     activeDiagnostics: List<AsrSegmentDiagnosticEntity>,
     recentCounts: AsrDiagnosticStateCounts,
+    runtimeSummary: AsrRuntimeSummary? = null,
     health: AsrHealthSnapshot? = state.asrHealth,
     healthRefreshing: Boolean = false,
     healthError: String? = null
@@ -91,6 +94,7 @@ fun AsrDiagnosticsScreen(
                 activeDiagnostics = visibleActiveDiagnostics,
                 totalCount = totalCount,
                 recentCounts = recentCounts,
+                runtimeSummary = runtimeSummary,
                 health = health,
                 healthRefreshing = healthRefreshing,
                 healthError = healthError,
@@ -186,6 +190,7 @@ private fun RuntimeSummaryCard(
     activeDiagnostics: List<AsrSegmentDiagnosticEntity>,
     totalCount: Int,
     recentCounts: AsrDiagnosticStateCounts,
+    runtimeSummary: AsrRuntimeSummary?,
     health: AsrHealthSnapshot?,
     healthRefreshing: Boolean,
     healthError: String?,
@@ -200,6 +205,21 @@ private fun RuntimeSummaryCard(
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text("运行概况", style = MaterialTheme.typography.titleMedium)
             Text("客户端队列：${activeDiagnostics.size} / 持久化")
+            if (runtimeSummary != null) {
+                Text("待提交：${runtimeSummary.queuedLocalCount}")
+                Text("提交中：${runtimeSummary.submittingCount}")
+                Text("服务端在途：${runtimeSummary.serverInFlightCount}")
+                Text("全局并发槽：${runtimeSummary.globalInFlightCount} / ${runtimeSummary.inFlightCapacity}")
+                Text("正在轮询：${runtimeSummary.pollingCount}")
+                Text("待人工确认：${runtimeSummary.submissionUnknownCount}")
+                Text("累计完成：${runtimeSummary.completedCount} · 失败 ${runtimeSummary.failedCount}")
+                if (runtimeSummary.isBackpressured) {
+                    Text(
+                        "并发槽已满，新的片段正在本地持久队列等待。",
+                        color = MaterialTheme.colorScheme.tertiary
+                    )
+                }
+            }
             Text("当前处理：${processing?.let { shortSegmentId(it.segmentId) + " · " + stateName(it.lifecycleState) } ?: "无"}")
             Text("诊断记录：$totalCount 条")
             Text("服务端模型：${health?.model ?: "尚未手动获取"}")
@@ -248,12 +268,15 @@ private fun AsrDiagnosticCard(
             EndToEndDuration(diagnostic)
             if (expanded) {
                 Text("job_id：${diagnostic.jobId ?: "尚未取得"}")
+                Text(
+                    "计时基准：${if (diagnostic.clockBasis == AsrClockBasis.ELAPSED_REALTIME.name) "设备单调时钟" else "旧数据墙上时钟"}"
+                )
                 Text("本地入队：${formatDiagnosticTime(diagnostic.queuedLocalAt)}")
                 Text("提交开始：${formatNullableTime(diagnostic.submitStartedAt)}")
                 Text("提交结束：${formatNullableTime(diagnostic.submitCompletedAt)}")
-                Text("首次 queued：${formatNullableTime(diagnostic.firstServerQueuedAt)}")
-                Text("首次 processing：${formatNullableTime(diagnostic.firstServerProcessingAt)}")
-                Text("首次 completed：${formatNullableTime(diagnostic.firstServerCompletedAt)}")
+                Text("首次观察 queued：${formatNullableTime(diagnostic.firstServerQueuedAt)}")
+                Text("首次观察 processing：${formatNullableTime(diagnostic.firstServerProcessingAt)}")
+                Text("首次观察 completed：${formatNullableTime(diagnostic.firstServerCompletedAt)}")
                 Text("POST /transcribe：${formatNullableMs(diagnostic.postDurationMs)}")
                 Text("实际上传：${formatNullableMs(diagnostic.uploadDurationMs)}")
                 Text("等待提交响应：${formatNullableMs(diagnostic.submitResponseWaitDurationMs)}")
@@ -269,7 +292,9 @@ private fun AsrDiagnosticCard(
                 NetworkEventTimeline(events(diagnostic.segmentId))
                 if (state == AsrLifecycleState.SUBMISSION_UNKNOWN) {
                     Text("重新提交可能在服务端产生重复任务，请先确认服务端没有该任务。", style = MaterialTheme.typography.bodySmall)
-                    Button(onClick = { confirmRetryUnknown(diagnostic.segmentId) }) { Text("已确认，重新提交") }
+                    Button(onClick = { confirmRetryUnknown(diagnostic.segmentId) }) {
+                        Text(if (diagnostic.jobId == null) "已确认，重新提交" else "继续轮询已有任务")
+                    }
                 }
             } else Text("点击展开完整时间轴", style = MaterialTheme.typography.bodySmall)
         }
@@ -281,7 +306,13 @@ private fun ClientQueueDuration(diagnostic: AsrSegmentDiagnosticEntity) {
     val active = diagnostic.state in ACTIVE_ASR_STATES && diagnostic.submitStartedAt == null
     val finalValue = diagnostic.clientQueueDurationMs
     if (finalValue != null || !active) StaticDurationText("客户端排队：", finalValue)
-    else SmoothElapsedText("客户端排队：", diagnostic.queuedLocalElapsedMs, diagnostic.queuedLocalAt, true)
+    else SmoothElapsedText(
+        "客户端排队：",
+        diagnostic.queuedLocalElapsedMs,
+        diagnostic.queuedLocalAt,
+        true,
+        clockBasis = diagnostic.clockBasis
+    )
 }
 
 @Composable
@@ -290,18 +321,32 @@ private fun ServerWaitDuration(diagnostic: AsrSegmentDiagnosticEntity) {
         AsrLifecycleState.QUEUED_SERVER, AsrLifecycleState.PROCESSING, AsrLifecycleState.RETRY_WAIT
     )
     val finalValue = diagnostic.serverWaitDurationMs
-    if (finalValue != null || !active) StaticDurationText("服务端等待：", finalValue, "（估算）")
+    if (finalValue != null) StaticDurationText("服务端等待：", finalValue, "（估算）")
+    else if (!active) Text("服务端等待：—（无法计算）", fontFamily = FontFamily.Monospace)
     else SmoothElapsedText(
         "服务端等待：", diagnostic.submitCompletedElapsedMs, diagnostic.submitCompletedAt, true,
-        suffix = "（估算）"
+        suffix = "（估算）",
+        unavailableText = "—（估算中）",
+        clockBasis = diagnostic.clockBasis
     )
 }
 
 @Composable
 private fun EndToEndDuration(diagnostic: AsrSegmentDiagnosticEntity) {
     val finalValue = diagnostic.totalEndToEndDurationMs
-    if (finalValue != null || diagnostic.state !in ACTIVE_ASR_STATES) StaticDurationText("端到端：", finalValue)
-    else SmoothElapsedText("端到端：", diagnostic.captureStartedElapsedMs, diagnostic.captureStartedAt, true)
+    val label = when (diagnostic.lifecycleState) {
+        AsrLifecycleState.COMPLETED -> "端到端："
+        AsrLifecycleState.FAILED, AsrLifecycleState.DROPPED -> "任务历时："
+        else -> "任务年龄："
+    }
+    if (finalValue != null || diagnostic.state !in ACTIVE_ASR_STATES) StaticDurationText(label, finalValue)
+    else SmoothElapsedText(
+        label,
+        diagnostic.captureStartedElapsedMs,
+        diagnostic.captureStartedAt,
+        true,
+        clockBasis = diagnostic.clockBasis
+    )
 }
 
 @Composable
@@ -318,38 +363,61 @@ internal fun SmoothElapsedText(
     active: Boolean,
     modifier: Modifier = Modifier,
     suffix: String = "",
+    unavailableText: String = "—",
+    clockBasis: String = AsrClockBasis.ELAPSED_REALTIME.name,
     elapsedRealtime: () -> Long = { SystemClock.elapsedRealtime() },
     wallTime: () -> Long = { System.currentTimeMillis() }
 ) {
     val elapsedMs by produceState(
-        initialValue = calculateElapsedMs(startElapsedRealtimeMs, fallbackStartWallTimeMs, elapsedRealtime, wallTime),
-        startElapsedRealtimeMs, fallbackStartWallTimeMs, active
+        initialValue = calculateElapsedMs(
+            startElapsedRealtimeMs,
+            fallbackStartWallTimeMs,
+            clockBasis,
+            elapsedRealtime,
+            wallTime
+        ),
+        startElapsedRealtimeMs, fallbackStartWallTimeMs, clockBasis, active
     ) {
         if (!active) return@produceState
         while (true) {
-            val current = calculateElapsedMs(startElapsedRealtimeMs, fallbackStartWallTimeMs, elapsedRealtime, wallTime)
+            val current = calculateElapsedMs(
+                startElapsedRealtimeMs,
+                fallbackStartWallTimeMs,
+                clockBasis,
+                elapsedRealtime,
+                wallTime
+            )
             value = current
             delay(nextSmoothTickDelay(current))
         }
     }
     Text(
-        "$label${elapsedMs?.let(::formatSmoothMs) ?: "—"}$suffix",
+        "$label${elapsedMs?.let { formatSmoothMs(it) + suffix } ?: unavailableText}",
         modifier = modifier,
         fontFamily = FontFamily.Monospace
     )
 }
 
-private fun calculateElapsedMs(
+internal fun calculateElapsedMs(
     startElapsedRealtimeMs: Long?,
     fallbackStartWallTimeMs: Long?,
+    clockBasis: String,
     elapsedRealtime: () -> Long,
     wallTime: () -> Long
 ): Long? {
-    val monotonicNow = elapsedRealtime()
-    if (startElapsedRealtimeMs != null && monotonicNow >= startElapsedRealtimeMs) {
-        return monotonicNow - startElapsedRealtimeMs
+    return when (clockBasis) {
+        AsrClockBasis.ELAPSED_REALTIME.name -> {
+            val start = startElapsedRealtimeMs?.takeIf { it > 0L } ?: return null
+            val end = elapsedRealtime().takeIf { it >= start } ?: return null
+            end - start
+        }
+        AsrClockBasis.LEGACY_WALL_FALLBACK.name -> {
+            val start = fallbackStartWallTimeMs?.takeIf { it > 0L } ?: return null
+            val end = wallTime().takeIf { it >= start } ?: return null
+            end - start
+        }
+        else -> null
     }
-    return fallbackStartWallTimeMs?.let { (wallTime() - it).coerceAtLeast(0) }
 }
 
 internal fun nextSmoothTickDelay(elapsedMs: Long?): Long {

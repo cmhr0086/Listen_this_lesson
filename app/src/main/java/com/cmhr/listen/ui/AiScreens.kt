@@ -84,6 +84,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.unit.Dp
@@ -209,7 +211,7 @@ fun GlobalAiScreen(model: AiViewModel, openItem: (AiContentKey, Long?) -> Unit) 
     ) {
         state.error?.let { message -> item("global-ai-error") { Text(message, color = MaterialTheme.colorScheme.error) } }
         if (contents.isEmpty()) {
-            item("global-ai-empty") { Text("还没有 AI 内容。使用右下角按钮开始新对话，或从课堂记录处理识别片段。") }
+            item("global-ai-empty") { Text("还没有 AI 内容。使用右上角按钮开始新对话，或从课堂记录处理识别片段。") }
         }
         grouped.forEach { (label, itemsForDay) ->
             item("day-$label") { Text(label, style = MaterialTheme.typography.titleMedium) }
@@ -243,11 +245,13 @@ fun GlobalAiScreen(model: AiViewModel, openItem: (AiContentKey, Long?) -> Unit) 
 internal fun FloatingComposerLayout(
     modifier: Modifier = Modifier,
     composerVisible: Boolean = true,
+    onComposerClearanceChanged: (Dp) -> Unit = {},
     content: @Composable (composerClearance: Dp) -> Unit,
     composer: @Composable (Modifier) -> Unit
 ) {
     var composerHeightPx by remember { mutableIntStateOf(0) }
     val density = LocalDensity.current
+    val latestClearanceReporter by rememberUpdatedState(onComposerClearanceChanged)
     LaunchedEffect(composerVisible) {
         if (!composerVisible) composerHeightPx = 0
     }
@@ -255,6 +259,12 @@ internal fun FloatingComposerLayout(
         with(density) { composerHeightPx.toDp() } + 12.dp
     } else {
         16.dp
+    }
+    LaunchedEffect(composerClearance, composerVisible) {
+        latestClearanceReporter(if (composerVisible) composerClearance else 0.dp)
+    }
+    DisposableEffect(Unit) {
+        onDispose { latestClearanceReporter(0.dp) }
     }
     Box(modifier.fillMaxSize().testTag("floating-composer-layout")) {
         content(composerClearance)
@@ -271,13 +281,33 @@ internal fun FloatingComposerLayout(
 }
 
 @Composable
-fun NewAiConversationScreen(model: AiViewModel, onCreated: (Long) -> Unit) {
+fun NewAiConversationScreen(
+    model: AiViewModel,
+    recordId: Long? = null,
+    onComposerClearanceChanged: (Dp) -> Unit = {},
+    onCreated: (Long) -> Unit
+) {
     val state by model.uiState.collectAsStateWithLifecycle()
     var question by remember { mutableStateOf("") }
     var attachments by remember { mutableStateOf(emptyList<PendingAiAttachment>()) }
+    var contextLimitText by remember(recordId) {
+        mutableStateOf(AiViewModel.DEFAULT_CLASSROOM_CONTEXT_CODE_POINTS.toString())
+    }
+    val classroomSegments by remember(recordId) {
+        recordId?.let(model::recordTranscripts) ?: flowOf<List<TranscriptEntity>>(emptyList())
+    }.collectAsStateWithLifecycle(initialValue = emptyList())
+    val contextLimit = contextLimitText.toIntOrNull()
+    val contextLimitValid = contextLimit != null &&
+        contextLimit in AiViewModel.MIN_CLASSROOM_CONTEXT_CODE_POINTS..AiViewModel.MAX_SOURCE_CODE_POINTS
+    val classroomContext = remember(classroomSegments, contextLimit, contextLimitValid) {
+        if (recordId != null && contextLimitValid) {
+            AiViewModel.selectRecentClassroomContext(classroomSegments, requireNotNull(contextLimit))
+        } else null
+    }
     val latestAttachments by rememberUpdatedState(attachments)
     DisposableEffect(Unit) { onDispose { latestAttachments.forEach(model::discardAttachment) } }
     FloatingComposerLayout(
+        onComposerClearanceChanged = onComposerClearanceChanged,
         content = { composerClearance ->
             Column(
                 Modifier
@@ -286,8 +316,55 @@ fun NewAiConversationScreen(model: AiViewModel, onCreated: (Long) -> Unit) {
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text("有什么可以帮你？", style = MaterialTheme.typography.headlineSmall)
-                Text("可以添加图片或文本附件。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(
+                    if (recordId == null) "有什么可以帮你？" else "课堂新对话",
+                    style = MaterialTheme.typography.headlineSmall
+                )
+                if (recordId == null) {
+                    Text("可以添加图片或文本附件。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    Text(
+                        "首次发送时冻结当时已完成的课堂识别内容，之后的新转写不会自动追加。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = contextLimitText,
+                        onValueChange = { value ->
+                            if (value.isEmpty() || value.all { it.isDigit() }) contextLimitText = value.take(5)
+                        },
+                        modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                        label = { Text("课堂上下文字数") },
+                        suffix = { Text("字符") },
+                        singleLine = true,
+                        isError = !contextLimitValid,
+                        supportingText = {
+                            Text(
+                                if (contextLimitValid) "范围 1,000～20,000；只纳入完整识别片段。"
+                                else "请输入 1,000～20,000。"
+                            )
+                        },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                    )
+                    classroomContext?.let { preview ->
+                        val status = when {
+                            preview.newestSegmentExceedsLimit ->
+                                "最近一条完整片段已超过限制，请提高限制或回到记录页手动选择。"
+                            preview.segments.isEmpty() ->
+                                "本次未包含课堂原文；仍可创建绑定当前课堂记录的对话。"
+                            else ->
+                                "将纳入 ${preview.segments.size} 个片段 · ${preview.codePointCount} 个字符" +
+                                    if (preview.omittedEarlierSegmentCount > 0) " · 省略较早 ${preview.omittedEarlierSegmentCount} 个片段" else ""
+                        }
+                        Text(
+                            status,
+                            modifier = Modifier.padding(top = 4.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (preview.newestSegmentExceedsLimit) MaterialTheme.colorScheme.error
+                                else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
                 state.error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 12.dp)) }
             }
         },
@@ -297,11 +374,22 @@ fun NewAiConversationScreen(model: AiViewModel, onCreated: (Long) -> Unit) {
                 onValueChange = { question = it },
                 attachments = attachments,
                 model = model,
-                enabled = !state.isBusy,
+                enabled = !state.isBusy && (recordId == null || (contextLimitValid && classroomContext?.newestSegmentExceedsLimit != true)),
                 updateAttachments = { attachments = it },
                 send = {
                     val submitted = attachments
-                    model.createGeneralConversation(question, submitted, onCreated)
+                    if (recordId == null) {
+                        model.createGeneralConversation(question, submitted, onCreated)
+                    } else {
+                        model.createClassroomConversation(
+                            recordId = recordId,
+                            contextCodePointLimit = requireNotNull(contextLimit),
+                            sourceSegmentIdsAtSend = classroomSegments.mapTo(linkedSetOf()) { it.id },
+                            question = question,
+                            attachments = submitted,
+                            onCreated = onCreated
+                        )
+                    }
                     question = ""
                     attachments = emptyList()
                 },
@@ -312,7 +400,12 @@ fun NewAiConversationScreen(model: AiViewModel, onCreated: (Long) -> Unit) {
 }
 
 @Composable
-fun AiResultDetailScreen(resultId: Long, model: AiViewModel, developerMode: Boolean = false) {
+fun AiResultDetailScreen(
+    resultId: Long,
+    model: AiViewModel,
+    developerMode: Boolean = false,
+    onComposerClearanceChanged: (Dp) -> Unit = {}
+) {
     val result by model.result(resultId).collectAsStateWithLifecycle(initialValue = null)
     val sourceSegments by model.resultSourceSegments(resultId).collectAsStateWithLifecycle(initialValue = emptyList())
     val conversation by model.conversationForResult(resultId).collectAsStateWithLifecycle(initialValue = null)
@@ -344,6 +437,7 @@ fun AiResultDetailScreen(resultId: Long, model: AiViewModel, developerMode: Bool
     val composerVisible = result?.status == AiRequestStatus.SUCCESS.name
     FloatingComposerLayout(
         composerVisible = composerVisible,
+        onComposerClearanceChanged = onComposerClearanceChanged,
         content = { composerClearance ->
         LazyColumn(
             Modifier.fillMaxSize().testTag("ai-result-message-list"),
@@ -452,7 +546,12 @@ fun AiConversationsScreen(recordId: Long, model: AiViewModel, openConversation: 
 }
 
 @Composable
-fun AiConversationScreen(conversationId: Long, model: AiViewModel, developerMode: Boolean = false) {
+fun AiConversationScreen(
+    conversationId: Long,
+    model: AiViewModel,
+    developerMode: Boolean = false,
+    onComposerClearanceChanged: (Dp) -> Unit = {}
+) {
     val conversation by model.conversation(conversationId).collectAsStateWithLifecycle(initialValue = null)
     val messages by model.messages(conversationId).collectAsStateWithLifecycle(initialValue = emptyList())
     val aiState by model.uiState.collectAsStateWithLifecycle()
@@ -486,6 +585,7 @@ fun AiConversationScreen(conversationId: Long, model: AiViewModel, developerMode
         }
     }
     FloatingComposerLayout(
+        onComposerClearanceChanged = onComposerClearanceChanged,
         content = { composerClearance ->
         LazyColumn(
             Modifier.fillMaxSize().testTag("ai-conversation-message-list"),

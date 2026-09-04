@@ -520,7 +520,7 @@ internal fun buildTxt(course: CourseEntity, record: ClassRecordEntity, segments:
     appendLine("开始时间：${formatDateTime(record.startedAt)}")
     appendLine("结束时间：${record.endedAt?.let(::formatDateTime) ?: "进行中"}")
     appendLine()
-    segments.sortedBy { it.startTime }.forEach {
+    AiViewModel.orderTranscriptSegments(segments).forEach {
         appendLine(formatDateTime(it.startTime))
         appendLine(it.effectiveText)
         appendLine()

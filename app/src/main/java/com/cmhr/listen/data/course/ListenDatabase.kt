@@ -42,7 +42,7 @@ data class ClassRecordEntity(@PrimaryKey(autoGenerate = true) val id: Long = 0, 
 @Entity(
     tableName = "transcript_segments",
     foreignKeys = [ForeignKey(entity = ClassRecordEntity::class, parentColumns = ["id"], childColumns = ["recordId"], onDelete = ForeignKey.CASCADE)],
-    indices = [Index("recordId"), Index("sourceSegmentId"), Index("asrJobId")]
+    indices = [Index("recordId"), Index("sourceSegmentId"), Index("asrJobId"), Index("sequenceNumber")]
 )
 data class TranscriptEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
@@ -56,6 +56,7 @@ data class TranscriptEntity(
     val correctionResultId: Long? = null,
     val correctedAt: Long? = null,
     val sourceSegmentId: String? = null,
+    val sequenceNumber: Long? = null,
     val asrJobId: String? = null,
     val queueDurationMs: Long? = null,
     val uploadDurationMs: Long? = null,
@@ -86,11 +87,13 @@ data class TranscriptEntity(
     @Query("SELECT id FROM records WHERE courseId = :courseId") suspend fun idsForCourse(courseId: Long): List<Long>
 }
 @Dao interface TranscriptDao {
-    @Query("SELECT * FROM transcript_segments WHERE recordId = :recordId ORDER BY startTime ASC") fun segments(recordId: Long): Flow<List<TranscriptEntity>>
-    @Query("SELECT * FROM transcript_segments WHERE id IN (:ids) ORDER BY startTime ASC") suspend fun segmentsByIds(ids: List<Long>): List<TranscriptEntity>
-    @Query("SELECT t.* FROM transcript_segments t INNER JOIN ai_result_segments l ON l.segmentId = t.id WHERE l.resultId = :resultId ORDER BY t.startTime ASC")
+    @Query("SELECT * FROM transcript_segments WHERE recordId = :recordId ORDER BY sequenceNumber ASC, startTime ASC, id ASC") fun segments(recordId: Long): Flow<List<TranscriptEntity>>
+    @Query("SELECT * FROM transcript_segments WHERE id IN (:ids) ORDER BY sequenceNumber ASC, startTime ASC, id ASC") suspend fun segmentsByIds(ids: List<Long>): List<TranscriptEntity>
+    @Query("SELECT t.* FROM transcript_segments t INNER JOIN ai_result_segments l ON l.segmentId = t.id WHERE l.resultId = :resultId ORDER BY t.sequenceNumber ASC, t.startTime ASC, t.id ASC")
     suspend fun segmentsForResult(resultId: Long): List<TranscriptEntity>
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insert(segment: TranscriptEntity): Long
+    @Query("SELECT id FROM transcript_segments WHERE sourceSegmentId = :sourceSegmentId LIMIT 1")
+    suspend fun idForSourceSegment(sourceSegmentId: String): Long?
     @Query("UPDATE transcript_segments SET correctedText = :correctedText, correctionResultId = :resultId, correctedAt = :correctedAt WHERE recordId = :recordId AND id = :segmentId")
     suspend fun applyCorrection(recordId: Long, segmentId: Long, resultId: Long, correctedText: String, correctedAt: Long): Int
     @Query("UPDATE transcript_segments SET correctedText = NULL, correctionResultId = NULL, correctedAt = NULL WHERE id = :segmentId")
@@ -114,7 +117,7 @@ data class TranscriptEntity(
         AsrSegmentDiagnosticEntity::class,
         AsrNetworkEventEntity::class
     ],
-    version = 8,
+    version = 9,
     exportSchema = false
 )
 abstract class ListenDatabase : RoomDatabase() {
@@ -239,10 +242,21 @@ abstract class ListenDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE transcript_segments ADD COLUMN sequenceNumber INTEGER")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_transcript_segments_sequenceNumber ON transcript_segments(sequenceNumber)")
+                db.execSQL("ALTER TABLE asr_segment_diagnostics ADD COLUMN sequenceNumber INTEGER")
+                db.execSQL("ALTER TABLE asr_segment_diagnostics ADD COLUMN clockBasis TEXT NOT NULL DEFAULT 'LEGACY_WALL_FALLBACK'")
+                db.execSQL("ALTER TABLE asr_segment_diagnostics ADD COLUMN bootCount INTEGER")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_asr_segment_diagnostics_recordId_sequenceNumber ON asr_segment_diagnostics(recordId, sequenceNumber)")
+            }
+        }
+
         @Volatile private var instance: ListenDatabase? = null
         fun get(context: Context): ListenDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, ListenDatabase::class.java, "listen.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
                 .build()
                 .also { instance = it }
         }

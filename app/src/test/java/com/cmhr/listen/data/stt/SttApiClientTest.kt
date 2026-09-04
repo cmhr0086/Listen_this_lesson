@@ -122,8 +122,14 @@ class SttApiClientTest {
         }
     }
 
-    private fun client(server: MockWebServer) = SttApiClient(
-        credentialsProvider = { SttCredentials(server.url("/").toString().trimEnd('/'), "test-key") },
-        httpClient = OkHttpClient()
-    )
+    private fun client(server: MockWebServer): SttApiClient {
+        var elapsed = 10_000L
+        var wall = 1_780_000_000_000L
+        return SttApiClient(
+            credentialsProvider = { SttCredentials(server.url("/").toString().trimEnd('/'), "test-key") },
+            httpClient = OkHttpClient(),
+            elapsedRealtime = { ++elapsed },
+            wallTime = { ++wall }
+        )
+    }
 }

@@ -23,6 +23,7 @@ import com.cmhr.listen.data.stt.AsrPromptAutoConfig
 import com.cmhr.listen.data.stt.AsrPromptMode
 import com.cmhr.listen.data.stt.AsrPromptPolicy
 import com.cmhr.listen.data.stt.AsrQueueRuntime
+import com.cmhr.listen.data.stt.AsrRuntimeSummary
 import com.cmhr.listen.data.stt.AsrSegmentDiagnosticEntity
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -404,11 +405,14 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
     fun observeAsrStateCounts(recordId: Long, since: Long): Flow<AsrDiagnosticStateCounts> =
         asrRuntime.observeStateCountsForRecordSince(recordId, since)
 
+    fun observeAsrRuntimeSummary(recordId: Long): Flow<AsrRuntimeSummary> =
+        asrRuntime.observeRuntimeSummary(recordId)
+
     private fun enqueue(segmentId: String, captured: CapturedPcmSegment) {
         val audioStart = timestampForSample(captured.pcmSlice.startSample)
         val audioEnd = timestampForSample(captured.pcmSlice.endSample)
         val recordId = sessionRecordId ?: return
-        val audioDurationMs = (audioEnd - audioStart).coerceAtLeast(0)
+        val audioDurationMs = (audioEnd - audioStart).takeIf { it >= 0L } ?: return
 
         val promptDecision = AsrPromptPolicy.decide(
             globalMode = currentGlobalPromptMode,

@@ -12,6 +12,14 @@ import androidx.room.Update
 import com.cmhr.listen.data.course.ClassRecordEntity
 import kotlinx.coroutines.flow.Flow
 
+const val MAX_IN_FLIGHT_JOBS = 3
+const val MAX_CONCURRENT_HTTP_CALLS = 3
+
+enum class AsrClockBasis {
+    ELAPSED_REALTIME,
+    LEGACY_WALL_FALLBACK
+}
+
 enum class AsrLifecycleState {
     CAPTURING,
     QUEUED_LOCAL,
@@ -63,12 +71,16 @@ enum class AsrNetworkEventType {
     indices = [
         Index("recordId"),
         Index("state"),
+        Index(value = ["recordId", "sequenceNumber"], unique = true),
         Index(value = ["jobId"], unique = true)
     ]
 )
 data class AsrSegmentDiagnosticEntity(
     @PrimaryKey val segmentId: String,
     val recordId: Long,
+    val sequenceNumber: Long? = null,
+    val clockBasis: String = AsrClockBasis.ELAPSED_REALTIME.name,
+    val bootCount: Int? = null,
     val jobId: String? = null,
     val state: String = AsrLifecycleState.QUEUED_LOCAL.name,
     val audioStartTime: Long,
@@ -111,37 +123,43 @@ data class AsrSegmentDiagnosticEntity(
     val lifecycleState: AsrLifecycleState
         get() = runCatching { AsrLifecycleState.valueOf(state) }.getOrDefault(AsrLifecycleState.FAILED)
 
+    val diagnosticClockBasis: AsrClockBasis
+        get() = runCatching { AsrClockBasis.valueOf(clockBasis) }
+            .getOrDefault(AsrClockBasis.LEGACY_WALL_FALLBACK)
+
     val clientQueueDurationMs: Long?
-        get() = monotonicDuration(queuedLocalElapsedMs, submitStartedElapsedMs)
-            ?: submitStartedAt?.let { (it - queuedLocalAt).coerceAtLeast(0) }
+        get() = diagnosticDuration(queuedLocalElapsedMs, submitStartedElapsedMs, queuedLocalAt, submitStartedAt)
 
     val serverWaitDurationMs: Long?
-        get() = monotonicDuration(submitCompletedElapsedMs, firstServerCompletedElapsedMs)
-            ?: firstServerCompletedAt?.let { completed ->
-            submitCompletedAt?.let { submitted -> (completed - submitted).coerceAtLeast(0) }
-        }
+        get() = diagnosticDuration(submitCompletedElapsedMs, firstServerCompletedElapsedMs, submitCompletedAt, firstServerCompletedAt)
 
     val estimatedServerQueueDurationMs: Long?
-        get() = monotonicDuration(
+        get() = diagnosticDuration(
             firstServerQueuedElapsedMs ?: submitCompletedElapsedMs,
-            firstServerProcessingElapsedMs
-        ) ?: firstServerProcessingAt?.let { processing ->
-            (processing - (firstServerQueuedAt ?: submitCompletedAt ?: processing)).coerceAtLeast(0)
-        }
+            firstServerProcessingElapsedMs,
+            firstServerQueuedAt ?: submitCompletedAt,
+            firstServerProcessingAt
+        )
 
     val estimatedProcessingDurationMs: Long?
-        get() = monotonicDuration(firstServerProcessingElapsedMs, firstServerCompletedElapsedMs)
-            ?: firstServerCompletedAt?.let { completed ->
-            firstServerProcessingAt?.let { processing -> (completed - processing).coerceAtLeast(0) }
-        }
+        get() = diagnosticDuration(firstServerProcessingElapsedMs, firstServerCompletedElapsedMs, firstServerProcessingAt, firstServerCompletedAt)
 
     val totalEndToEndDurationMs: Long?
-        get() = monotonicDuration(captureStartedElapsedMs, finishedElapsedMs)
-            ?: finishedAt?.let { (it - captureStartedAt).coerceAtLeast(0) }
+        get() = diagnosticDuration(captureStartedElapsedMs, finishedElapsedMs, captureStartedAt, finishedAt)
+
+    private fun diagnosticDuration(
+        elapsedStart: Long?,
+        elapsedEnd: Long?,
+        wallStart: Long?,
+        wallEnd: Long?
+    ): Long? = when (diagnosticClockBasis) {
+        AsrClockBasis.ELAPSED_REALTIME -> validDuration(elapsedStart, elapsedEnd)
+        AsrClockBasis.LEGACY_WALL_FALLBACK -> validDuration(wallStart, wallEnd)
+    }
 }
 
-private fun monotonicDuration(start: Long?, end: Long?): Long? =
-    if (start != null && end != null && end >= start) end - start else null
+internal fun validDuration(start: Long?, end: Long?): Long? =
+    if (start != null && end != null && start > 0L && end >= start) end - start else null
 
 @Entity(
     tableName = "asr_network_events",
@@ -176,8 +194,20 @@ data class AsrDiagnosticStateCounts(
 
 data class AsrRuntimeSummary(
     val activeCount: Int,
-    val recognizingCount: Int
-)
+    val recognizingCount: Int,
+    val queuedLocalCount: Int = 0,
+    val submittingCount: Int = 0,
+    val serverInFlightCount: Int = 0,
+    val pollingCount: Int = 0,
+    val submissionUnknownCount: Int = 0,
+    val completedCount: Int = 0,
+    val failedCount: Int = 0,
+    val globalInFlightCount: Int = 0,
+    val inFlightCapacity: Int = MAX_IN_FLIGHT_JOBS
+) {
+    val inFlightCount: Int get() = submittingCount + serverInFlightCount
+    val isBackpressured: Boolean get() = queuedLocalCount > 0 && globalInFlightCount >= inFlightCapacity
+}
 
 @Dao
 interface AsrDiagnosticsDao {
@@ -185,7 +215,7 @@ interface AsrDiagnosticsDao {
     suspend fun insertSegment(value: AsrSegmentDiagnosticEntity)
 
     @Update
-    suspend fun updateSegment(value: AsrSegmentDiagnosticEntity)
+    suspend fun updateSegment(value: AsrSegmentDiagnosticEntity): Int
 
     @Query("SELECT * FROM asr_segment_diagnostics WHERE segmentId = :segmentId")
     suspend fun segment(segmentId: String): AsrSegmentDiagnosticEntity?
@@ -193,10 +223,10 @@ interface AsrDiagnosticsDao {
     @Query("SELECT * FROM asr_segment_diagnostics ORDER BY captureStartedAt DESC")
     fun observeAll(): Flow<List<AsrSegmentDiagnosticEntity>>
 
-    @Query("SELECT * FROM asr_segment_diagnostics WHERE recordId = :recordId ORDER BY captureStartedAt DESC")
+    @Query("SELECT * FROM asr_segment_diagnostics WHERE recordId = :recordId ORDER BY sequenceNumber DESC, captureStartedAt DESC")
     fun observeForRecord(recordId: Long): Flow<List<AsrSegmentDiagnosticEntity>>
 
-    @Query("SELECT * FROM asr_segment_diagnostics WHERE recordId = :recordId ORDER BY captureStartedAt DESC LIMIT :limit")
+    @Query("SELECT * FROM asr_segment_diagnostics WHERE recordId = :recordId ORDER BY sequenceNumber DESC, captureStartedAt DESC LIMIT :limit")
     fun observeRecentForRecord(
         recordId: Long,
         limit: Int = 15
@@ -205,7 +235,7 @@ interface AsrDiagnosticsDao {
     @Query("SELECT COUNT(*) FROM asr_segment_diagnostics WHERE recordId = :recordId")
     fun observeCountForRecord(recordId: Long): Flow<Int>
 
-    @Query("SELECT * FROM asr_segment_diagnostics WHERE recordId = :recordId AND state IN (:states) ORDER BY audioStartTime ASC")
+    @Query("SELECT * FROM asr_segment_diagnostics WHERE recordId = :recordId AND state IN (:states) ORDER BY sequenceNumber ASC, audioStartTime ASC")
     fun observeActiveForRecord(
         recordId: Long,
         states: List<String> = ACTIVE_ASR_STATES
@@ -232,7 +262,40 @@ interface AsrDiagnosticsDao {
         """
         SELECT
             COUNT(CASE WHEN state IN (:activeStates) THEN 1 END) AS activeCount,
-            COUNT(CASE WHEN state IN (:recognizingStates) THEN 1 END) AS recognizingCount
+            COUNT(CASE WHEN state IN (:recognizingStates) THEN 1 END) AS recognizingCount,
+            COUNT(CASE WHEN jobId IS NULL AND state IN ('QUEUED_LOCAL', 'RETRY_WAIT') THEN 1 END) AS queuedLocalCount,
+            COUNT(CASE WHEN state = 'SUBMITTING' THEN 1 END) AS submittingCount,
+            COUNT(CASE WHEN jobId IS NOT NULL AND state IN ('QUEUED_SERVER', 'PROCESSING', 'RETRY_WAIT') THEN 1 END) AS serverInFlightCount,
+            0 AS pollingCount,
+            COUNT(CASE WHEN state = 'SUBMISSION_UNKNOWN' THEN 1 END) AS submissionUnknownCount,
+            COUNT(CASE WHEN state = 'COMPLETED' THEN 1 END) AS completedCount,
+            COUNT(CASE WHEN state = 'FAILED' THEN 1 END) AS failedCount,
+            0 AS globalInFlightCount,
+            $MAX_IN_FLIGHT_JOBS AS inFlightCapacity
+        FROM asr_segment_diagnostics
+        WHERE recordId = :recordId
+        """
+    )
+    fun observeRuntimeSummaryForRecord(
+        recordId: Long,
+        activeStates: List<String> = ACTIVE_ASR_STATES,
+        recognizingStates: List<String> = RECOGNIZING_ASR_STATES
+    ): Flow<AsrRuntimeSummary>
+
+    @Query(
+        """
+        SELECT
+            COUNT(CASE WHEN state IN (:activeStates) THEN 1 END) AS activeCount,
+            COUNT(CASE WHEN state IN (:recognizingStates) THEN 1 END) AS recognizingCount,
+            COUNT(CASE WHEN jobId IS NULL AND state IN ('QUEUED_LOCAL', 'RETRY_WAIT') THEN 1 END) AS queuedLocalCount,
+            COUNT(CASE WHEN state = 'SUBMITTING' THEN 1 END) AS submittingCount,
+            COUNT(CASE WHEN jobId IS NOT NULL AND state IN ('QUEUED_SERVER', 'PROCESSING', 'RETRY_WAIT') THEN 1 END) AS serverInFlightCount,
+            0 AS pollingCount,
+            COUNT(CASE WHEN state = 'SUBMISSION_UNKNOWN' THEN 1 END) AS submissionUnknownCount,
+            COUNT(CASE WHEN state = 'COMPLETED' THEN 1 END) AS completedCount,
+            COUNT(CASE WHEN state = 'FAILED' THEN 1 END) AS failedCount,
+            COUNT(CASE WHEN state = 'SUBMITTING' OR (jobId IS NOT NULL AND state IN ('QUEUED_SERVER', 'PROCESSING', 'RETRY_WAIT')) THEN 1 END) AS globalInFlightCount,
+            $MAX_IN_FLIGHT_JOBS AS inFlightCapacity
         FROM asr_segment_diagnostics
         """
     )
@@ -241,8 +304,77 @@ interface AsrDiagnosticsDao {
         recognizingStates: List<String> = RECOGNIZING_ASR_STATES
     ): Flow<AsrRuntimeSummary>
 
-    @Query("SELECT * FROM asr_segment_diagnostics WHERE state IN (:states) ORDER BY audioStartTime ASC LIMIT 1")
-    suspend fun oldestRunnable(states: List<String>): AsrSegmentDiagnosticEntity?
+    @Query(
+        """
+        SELECT * FROM asr_segment_diagnostics
+        WHERE jobId IS NULL
+          AND state IN ('QUEUED_LOCAL', 'RETRY_WAIT')
+          AND (nextAttemptAt IS NULL OR nextAttemptAt <= :now)
+        ORDER BY queuedLocalAt ASC
+        LIMIT 1
+        """
+    )
+    suspend fun nextDueSubmission(now: Long): AsrSegmentDiagnosticEntity?
+
+    @Query(
+        """
+        UPDATE asr_segment_diagnostics
+        SET state = 'SUBMITTING',
+            submitAttempts = submitAttempts + 1,
+            nextAttemptAt = NULL,
+            submitStartedAt = COALESCE(submitStartedAt, :now),
+            submitStartedElapsedMs = COALESCE(submitStartedElapsedMs, :nowElapsed),
+            failureStage = NULL,
+            exceptionClass = NULL,
+            safeErrorMessage = NULL
+        WHERE segmentId = :segmentId
+          AND jobId IS NULL
+          AND state IN ('QUEUED_LOCAL', 'RETRY_WAIT')
+          AND (nextAttemptAt IS NULL OR nextAttemptAt <= :now)
+        """
+    )
+    suspend fun claimSubmission(segmentId: String, now: Long, nowElapsed: Long): Int
+
+    @Query(
+        """
+        SELECT * FROM asr_segment_diagnostics
+        WHERE jobId IS NOT NULL
+          AND state IN ('QUEUED_SERVER', 'PROCESSING', 'RETRY_WAIT')
+          AND (nextAttemptAt IS NULL OR nextAttemptAt <= :now)
+        ORDER BY COALESCE(nextAttemptAt, 0) ASC, submitCompletedAt ASC
+        LIMIT :limit
+        """
+    )
+    suspend fun duePolls(now: Long, limit: Int): List<AsrSegmentDiagnosticEntity>
+
+    @Query(
+        """
+        SELECT COUNT(*) FROM asr_segment_diagnostics
+        WHERE state = 'SUBMITTING'
+           OR (jobId IS NOT NULL AND state IN ('QUEUED_SERVER', 'PROCESSING', 'RETRY_WAIT'))
+        """
+    )
+    suspend fun inFlightCount(): Int
+
+    @Query(
+        """
+        SELECT COUNT(*) FROM asr_segment_diagnostics
+        WHERE state IN ('QUEUED_LOCAL', 'SUBMITTING', 'QUEUED_SERVER', 'PROCESSING', 'RETRY_WAIT')
+        """
+    )
+    suspend fun automaticWorkCount(): Int
+
+    @Query(
+        """
+        SELECT MIN(nextAttemptAt) FROM asr_segment_diagnostics
+        WHERE state IN ('QUEUED_LOCAL', 'QUEUED_SERVER', 'PROCESSING', 'RETRY_WAIT')
+          AND nextAttemptAt IS NOT NULL
+        """
+    )
+    suspend fun nextAutomaticAttemptAt(): Long?
+
+    @Query("SELECT COALESCE(MAX(sequenceNumber), 0) + 1 FROM asr_segment_diagnostics WHERE recordId = :recordId")
+    suspend fun nextSequenceNumber(recordId: Long): Long
 
     @Query("SELECT MIN(nextAttemptAt) FROM asr_segment_diagnostics WHERE state IN (:states) AND nextAttemptAt IS NOT NULL")
     suspend fun nextAttemptAt(states: List<String>): Long?
@@ -261,11 +393,38 @@ interface AsrDiagnosticsDao {
         message: String = "提交过程被中断，无法确认服务端是否已接收。"
     )
 
-    @Query("UPDATE asr_segment_diagnostics SET state = :readyState, jobId = NULL, failureStage = NULL, exceptionClass = NULL, safeErrorMessage = NULL, nextAttemptAt = NULL WHERE segmentId = :segmentId AND state = :unknownState")
+    @Query("SELECT * FROM asr_segment_diagnostics WHERE state = 'SUBMITTING'")
+    suspend fun submittingSegments(): List<AsrSegmentDiagnosticEntity>
+
+    @Query("UPDATE asr_segment_diagnostics SET clockBasis = :legacyClockBasis WHERE state IN (:activeStates) AND clockBasis = 'ELAPSED_REALTIME' AND (bootCount IS NULL OR bootCount != :currentBootCount)")
+    suspend fun markTasksFromOtherBootAsLegacyClock(
+        currentBootCount: Int,
+        legacyClockBasis: String = "LEGACY_WALL_FALLBACK",
+        activeStates: List<String> = ACTIVE_ASR_STATES
+    )
+
+    @Query("UPDATE asr_segment_diagnostics SET clockBasis = :legacyClockBasis WHERE state IN (:activeStates) AND clockBasis = 'ELAPSED_REALTIME'")
+    suspend fun markAllRecoveredActiveTasksAsLegacyClock(
+        legacyClockBasis: String = "LEGACY_WALL_FALLBACK",
+        activeStates: List<String> = ACTIVE_ASR_STATES
+    )
+
+    @Query(
+        """
+        UPDATE asr_segment_diagnostics
+        SET state = CASE WHEN jobId IS NULL THEN :readyState ELSE :serverReadyState END,
+            failureStage = NULL,
+            exceptionClass = NULL,
+            safeErrorMessage = NULL,
+            nextAttemptAt = NULL
+        WHERE segmentId = :segmentId AND state = :unknownState
+        """
+    )
     suspend fun confirmRetryUnknown(
         segmentId: String,
         unknownState: String = "SUBMISSION_UNKNOWN",
-        readyState: String = "QUEUED_LOCAL"
+        readyState: String = "QUEUED_LOCAL",
+        serverReadyState: String = "QUEUED_SERVER"
     ): Int
 
     @Query("SELECT * FROM asr_network_events WHERE segmentId = :segmentId ORDER BY id ASC")

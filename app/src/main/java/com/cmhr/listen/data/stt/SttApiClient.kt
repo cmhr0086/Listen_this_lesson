@@ -1,5 +1,6 @@
 package com.cmhr.listen.data.stt
 
+import android.os.SystemClock
 import android.util.Log
 import java.io.IOException
 import java.io.InterruptedIOException
@@ -43,25 +44,36 @@ data class SttCallTraceTag(
     val segmentId: String?,
     val requestKind: AsrRequestKind,
     val attempt: Int,
-    val trace: SttCallTrace = SttCallTrace()
+    val trace: SttCallTrace
 )
 
-class SttCallTrace {
+class SttCallTrace(
+    private val elapsedRealtime: () -> Long = SystemClock::elapsedRealtime,
+    private val wallTime: () -> Long = System::currentTimeMillis,
+    private val onEvent: (AsrNetworkEventType) -> Unit = {}
+) {
     private val values = mutableListOf<SttNetworkEvent>()
     private var callStartElapsedMs: Long? = null
 
     @Synchronized
     fun add(type: AsrNetworkEventType, exceptionClass: String? = null) {
-        val elapsed = System.nanoTime() / 1_000_000L
+        // Every persisted monotonic timestamp must use the same Android clock as
+        // capture/queue timestamps. System.nanoTime() excludes deep sleep on
+        // Android and cannot safely be subtracted from elapsedRealtime().
+        val elapsed = elapsedRealtime()
         if (type == AsrNetworkEventType.CALL_START) callStartElapsedMs = elapsed
+        val sinceCallStart = callStartElapsedMs?.let { start ->
+            if (start > 0L && elapsed >= start) elapsed - start else null
+        }
         values += SttNetworkEvent(
             eventType = type,
-            timestampMs = System.currentTimeMillis(),
+            timestampMs = wallTime(),
             monotonicTimestampMs = elapsed,
-            elapsedSinceCallStartMs = callStartElapsedMs?.let { (elapsed - it).coerceAtLeast(0) },
+            elapsedSinceCallStartMs = sinceCallStart,
             exceptionClass = exceptionClass,
             appInForeground = AppVisibilityTracker.isForeground
         )
+        onEvent(type)
     }
 
     @Synchronized fun snapshot(): List<SttNetworkEvent> = values.toList()
@@ -78,14 +90,16 @@ sealed interface SttCallOutcome<out T> {
 
 class SttApiClient(
     private val credentialsProvider: suspend () -> SttCredentials,
-    httpClient: OkHttpClient = defaultHttpClient
+    httpClient: OkHttpClient = defaultHttpClient,
+    private val elapsedRealtime: () -> Long = SystemClock::elapsedRealtime,
+    private val wallTime: () -> Long = System::currentTimeMillis
 ) {
     private val httpClient = httpClient.newBuilder().eventListenerFactory(SttEventListenerFactory).build()
 
     suspend fun health(segmentId: String? = null): SttCallOutcome<SttHealthResponse> {
         val credentials = credentialsProvider()
         if (credentials.baseUrl.isBlank()) return configurationError("请先在设置中填写服务器地址。")
-        val tag = SttCallTraceTag(segmentId, AsrRequestKind.HEALTH, 1)
+        val tag = traceTag(segmentId, AsrRequestKind.HEALTH, 1)
         val request = runCatching {
             Request.Builder()
                 .url("${credentials.baseUrl.trimEnd('/')}/health")
@@ -101,7 +115,8 @@ class SttApiClient(
         attempt: Int,
         wavAudio: ByteArray,
         language: String = LANGUAGE,
-        context: String? = null
+        context: String? = null,
+        onNetworkEvent: (AsrNetworkEventType) -> Unit = {}
     ): SttCallOutcome<SttSubmitResponse> {
         val credentials = credentialsProvider()
         validateCredentials(credentials)?.let { return it }
@@ -110,7 +125,7 @@ class SttApiClient(
             .addFormDataPart("audio", "recording.wav", wavAudio.toRequestBody("audio/wav".toMediaType()))
             .addFormDataPart("language", language)
         context?.trim()?.takeIf(String::isNotEmpty)?.let { multipart.addFormDataPart("context", it) }
-        val tag = SttCallTraceTag(segmentId, AsrRequestKind.SUBMIT, attempt)
+        val tag = traceTag(segmentId, AsrRequestKind.SUBMIT, attempt, onNetworkEvent)
         val request = runCatching {
             Request.Builder()
                 .url("${credentials.baseUrl.trimEnd('/')}/transcribe")
@@ -125,7 +140,7 @@ class SttApiClient(
     suspend fun poll(segmentId: String, attempt: Int, jobId: String): SttCallOutcome<SttJobResponse> {
         val credentials = credentialsProvider()
         validateCredentials(credentials)?.let { return it }
-        val tag = SttCallTraceTag(segmentId, AsrRequestKind.POLL, attempt)
+        val tag = traceTag(segmentId, AsrRequestKind.POLL, attempt)
         val request = runCatching {
             Request.Builder()
                 .url("${credentials.baseUrl.trimEnd('/')}/jobs/$jobId")
@@ -144,6 +159,19 @@ class SttApiClient(
     }
 
     private fun configurationError(message: String) = SttCallOutcome.ParseError("IllegalStateException", message, emptyList())
+
+    private fun traceTag(
+        segmentId: String?,
+        kind: AsrRequestKind,
+        attempt: Int,
+        onNetworkEvent: (AsrNetworkEventType) -> Unit = {}
+    ) =
+        SttCallTraceTag(
+            segmentId = segmentId,
+            requestKind = kind,
+            attempt = attempt,
+            trace = SttCallTrace(elapsedRealtime, wallTime, onNetworkEvent)
+        )
 
     private suspend fun <T> executeJson(request: Request, tag: SttCallTraceTag, serializer: KSerializer<T>): SttCallOutcome<T> =
         withContext(Dispatchers.IO) {
@@ -219,7 +247,7 @@ private fun Response.retryAfterMs(nowMs: Long = System.currentTimeMillis()): Lon
 fun List<SttNetworkEvent>.durationBetween(start: AsrNetworkEventType, end: AsrNetworkEventType): Long? {
     val startMs = firstOrNull { it.eventType == start }?.elapsedSinceCallStartMs ?: return null
     val endMs = lastOrNull { it.eventType == end }?.elapsedSinceCallStartMs ?: return null
-    return (endMs - startMs).coerceAtLeast(0)
+    return if (startMs >= 0L && endMs >= startMs) endMs - startMs else null
 }
 
 @Serializable

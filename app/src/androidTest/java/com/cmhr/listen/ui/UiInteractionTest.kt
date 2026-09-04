@@ -20,12 +20,15 @@ import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.longClick
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToIndex
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.unit.dp
 import com.cmhr.listen.data.course.TranscriptEntity
@@ -33,7 +36,9 @@ import com.cmhr.listen.SettingsUiState
 import com.cmhr.listen.ListeningUiState
 import com.cmhr.listen.VadDiagnosticsUiState
 import com.cmhr.listen.data.stt.AsrDiagnosticStateCounts
+import com.cmhr.listen.data.stt.AsrClockBasis
 import com.cmhr.listen.data.stt.AsrLifecycleState
+import com.cmhr.listen.data.stt.AsrRuntimeSummary
 import com.cmhr.listen.data.stt.AsrSegmentDiagnosticEntity
 import com.cmhr.listen.ui.theme.ListenTheme
 import kotlinx.coroutines.flow.flowOf
@@ -138,7 +143,19 @@ class UiInteractionTest {
                     confirmRetryUnknown = {},
                     openHistory = {},
                     activeDiagnostics = listOf(diagnostic),
-                    recentCounts = AsrDiagnosticStateCounts(0, 0, 0)
+                    recentCounts = AsrDiagnosticStateCounts(0, 0, 0),
+                    runtimeSummary = AsrRuntimeSummary(
+                        activeCount = 4,
+                        recognizingCount = 3,
+                        queuedLocalCount = 1,
+                        submittingCount = 1,
+                        serverInFlightCount = 2,
+                        pollingCount = 1,
+                        submissionUnknownCount = 0,
+                        completedCount = 8,
+                        failedCount = 1,
+                        globalInFlightCount = 3
+                    )
                 )
             }
         }
@@ -146,11 +163,58 @@ class UiInteractionTest {
         composeRule.waitForIdle()
         composeRule.runOnIdle { assertEquals(0, healthRefreshes) }
         composeRule.onNodeWithText("客户端队列：1 / 持久化").assertExists()
-        composeRule.onNodeWithText("#12345678 · 客户端排队").assertExists()
+        composeRule.onNodeWithText("待提交：1").assertExists()
+        composeRule.onNodeWithText("提交中：1").assertExists()
+        composeRule.onNodeWithText("服务端在途：2").assertExists()
+        composeRule.onNodeWithText("全局并发槽：3 / 3").assertExists()
+        composeRule.onNodeWithText("正在轮询：1").assertExists()
         composeRule.onNodeWithTag("asr-capture-vad").assertExists()
         composeRule.onNodeWithText("全部记录").assertDoesNotExist()
+        composeRule.onNodeWithTag("asr-diagnostics-list")
+            .performScrollToNode(hasTestTag("asr-health-refresh"))
         composeRule.onNodeWithTag("asr-health-refresh").performClick()
         composeRule.runOnIdle { assertEquals(1, healthRefreshes) }
+        composeRule.onNodeWithTag("asr-diagnostics-list")
+            .performScrollToNode(hasText("#12345678 · 客户端排队"))
+        composeRule.onNodeWithText("#12345678 · 客户端排队").assertExists()
+    }
+
+    @Test
+    fun processingWithoutValidServerAnchorShowsEstimatingInsteadOfDeviceUptime() {
+        val now = System.currentTimeMillis()
+        val diagnostic = diagnostic(
+            id = "processing-anchor-test",
+            recordId = 7,
+            capturedAt = now - 2_000,
+            state = AsrLifecycleState.PROCESSING
+        ).copy(
+            jobId = "job-test",
+            clockBasis = AsrClockBasis.ELAPSED_REALTIME.name,
+            submitCompletedElapsedMs = null,
+            submitCompletedAt = now - 1_000
+        )
+        composeRule.setContent {
+            ListenTheme {
+                AsrDiagnosticsScreen(
+                    state = ListeningUiState(),
+                    vadState = VadDiagnosticsUiState(),
+                    currentRecordId = 7,
+                    currentRecordName = "计时测试",
+                    diagnostics = listOf(diagnostic),
+                    totalCount = 1,
+                    events = { flowOf(emptyList()) },
+                    refreshHealth = {},
+                    confirmRetryUnknown = {},
+                    openHistory = {},
+                    activeDiagnostics = listOf(diagnostic),
+                    recentCounts = AsrDiagnosticStateCounts(0, 0, 0)
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("asr-diagnostics-list").performScrollToIndex(3)
+        composeRule.onNodeWithText("服务端等待：—（估算中）").assertExists()
+        composeRule.onNodeWithText("81188.9s", substring = true).assertDoesNotExist()
     }
 
     @Test

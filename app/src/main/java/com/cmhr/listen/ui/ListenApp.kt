@@ -80,6 +80,7 @@ import com.cmhr.listen.SettingsViewModel
 import com.cmhr.listen.SttViewModel
 import com.cmhr.listen.data.ai.AiActionType
 import com.cmhr.listen.data.stt.AsrDiagnosticStateCounts
+import com.cmhr.listen.data.stt.AsrRuntimeSummary
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.delay
@@ -121,7 +122,6 @@ private sealed interface FabState {
     data object NewCourse : FabState
     data class NewRecord(val courseId: Long) : FabState
     data class StartListening(val recordId: Long) : FabState
-    data object NewConversation : FabState
     data class StopListening(val startedAtElapsedRealtimeMs: Long) : FabState
 }
 
@@ -131,7 +131,7 @@ private fun isAiWorkspaceRoute(route: String?): Boolean =
 
 private fun mainDestinationForRoute(route: String?): MainDestination = when {
     isSettingsRoute(route) -> MainDestination.SETTINGS
-    route == "ai" || route == "ai/new" || route?.startsWith("ai-conversation/") == true || route?.startsWith("ai/result/") == true -> MainDestination.AI
+    route == "ai" || route?.startsWith("ai/new") == true || route?.startsWith("ai-conversation/") == true || route?.startsWith("ai/result/") == true -> MainDestination.AI
     else -> MainDestination.COURSES
 }
 
@@ -139,6 +139,7 @@ private fun routeTitle(route: String?): String = when (route) {
     "courses" -> "课程"
     "ai" -> "AI 会话"
     "ai/new" -> "新对话"
+    "ai/new/{recordId}" -> "课堂新对话"
     "ai/result/{recordId}/{resultId}" -> "AI 结果详情"
     "course/{courseId}" -> "课堂记录"
     "record/{recordId}" -> "记录详情"
@@ -158,6 +159,9 @@ private fun routeTitle(route: String?): String = when (route) {
     "ai-conversation/{conversationId}" -> "课堂问答"
     else -> "课堂提问识别助手"
 }
+
+internal fun newAiConversationRoute(activeRecordId: Long?, isListening: Boolean): String =
+    activeRecordId?.takeIf { isListening }?.let { "ai/new/$it" } ?: "ai/new"
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -191,6 +195,7 @@ fun ListenApp(
     var confirmDeleteTranscripts by remember { mutableStateOf(false) }
     var aiContextMenuExpanded by remember { mutableStateOf(false) }
     var showAiContext by remember { mutableStateOf(false) }
+    var aiComposerClearance by remember { mutableStateOf(0.dp) }
 
     val courseId = backStackEntry?.arguments?.getString("courseId")?.toLongOrNull()
     val recordId = backStackEntry?.arguments?.getString("recordId")?.toLongOrNull()
@@ -213,6 +218,12 @@ fun ListenApp(
     val currentRecord = courseState.selectedRecord?.takeIf { it.id == recordId }
     val currentCourse = currentRecord?.let { record -> courseState.courses.firstOrNull { it.id == record.courseId } }
     val currentSegments = courseState.detailSegments.filter { it.recordId == recordId }
+    val openNewConversation = {
+        nav.navigate(newAiConversationRoute(sttState.activeRecordId, sttState.isListening))
+    }
+    LaunchedEffect(route) {
+        if (!isAiWorkspaceRoute(route)) aiComposerClearance = 0.dp
+    }
 
     BackHandler(enabled = selectionMode || contentSelectionMode) {
         if (selectionMode) {
@@ -325,7 +336,6 @@ fun ListenApp(
         sttState.isListening && sttState.listeningStartedAtElapsedRealtimeMs != null ->
             FabState.StopListening(requireNotNull(sttState.listeningStartedAtElapsedRealtimeMs))
         route == "courses" -> FabState.NewCourse
-        route == "ai" && !contentSelectionMode -> FabState.NewConversation
         route == "course/{courseId}" && courseId != null -> FabState.NewRecord(courseId)
         route == "record/{recordId}" && recordId != null && !selectionMode -> FabState.StartListening(recordId)
         else -> FabState.None
@@ -426,6 +436,14 @@ fun ListenApp(
                         }
                     }
                 )
+                route == "ai" -> TopAppBar(
+                    title = { Text(routeTitle(route)) },
+                    actions = {
+                        IconButton(onClick = openNewConversation) {
+                            Icon(Icons.Outlined.Add, contentDescription = "新建对话")
+                        }
+                    }
+                )
                 else -> TopAppBar(
                     title = { Text(routeTitle(route)) },
                     navigationIcon = {
@@ -477,12 +495,18 @@ fun ListenApp(
             }
         },
         floatingActionButton = {
-            Box(Modifier.padding(bottom = if (route == "ai/new" || route?.startsWith("ai-conversation/") == true || route?.contains("ai-result/") == true || route?.startsWith("ai/result/") == true) 112.dp else 0.dp)) {
+            val isComposerRoute = route?.startsWith("ai/new") == true ||
+                route?.startsWith("ai-conversation/") == true ||
+                route?.contains("ai-result/") == true ||
+                route?.startsWith("ai/result/") == true
+            val composerFabClearance = if (isComposerRoute) {
+                aiComposerClearance.takeIf { it > 0.dp } ?: 112.dp
+            } else 0.dp
+            Box(Modifier.padding(bottom = composerFabClearance)) {
                 AnimatedAppFab(state = fabState) { action ->
                     when (action) {
                         FabState.NewCourse -> { newName = ""; creatingCourse = true }
                         is FabState.NewRecord -> { newName = ""; creatingRecordForCourse = action.courseId }
-                        FabState.NewConversation -> nav.navigate("ai/new")
                         is FabState.StopListening -> stt.stopListening()
                         is FabState.StartListening -> {
                             val microphoneGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
@@ -539,9 +563,21 @@ fun ListenApp(
                 }
             }
             composable("ai/new") {
-                NewAiConversationScreen(ai) { conversation ->
+                NewAiConversationScreen(ai, onComposerClearanceChanged = { aiComposerClearance = it }) { conversation ->
                     nav.navigate("ai-conversation/$conversation") {
                         popUpTo("ai/new") { inclusive = true }
+                    }
+                }
+            }
+            composable("ai/new/{recordId}") { entry ->
+                val id = entry.arguments?.getString("recordId")?.toLongOrNull() ?: return@composable
+                NewAiConversationScreen(
+                    ai,
+                    recordId = id,
+                    onComposerClearanceChanged = { aiComposerClearance = it }
+                ) { conversation ->
+                    nav.navigate("ai-conversation/$conversation") {
+                        popUpTo("ai/new/{recordId}") { inclusive = true }
                     }
                 }
             }
@@ -613,6 +649,11 @@ fun ListenApp(
                         diagnosticRecordId?.let { stt.observeAsrStateCounts(it, recentCountsSince) }
                             ?: flowOf(AsrDiagnosticStateCounts(0, 0, 0))
                     }.collectAsStateWithLifecycle(initialValue = AsrDiagnosticStateCounts(0, 0, 0))
+                    val runtimeSummary by remember(diagnosticRecordId) {
+                        diagnosticRecordId?.let(stt::observeAsrRuntimeSummary)
+                            ?: flowOf(AsrRuntimeSummary(0, 0))
+                    }
+                        .collectAsStateWithLifecycle(initialValue = AsrRuntimeSummary(0, 0))
                     val vadDiagnostics by stt.vadDiagnosticsState.collectAsStateWithLifecycle()
                     val healthRefreshing by stt.isAsrHealthRefreshing.collectAsStateWithLifecycle()
                     AsrDiagnosticsScreen(
@@ -628,6 +669,7 @@ fun ListenApp(
                         openHistory = { nav.navigate("settings/asr-diagnostics/history/$it") },
                         activeDiagnostics = activeDiagnostics,
                         recentCounts = recentCounts,
+                        runtimeSummary = runtimeSummary,
                         healthRefreshing = healthRefreshing
                     )
                 }
@@ -666,11 +708,21 @@ fun ListenApp(
             }
             composable("record/{recordId}/ai-result/{resultId}") { entry ->
                 val resultId = entry.arguments?.getString("resultId")?.toLongOrNull() ?: return@composable
-                AiResultDetailScreen(resultId, ai, settingsState.developerMode)
+                AiResultDetailScreen(
+                    resultId,
+                    ai,
+                    settingsState.developerMode,
+                    onComposerClearanceChanged = { aiComposerClearance = it }
+                )
             }
             composable("ai/result/{recordId}/{resultId}") { entry ->
                 val resultId = entry.arguments?.getString("resultId")?.toLongOrNull() ?: return@composable
-                AiResultDetailScreen(resultId, ai, settingsState.developerMode)
+                AiResultDetailScreen(
+                    resultId,
+                    ai,
+                    settingsState.developerMode,
+                    onComposerClearanceChanged = { aiComposerClearance = it }
+                )
             }
             composable("record/{recordId}/ai-conversations") { entry ->
                 val id = entry.arguments?.getString("recordId")?.toLongOrNull() ?: return@composable
@@ -678,7 +730,12 @@ fun ListenApp(
             }
             composable("ai-conversation/{conversationId}") { entry ->
                 val id = entry.arguments?.getString("conversationId")?.toLongOrNull() ?: return@composable
-                AiConversationScreen(id, ai, settingsState.developerMode)
+                AiConversationScreen(
+                    id,
+                    ai,
+                    settingsState.developerMode,
+                    onComposerClearanceChanged = { aiComposerClearance = it }
+                )
             }
         }
     }
@@ -792,7 +849,6 @@ private fun AnimatedAppFab(state: FabState, click: (FabState) -> Unit) {
             FabState.NewCourse -> AnimatedFabContent("新建课程", Icons.Outlined.Add) { click(state) }
             is FabState.NewRecord -> AnimatedFabContent("新建课堂记录", Icons.Outlined.Add) { click(state) }
             is FabState.StartListening -> AnimatedFabContent("开始监听", Icons.Outlined.Mic) { click(state) }
-            FabState.NewConversation -> AnimatedFabContent("新建对话", Icons.Outlined.Add) { click(state) }
             is FabState.StopListening -> ListeningStopFab(state.startedAtElapsedRealtimeMs) { click(state) }
         }
     }

@@ -76,6 +76,19 @@ data class AiContentItem(
     val preview: String
 )
 
+/**
+ * A point-in-time preview of the classroom transcript that will be frozen into
+ * a newly-created conversation. The selected segments are always kept whole
+ * and returned in capture order.
+ */
+data class ClassroomConversationContext(
+    val segments: List<TranscriptEntity>,
+    val snapshot: String,
+    val codePointCount: Int,
+    val omittedEarlierSegmentCount: Int,
+    val newestSegmentExceedsLimit: Boolean
+)
+
 class AiViewModel(application: Application) : AndroidViewModel(application) {
     private val database = ListenDatabase.get(application)
     private val attachmentStore = AiAttachmentStore(application)
@@ -96,6 +109,7 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
     fun messages(conversationId: Long) = repository.messages(conversationId)
     fun resultAttachments(resultId: Long) = repository.resultAttachments(resultId)
     fun messageAttachments(messageId: Long) = repository.messageAttachments(messageId)
+    fun recordTranscripts(recordId: Long) = database.transcriptDao().segments(recordId)
     fun attachmentFile(value: AiAttachmentEntity) = attachmentStore.resolve(value.relativePath)
     fun contents(recordId: Long) = combine(repository.results(recordId), repository.conversations(recordId)) { results, conversations ->
         (results.map { result ->
@@ -386,7 +400,7 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update { it.copy(error = "已有 AI 请求正在处理。") }
             return
         }
-        val segments = availableSegments.sortedBy { it.startTime }
+        val segments = orderTranscriptSegments(availableSegments)
         if (segments.isEmpty()) {
             discardAttachments(attachments)
             _uiState.update { it.copy(error = "当前课堂记录还没有识别内容。") }
@@ -404,7 +418,7 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
         onCreated: (Long) -> Unit
     ) {
         aiJob = viewModelScope.launch {
-            val selected = segments.sortedBy { it.startTime }
+            val selected = orderTranscriptSegments(segments)
             val snapshot = buildSourceSnapshot(selected)
             if (!validateSnapshot(snapshot, clearSelectionAfterCreate)) {
                 discardAttachments(attachments)
@@ -656,6 +670,64 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun createClassroomConversation(
+        recordId: Long,
+        contextCodePointLimit: Int,
+        sourceSegmentIdsAtSend: Set<Long>? = null,
+        question: String,
+        attachments: List<PendingAiAttachment> = emptyList(),
+        onCreated: (Long) -> Unit
+    ) {
+        if (aiJob?.isActive == true || question.isBlank()) {
+            discardAttachments(attachments)
+            if (aiJob?.isActive == true) _uiState.update { it.copy(error = "已有 AI 请求正在处理。") }
+            return
+        }
+        if (contextCodePointLimit !in MIN_CLASSROOM_CONTEXT_CODE_POINTS..MAX_SOURCE_CODE_POINTS) {
+            discardAttachments(attachments)
+            _uiState.update {
+                it.copy(error = "课堂上下文长度必须在 $MIN_CLASSROOM_CONTEXT_CODE_POINTS～$MAX_SOURCE_CODE_POINTS 个字符之间。")
+            }
+            return
+        }
+        aiJob = viewModelScope.launch {
+            credentialsOrReport() ?: run {
+                discardAttachments(attachments)
+                return@launch
+            }
+            // Read once at the first send. Later transcripts must not mutate the
+            // conversation's frozen source context.
+            val available = database.transcriptDao().segments(recordId).first()
+                .let { segments ->
+                    sourceSegmentIdsAtSend?.let { ids -> segments.filter { it.id in ids } } ?: segments
+                }
+            val context = selectRecentClassroomContext(available, contextCodePointLimit)
+            if (context.newestSegmentExceedsLimit) {
+                discardAttachments(attachments)
+                _uiState.update {
+                    it.copy(error = "最近一条完整识别片段已超过当前上下文限制，请提高限制，或回到记录页手动选择片段。")
+                }
+                return@launch
+            }
+            val prompts = settingsRepository.settings.first().aiPrompts
+            val conversationId = runCatching {
+                repository.createConversation(
+                    recordId = recordId,
+                    title = conversationTitle(question, "课堂问答"),
+                    snapshot = context.snapshot,
+                    segmentIds = context.segments.map { it.id },
+                    systemPrompt = prompts.customConversation
+                )
+            }.getOrElse { exception ->
+                discardAttachments(attachments)
+                _uiState.update { it.copy(error = safeError(exception as? Exception ?: Exception(exception))) }
+                return@launch
+            }
+            onCreated(conversationId)
+            sendMessageInternal(conversationId, question.trim(), attachments)
+        }
+    }
+
     private suspend fun sendMessageInternal(conversationId: Long, question: String, attachments: List<PendingAiAttachment>) {
         val conversation = repository.conversationOnce(conversationId) ?: run {
             discardAttachments(attachments)
@@ -824,7 +896,7 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun selectedSegments(recordId: Long, available: List<TranscriptEntity>): List<TranscriptEntity>? {
         val ids = _uiState.value.takeIf { it.selectionRecordId == recordId }?.selectedSegmentIds.orEmpty()
-        val selected = available.filter { it.id in ids }.sortedBy { it.startTime }
+        val selected = orderTranscriptSegments(available.filter { it.id in ids })
         if (selected.isEmpty()) _uiState.update { it.copy(error = "请先选择识别片段。") }
         return selected.takeIf { it.isNotEmpty() }
     }
@@ -940,6 +1012,8 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
         private const val STREAM_DRAFT_INTERVAL_MS = 100L
+        const val DEFAULT_CLASSROOM_CONTEXT_CODE_POINTS = 10_000
+        const val MIN_CLASSROOM_CONTEXT_CODE_POINTS = 1_000
         const val MAX_SOURCE_CODE_POINTS = 20_000
         fun isSourceWithinLimit(value: String): Boolean =
             value.codePointCount(0, value.length) <= MAX_SOURCE_CODE_POINTS
@@ -953,14 +1027,66 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
 
         fun buildSourceSnapshot(segments: List<TranscriptEntity>): String {
             val formatter = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
-            return segments.sortedBy { it.startTime }.joinToString("\n\n") { segment ->
+            return orderTranscriptSegments(segments).joinToString("\n\n") { segment ->
                 "[${formatter.format(Date(segment.startTime))}]\n${segment.effectiveText}"
             }
         }
 
+        fun orderTranscriptSegments(segments: List<TranscriptEntity>): List<TranscriptEntity> =
+            if (segments.isNotEmpty() && segments.all { it.sequenceNumber != null }) {
+                segments.sortedWith(compareBy<TranscriptEntity> { it.sequenceNumber }.thenBy { it.startTime }.thenBy { it.id })
+            } else {
+                // A v8 database can temporarily contain legacy rows without a
+                // sequence next to newly-created v9 rows. In that mixed case,
+                // capture time is the only common ordering basis.
+                segments.sortedWith(compareBy<TranscriptEntity> { it.startTime }.thenBy { it.id })
+            }
+
+        fun selectRecentClassroomContext(
+            segments: List<TranscriptEntity>,
+            maxCodePoints: Int
+        ): ClassroomConversationContext {
+            require(maxCodePoints in MIN_CLASSROOM_CONTEXT_CODE_POINTS..MAX_SOURCE_CODE_POINTS) {
+                "课堂上下文长度超出允许范围。"
+            }
+            val chronological = orderTranscriptSegments(segments)
+            if (chronological.isEmpty()) {
+                return ClassroomConversationContext(emptyList(), "", 0, 0, false)
+            }
+
+            val selectedNewestFirst = mutableListOf<TranscriptEntity>()
+            for (segment in chronological.asReversed()) {
+                val candidate = orderTranscriptSegments(selectedNewestFirst + segment)
+                val candidateSnapshot = buildSourceSnapshot(candidate)
+                val candidateCount = candidateSnapshot.codePointCount(0, candidateSnapshot.length)
+                if (candidateCount > maxCodePoints) {
+                    if (selectedNewestFirst.isEmpty()) {
+                        return ClassroomConversationContext(
+                            segments = emptyList(),
+                            snapshot = "",
+                            codePointCount = 0,
+                            omittedEarlierSegmentCount = chronological.size,
+                            newestSegmentExceedsLimit = true
+                        )
+                    }
+                    break
+                }
+                selectedNewestFirst += segment
+            }
+            val selected = orderTranscriptSegments(selectedNewestFirst)
+            val snapshot = buildSourceSnapshot(selected)
+            return ClassroomConversationContext(
+                segments = selected,
+                snapshot = snapshot,
+                codePointCount = snapshot.codePointCount(0, snapshot.length),
+                omittedEarlierSegmentCount = chronological.size - selected.size,
+                newestSegmentExceedsLimit = false
+            )
+        }
+
         fun buildCorrectionSource(segments: List<TranscriptEntity>): String {
             val formatter = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
-            return segments.sortedBy { it.startTime }.joinToString("\n\n") { segment ->
+            return orderTranscriptSegments(segments).joinToString("\n\n") { segment ->
                 "<segment id=\"${segment.id}\" time=\"${formatter.format(Date(segment.startTime))}\">\n" +
                     segment.effectiveText + "\n</segment>"
             }

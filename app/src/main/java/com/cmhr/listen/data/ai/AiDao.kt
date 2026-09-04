@@ -46,7 +46,7 @@ interface AiDao {
     fun allResults(): Flow<List<AiResultEntity>>
     @Query("SELECT * FROM ai_results WHERE id = :id") fun result(id: Long): Flow<AiResultEntity?>
     @Query("SELECT * FROM ai_results WHERE id = :id") suspend fun resultOnce(id: Long): AiResultEntity?
-    @Query("SELECT t.* FROM transcript_segments t INNER JOIN ai_result_segments l ON l.segmentId = t.id WHERE l.resultId = :resultId ORDER BY t.startTime ASC")
+    @Query("SELECT t.* FROM transcript_segments t INNER JOIN ai_result_segments l ON l.segmentId = t.id WHERE l.resultId = :resultId ORDER BY t.sequenceNumber ASC, t.startTime ASC, t.id ASC")
     fun resultSourceSegments(resultId: Long): Flow<List<TranscriptEntity>>
     @Query("UPDATE ai_results SET status = 'PENDING', output = NULL, reasoningContent = '', correctionPayload = NULL, errorMessage = NULL, finishedAt = NULL WHERE id = :id")
     suspend fun markResultPending(id: Long)
@@ -68,7 +68,7 @@ interface AiDao {
     @Query("SELECT * FROM ai_conversations WHERE id = :id") suspend fun conversationOnce(id: Long): AiConversationEntity?
     @Query("SELECT * FROM ai_conversations WHERE originResultId = :resultId LIMIT 1") fun conversationForResult(resultId: Long): Flow<AiConversationEntity?>
     @Query("SELECT * FROM ai_conversations WHERE originResultId = :resultId LIMIT 1") suspend fun conversationForResultOnce(resultId: Long): AiConversationEntity?
-    @Query("SELECT t.* FROM transcript_segments t INNER JOIN ai_conversation_segments l ON l.segmentId = t.id WHERE l.conversationId = :conversationId ORDER BY t.startTime ASC")
+    @Query("SELECT t.* FROM transcript_segments t INNER JOIN ai_conversation_segments l ON l.segmentId = t.id WHERE l.conversationId = :conversationId ORDER BY t.sequenceNumber ASC, t.startTime ASC, t.id ASC")
     fun conversationSourceSegments(conversationId: Long): Flow<List<TranscriptEntity>>
     @Query("UPDATE ai_conversations SET updatedAt = :updatedAt WHERE id = :id") suspend fun touchConversation(id: Long, updatedAt: Long)
     @Query("UPDATE ai_conversations SET title = :title, updatedAt = :updatedAt WHERE id = :id") suspend fun renameConversation(id: Long, title: String, updatedAt: Long)
