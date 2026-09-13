@@ -148,6 +148,7 @@ private fun routeTitle(route: String?): String = when (route) {
     "settings/vad-parameters" -> "VAD 参数"
     "settings/vad-presets" -> "VAD 预设"
     "settings/ai-service" -> "AI 配置"
+    "settings/cloud-sync" -> "云同步"
     "settings/ai-prompts" -> "AI 提示词"
     "settings/asr-prompt-policy" -> "ASR 提示词模式"
     "settings/ai-generation" -> "AI 生成参数"
@@ -319,7 +320,7 @@ fun ListenApp(
     )
     if (confirmDeleteTranscripts && recordId != null) TimedDeleteDialog(
         title = "删除识别片段",
-        message = "将永久删除选中的 ${aiState.selectedSegmentIds.size} 条原始识别片段。已保存的 AI 冻结快照和输出会保留。",
+        message = "将删除选中的 ${aiState.selectedSegmentIds.size} 条原始识别片段，并保留用于同步的删除标记。已保存的 AI 冻结快照和输出会保留。",
         confirm = {
             courses.deleteSegments(recordId, aiState.selectedSegmentIds) { ai.clearSelection() }
             confirmDeleteTranscripts = false
@@ -614,11 +615,13 @@ fun ListenApp(
                     onAiPrompts = { nav.navigate("settings/ai-prompts") },
                     onAsrPromptPolicy = { nav.navigate("settings/asr-prompt-policy") },
                     onAiGeneration = { nav.navigate("settings/ai-generation") },
+                    onCloudSync = { nav.navigate("settings/cloud-sync") },
                     onAsrDiagnostics = { nav.navigate("settings/asr-diagnostics") }
                 )
             }
             composable("settings/stt-service") { SttServiceSettingsScreen(settingsState, settings) }
             composable("settings/ai-service") { AiServiceSettingsScreen(settingsState, settings) }
+            composable("settings/cloud-sync") { CloudSyncSettingsScreen(settingsState, settings) }
             composable("settings/ai-prompts") { AiPromptsSettingsScreen(settingsState, settings) }
             composable("settings/asr-prompt-policy") { AsrPromptPolicySettingsScreen(settingsState, settings) }
             composable("settings/ai-generation") { AiGenerationSettingsScreen(settingsState, settings) }

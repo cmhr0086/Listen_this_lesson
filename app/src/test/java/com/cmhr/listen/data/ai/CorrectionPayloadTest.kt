@@ -38,6 +38,7 @@ class CorrectionPayloadTest {
     private fun segment(id: Long, text: String) = TranscriptEntity(
         id = id,
         recordId = 7,
+        sessionId = "test-session",
         startTime = id * 1_000,
         endTime = id * 1_000 + 500,
         audioDurationMs = 500,

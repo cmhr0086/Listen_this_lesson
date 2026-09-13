@@ -40,6 +40,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.cmhr.listen.ConnectionTestState
+import com.cmhr.listen.CloudSyncRunState
 import com.cmhr.listen.SettingsUiState
 import com.cmhr.listen.SettingsViewModel
 import com.cmhr.listen.SttViewModel
@@ -53,6 +54,8 @@ import com.cmhr.listen.data.settings.AiReasoningEffort
 import com.cmhr.listen.data.stt.AsrPromptMode
 import com.cmhr.listen.data.stt.AsrPromptAutoConfig
 import kotlin.math.roundToInt
+import java.text.DateFormat
+import java.util.Date
 
 @Composable
 fun SettingsScreen(
@@ -65,6 +68,7 @@ fun SettingsScreen(
     onAiPrompts: () -> Unit,
     onAsrPromptPolicy: () -> Unit,
     onAiGeneration: () -> Unit,
+    onCloudSync: () -> Unit = {},
     onAsrDiagnostics: () -> Unit = {}
 ) = SettingsOverview(
     state = state,
@@ -76,6 +80,7 @@ fun SettingsScreen(
     onAiPrompts = onAiPrompts,
     onAsrPromptPolicy = onAsrPromptPolicy,
     onAiGeneration = onAiGeneration,
+    onCloudSync = onCloudSync,
     onAsrDiagnostics = onAsrDiagnostics
 )
 
@@ -90,6 +95,7 @@ internal fun SettingsOverview(
     onAiPrompts: () -> Unit,
     onAsrPromptPolicy: () -> Unit,
     onAiGeneration: () -> Unit,
+    onCloudSync: () -> Unit = {},
     onAsrDiagnostics: () -> Unit = {}
 ) {
     LazyColumn(
@@ -109,6 +115,13 @@ internal fun SettingsOverview(
                 "AI 配置",
                 "${providerName(state.ai.provider)} · ${state.ai.model.ifBlank { "未设置模型" }} · ${if (state.ai.hasApiKey) "Key 已配置" else "Key 未配置"}",
                 onAiService
+            )
+        }
+        item("cloud-sync-link") {
+            SettingsLink(
+                "云同步",
+                if (state.cloudSync.lastSyncAt > 0) "上次同步：${formatSyncTime(state.cloudSync.lastSyncAt)}" else "尚未同步",
+                onCloudSync
             )
         }
         item("asr-prompt-policy-link") {
@@ -135,6 +148,109 @@ internal fun SettingsOverview(
         }
     }
 }
+
+@Composable
+fun CloudSyncSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
+    var baseUrl by remember(state.cloudSync.baseUrl) { mutableStateOf(state.cloudSync.baseUrl) }
+    var apiToken by remember { mutableStateOf("") }
+    var showApiToken by remember { mutableStateOf(false) }
+    val syncing = state.cloudSyncState is CloudSyncRunState.Syncing
+    val statusText = when (val syncState = state.cloudSyncState) {
+        CloudSyncRunState.Idle -> "等待手动同步"
+        CloudSyncRunState.Syncing -> "正在上传本地变更并获取服务端增量…"
+        is CloudSyncRunState.Success -> with(syncState.summary) {
+            "同步成功：上传 $uploadedSessions 个 Session、$uploadedSegments 个 Segment；接收 $receivedSessions 个 Session、$receivedSegments 个 Segment。"
+        }
+        is CloudSyncRunState.Error -> "同步失败：${syncState.message}"
+    }
+
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        item("cloud-sync-settings") {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedTextField(
+                        value = baseUrl,
+                        onValueChange = { baseUrl = it },
+                        label = { Text("同步服务器地址") },
+                        placeholder = { Text("https://sync.example.com") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        enabled = !syncing
+                    )
+                    Text("同步服务器必须使用 HTTPS。", style = MaterialTheme.typography.bodySmall)
+                    OutlinedTextField(
+                        value = apiToken,
+                        onValueChange = { apiToken = it },
+                        label = {
+                            Text(if (state.cloudSync.hasApiToken) "Token（留空则保留）" else "Token")
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        enabled = !syncing,
+                        visualTransformation = if (showApiToken) VisualTransformation.None else PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        trailingIcon = {
+                            IconButton(onClick = { showApiToken = !showApiToken }) {
+                                Icon(
+                                    if (showApiToken) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
+                                    contentDescription = if (showApiToken) "隐藏 Token" else "显示 Token"
+                                )
+                            }
+                        }
+                    )
+                    Text(
+                        if (state.cloudSync.hasApiToken) "Token 已安全保存。" else "尚未配置 Token。",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = {
+                                model.saveCloudSyncServer(baseUrl, apiToken)
+                                apiToken = ""
+                            },
+                            enabled = !syncing && baseUrl.isNotBlank()
+                        ) { Text("保存设置") }
+                        Button(
+                            onClick = {
+                                model.syncNow(baseUrl, apiToken)
+                                apiToken = ""
+                            },
+                            enabled = !syncing && baseUrl.isNotBlank() &&
+                                (apiToken.isNotBlank() || state.cloudSync.hasApiToken)
+                        ) { Text(if (syncing) "正在同步" else "立即同步") }
+                    }
+                    if (state.cloudSync.hasApiToken) {
+                        OutlinedButton(
+                            onClick = {
+                                apiToken = ""
+                                model.clearCloudSyncApiToken()
+                            },
+                            enabled = !syncing
+                        ) { Text("清除 Token") }
+                    }
+                    Text(
+                        if (state.cloudSync.lastSyncAt > 0) "上次同步：${formatSyncTime(state.cloudSync.lastSyncAt)}"
+                        else "上次同步：从未",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        statusText,
+                        color = if (state.cloudSyncState is CloudSyncRunState.Error) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+        }
+    }
+}
+
+internal fun formatSyncTime(timestampMs: Long): String =
+    DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.MEDIUM).format(Date(timestampMs))
 
 @Composable
 fun SttServiceSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {

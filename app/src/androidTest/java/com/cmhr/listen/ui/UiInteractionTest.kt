@@ -357,6 +357,7 @@ class UiInteractionTest {
         val segment = TranscriptEntity(
             id = 7,
             recordId = 1,
+            sessionId = "test-session",
             startTime = 1_000,
             endTime = 2_000,
             audioDurationMs = 1_000,
@@ -418,7 +419,7 @@ class UiInteractionTest {
     }
 
     @Test
-    fun settingsOverviewUsesOnlySttAndAiEntryCards() {
+    fun settingsOverviewIncludesManualCloudSyncEntry() {
         composeRule.setContent {
             ListenTheme {
                 SettingsOverview(
@@ -432,6 +433,7 @@ class UiInteractionTest {
 
         composeRule.onNodeWithText("STT 服务器").assertExists()
         composeRule.onNodeWithText("AI 配置").assertExists()
+        composeRule.onNodeWithText("云同步").assertExists()
         composeRule.onNodeWithText("开发者功能").assertDoesNotExist()
         composeRule.onNodeWithText("语音识别服务").assertDoesNotExist()
         composeRule.onNodeWithText("AI 服务").assertDoesNotExist()

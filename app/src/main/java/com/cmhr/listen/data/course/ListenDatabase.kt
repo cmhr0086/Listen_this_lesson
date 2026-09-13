@@ -2,6 +2,8 @@ package com.cmhr.listen.data.course
 
 import android.content.Context
 import androidx.room.Database
+import androidx.room.ColumnInfo
+import androidx.room.Embedded
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
@@ -26,6 +28,12 @@ import com.cmhr.listen.data.stt.AsrDiagnosticsDao
 import com.cmhr.listen.data.stt.AsrNetworkEventEntity
 import com.cmhr.listen.data.stt.AsrSegmentDiagnosticEntity
 import kotlinx.coroutines.flow.Flow
+import java.util.UUID
+
+enum class SyncStatus {
+    SYNCED,
+    PENDING
+}
 
 @Entity(tableName = "courses")
 data class CourseEntity(
@@ -33,18 +41,45 @@ data class CourseEntity(
     val name: String,
     val createdAt: Long,
     val asrPrompt: String = "",
-    val asrPromptModeOverride: String? = null
+    val asrPromptModeOverride: String? = null,
+    @ColumnInfo(defaultValue = "0") val deleted: Boolean = false
 )
 
-@Entity(tableName = "records", foreignKeys = [ForeignKey(entity = CourseEntity::class, parentColumns = ["id"], childColumns = ["courseId"], onDelete = ForeignKey.CASCADE)], indices = [Index("courseId")])
-data class ClassRecordEntity(@PrimaryKey(autoGenerate = true) val id: Long = 0, val courseId: Long, val name: String, val startedAt: Long, val endedAt: Long? = null)
+@Entity(
+    tableName = "records",
+    foreignKeys = [ForeignKey(entity = CourseEntity::class, parentColumns = ["id"], childColumns = ["courseId"], onDelete = ForeignKey.CASCADE)],
+    indices = [Index("courseId"), Index(value = ["sessionId"], unique = true)]
+)
+data class SessionEntity(
+    /** Local-only relational key. Use [sessionId] for cross-device identity. */
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val courseId: Long,
+    val name: String,
+    val startedAt: Long,
+    val endedAt: Long? = null,
+    @ColumnInfo(defaultValue = "''") val sessionId: String = UUID.randomUUID().toString(),
+    @ColumnInfo(defaultValue = "0") val createdAt: Long = startedAt,
+    @ColumnInfo(defaultValue = "0") val updatedAt: Long = createdAt,
+    @ColumnInfo(defaultValue = "0") val deleted: Boolean = false,
+    @ColumnInfo(defaultValue = "'PENDING'") val syncStatus: String = SyncStatus.PENDING.name
+)
+
+typealias ClassRecordEntity = SessionEntity
 
 @Entity(
     tableName = "transcript_segments",
-    foreignKeys = [ForeignKey(entity = ClassRecordEntity::class, parentColumns = ["id"], childColumns = ["recordId"], onDelete = ForeignKey.CASCADE)],
-    indices = [Index("recordId"), Index("sourceSegmentId"), Index("asrJobId"), Index("sequenceNumber")]
+    foreignKeys = [ForeignKey(entity = SessionEntity::class, parentColumns = ["id"], childColumns = ["recordId"], onDelete = ForeignKey.CASCADE)],
+    indices = [
+        Index("recordId"),
+        Index(value = ["segmentId"], unique = true),
+        Index("sessionId"),
+        Index("sourceSegmentId"),
+        Index("asrJobId"),
+        Index("sequenceNumber")
+    ]
 )
-data class TranscriptEntity(
+data class SegmentEntity(
+    /** Local-only relational key. Use [segmentId] for cross-device identity. */
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val recordId: Long,
     val startTime: Long,
@@ -62,52 +97,141 @@ data class TranscriptEntity(
     val uploadDurationMs: Long? = null,
     val responseWaitDurationMs: Long? = null,
     val totalAsrDurationMs: Long? = null,
-    val serverModel: String? = null
+    val serverModel: String? = null,
+    @ColumnInfo(defaultValue = "''") val segmentId: String = UUID.randomUUID().toString(),
+    @ColumnInfo(defaultValue = "''") val sessionId: String,
+    @ColumnInfo(defaultValue = "0") val createdAt: Long = endTime,
+    @ColumnInfo(defaultValue = "0") val updatedAt: Long = createdAt,
+    @ColumnInfo(defaultValue = "0") val deleted: Boolean = false,
+    @ColumnInfo(defaultValue = "'PENDING'") val syncStatus: String = SyncStatus.PENDING.name
 ) {
     val effectiveText: String get() = correctedText?.takeIf { it.isNotBlank() } ?: text
 }
 
+typealias TranscriptEntity = SegmentEntity
+
+data class SessionSyncProjection(
+    @Embedded val session: SessionEntity,
+    val courseName: String
+)
+
 @Dao interface CourseDao {
-    @Query("SELECT * FROM courses ORDER BY createdAt DESC") fun courses(): Flow<List<CourseEntity>>
-    @Query("SELECT * FROM courses WHERE id = :id") fun course(id: Long): Flow<CourseEntity?>
+    @Query("SELECT * FROM courses WHERE deleted = 0 ORDER BY createdAt DESC") fun courses(): Flow<List<CourseEntity>>
+    @Query("SELECT * FROM courses WHERE id = :id AND deleted = 0") fun course(id: Long): Flow<CourseEntity?>
+    @Query("SELECT id FROM courses WHERE name = :name AND deleted = 0 ORDER BY id LIMIT 1") suspend fun idByName(name: String): Long?
     @Insert suspend fun insert(course: CourseEntity): Long
     @Query("UPDATE courses SET name = :name WHERE id = :id") suspend fun rename(id: Long, name: String)
     @Query("UPDATE courses SET asrPrompt = :prompt WHERE id = :id") suspend fun updateAsrPrompt(id: Long, prompt: String)
     @Query("UPDATE courses SET asrPromptModeOverride = :mode WHERE id = :id") suspend fun updateAsrPromptMode(id: Long, mode: String?)
-    @Query("DELETE FROM courses WHERE id = :id") suspend fun delete(id: Long)
+    @Query("UPDATE courses SET deleted = 1 WHERE id = :id") suspend fun softDelete(id: Long)
 }
 @Dao interface RecordDao {
-    @Query("SELECT * FROM records WHERE courseId = :courseId ORDER BY startedAt DESC") fun records(courseId: Long): Flow<List<ClassRecordEntity>>
-    @Query("SELECT * FROM records WHERE id = :id") fun record(id: Long): Flow<ClassRecordEntity?>
-    @Insert suspend fun insert(record: ClassRecordEntity): Long
-    @Query("UPDATE records SET name = :name WHERE id = :id") suspend fun rename(id: Long, name: String)
-    @Query("UPDATE records SET endedAt = :endedAt WHERE id = :id") suspend fun end(id: Long, endedAt: Long)
-    @Query("UPDATE records SET endedAt = NULL WHERE id = :id") suspend fun reopen(id: Long)
-    @Query("DELETE FROM records WHERE id = :id") suspend fun delete(id: Long)
-    @Query("SELECT id FROM records WHERE courseId = :courseId") suspend fun idsForCourse(courseId: Long): List<Long>
+    @Query("SELECT * FROM records WHERE courseId = :courseId AND deleted = 0 ORDER BY startedAt DESC") fun records(courseId: Long): Flow<List<SessionEntity>>
+    @Query("SELECT * FROM records WHERE id = :id AND deleted = 0") fun record(id: Long): Flow<SessionEntity?>
+    @Query("SELECT sessionId FROM records WHERE id = :id AND deleted = 0") suspend fun sessionId(id: Long): String?
+    @Query("SELECT * FROM records WHERE sessionId = :sessionId LIMIT 1") suspend fun sessionBySessionId(sessionId: String): SessionEntity?
+    @Query("SELECT r.*, c.name AS courseName FROM records r INNER JOIN courses c ON c.id = r.courseId WHERE r.syncStatus = 'PENDING' ORDER BY r.updatedAt, r.sessionId")
+    suspend fun pendingSessions(): List<SessionSyncProjection>
+    @Insert suspend fun insert(session: SessionEntity): Long
+    @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertRemote(session: SessionEntity): Long
+    @Query("UPDATE records SET name = :name, updatedAt = :updatedAt, syncStatus = 'PENDING' WHERE id = :id AND deleted = 0") suspend fun rename(id: Long, name: String, updatedAt: Long)
+    @Query("UPDATE records SET endedAt = :endedAt, updatedAt = :endedAt, syncStatus = 'PENDING' WHERE id = :id AND deleted = 0") suspend fun end(id: Long, endedAt: Long)
+    @Query("UPDATE records SET endedAt = NULL, updatedAt = :updatedAt, syncStatus = 'PENDING' WHERE id = :id AND deleted = 0") suspend fun reopen(id: Long, updatedAt: Long)
+    @Query("UPDATE records SET deleted = 1, updatedAt = :updatedAt, syncStatus = 'PENDING' WHERE id = :id AND deleted = 0") suspend fun softDelete(id: Long, updatedAt: Long): Int
+    @Query("UPDATE records SET deleted = 1, updatedAt = :updatedAt, syncStatus = 'PENDING' WHERE courseId = :courseId AND deleted = 0") suspend fun softDeleteForCourse(courseId: Long, updatedAt: Long): Int
+    @Query("SELECT id FROM records WHERE courseId = :courseId AND deleted = 0") suspend fun idsForCourse(courseId: Long): List<Long>
+    @Query("UPDATE records SET courseId = :courseId, name = :name, startedAt = :startedAt, endedAt = :endedAt, createdAt = :createdAt, updatedAt = :updatedAt, deleted = :deleted, syncStatus = 'SYNCED' WHERE sessionId = :sessionId AND updatedAt < :updatedAt")
+    suspend fun applyRemote(
+        sessionId: String,
+        courseId: Long,
+        name: String,
+        startedAt: Long,
+        endedAt: Long?,
+        createdAt: Long,
+        updatedAt: Long,
+        deleted: Boolean
+    ): Int
+    @Query("UPDATE records SET syncStatus = 'SYNCED' WHERE sessionId = :sessionId AND updatedAt = :uploadedUpdatedAt AND syncStatus = 'PENDING'")
+    suspend fun markSyncedIfUnchanged(sessionId: String, uploadedUpdatedAt: Long): Int
 }
 @Dao interface TranscriptDao {
-    @Query("SELECT * FROM transcript_segments WHERE recordId = :recordId ORDER BY sequenceNumber ASC, startTime ASC, id ASC") fun segments(recordId: Long): Flow<List<TranscriptEntity>>
-    @Query("SELECT * FROM transcript_segments WHERE id IN (:ids) ORDER BY sequenceNumber ASC, startTime ASC, id ASC") suspend fun segmentsByIds(ids: List<Long>): List<TranscriptEntity>
-    @Query("SELECT t.* FROM transcript_segments t INNER JOIN ai_result_segments l ON l.segmentId = t.id WHERE l.resultId = :resultId ORDER BY t.sequenceNumber ASC, t.startTime ASC, t.id ASC")
-    suspend fun segmentsForResult(resultId: Long): List<TranscriptEntity>
-    @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insert(segment: TranscriptEntity): Long
+    @Query("SELECT * FROM transcript_segments WHERE recordId = :recordId AND deleted = 0 ORDER BY sequenceNumber ASC, startTime ASC, id ASC") fun segments(recordId: Long): Flow<List<SegmentEntity>>
+    @Query("SELECT * FROM transcript_segments WHERE id IN (:ids) AND deleted = 0 ORDER BY sequenceNumber ASC, startTime ASC, id ASC") suspend fun segmentsByIds(ids: List<Long>): List<SegmentEntity>
+    @Query("SELECT t.* FROM transcript_segments t INNER JOIN ai_result_segments l ON l.segmentId = t.id WHERE l.resultId = :resultId AND t.deleted = 0 ORDER BY t.sequenceNumber ASC, t.startTime ASC, t.id ASC")
+    suspend fun segmentsForResult(resultId: Long): List<SegmentEntity>
+    @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insert(segment: SegmentEntity): Long
     @Query("SELECT id FROM transcript_segments WHERE sourceSegmentId = :sourceSegmentId LIMIT 1")
     suspend fun idForSourceSegment(sourceSegmentId: String): Long?
-    @Query("UPDATE transcript_segments SET correctedText = :correctedText, correctionResultId = :resultId, correctedAt = :correctedAt WHERE recordId = :recordId AND id = :segmentId")
+    @Query("SELECT * FROM transcript_segments WHERE segmentId = :segmentId LIMIT 1") suspend fun segmentBySegmentId(segmentId: String): SegmentEntity?
+    @Query("SELECT * FROM transcript_segments WHERE syncStatus = 'PENDING' ORDER BY updatedAt, segmentId") suspend fun pendingSegments(): List<SegmentEntity>
+    @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertRemote(segment: SegmentEntity): Long
+    @Query("UPDATE transcript_segments SET correctedText = :correctedText, correctionResultId = :resultId, correctedAt = :correctedAt, updatedAt = :correctedAt, syncStatus = 'PENDING' WHERE recordId = :recordId AND id = :segmentId AND deleted = 0")
     suspend fun applyCorrection(recordId: Long, segmentId: Long, resultId: Long, correctedText: String, correctedAt: Long): Int
-    @Query("UPDATE transcript_segments SET correctedText = NULL, correctionResultId = NULL, correctedAt = NULL WHERE id = :segmentId")
-    suspend fun restoreOriginal(segmentId: Long): Int
-    @Query("UPDATE transcript_segments SET correctionResultId = NULL WHERE correctionResultId = :resultId")
-    suspend fun detachCorrectionResult(resultId: Long)
-    @Query("DELETE FROM transcript_segments WHERE recordId = :recordId AND id IN (:ids)") suspend fun deleteByIds(recordId: Long, ids: List<Long>): Int
+    @Query("UPDATE transcript_segments SET correctedText = NULL, correctionResultId = NULL, correctedAt = NULL, updatedAt = :updatedAt, syncStatus = 'PENDING' WHERE id = :segmentId AND deleted = 0")
+    suspend fun restoreOriginal(segmentId: Long, updatedAt: Long): Int
+    @Query("UPDATE transcript_segments SET correctionResultId = NULL, updatedAt = :updatedAt, syncStatus = 'PENDING' WHERE correctionResultId = :resultId")
+    suspend fun detachCorrectionResult(resultId: Long, updatedAt: Long)
+    @Query("UPDATE transcript_segments SET deleted = 1, updatedAt = :updatedAt, syncStatus = 'PENDING' WHERE recordId = :recordId AND id IN (:ids) AND deleted = 0") suspend fun softDeleteByIds(recordId: Long, ids: List<Long>, updatedAt: Long): Int
+    @Query("UPDATE transcript_segments SET deleted = 1, updatedAt = :updatedAt, syncStatus = 'PENDING' WHERE recordId = :recordId AND deleted = 0") suspend fun softDeleteForSession(recordId: Long, updatedAt: Long): Int
+    @Query("UPDATE transcript_segments SET deleted = 1, updatedAt = :updatedAt, syncStatus = 'PENDING' WHERE recordId IN (:recordIds) AND deleted = 0") suspend fun softDeleteForSessions(recordIds: List<Long>, updatedAt: Long): Int
+    @Query("""
+        UPDATE transcript_segments SET
+            recordId = :recordId,
+            sessionId = :sessionId,
+            startTime = :startTime,
+            endTime = :endTime,
+            audioDurationMs = :audioDurationMs,
+            recognitionDurationMs = :recognitionDurationMs,
+            text = :text,
+            correctedText = :correctedText,
+            correctionResultId = NULL,
+            correctedAt = :correctedAt,
+            sourceSegmentId = :sourceSegmentId,
+            sequenceNumber = :sequenceNumber,
+            asrJobId = :asrJobId,
+            queueDurationMs = :queueDurationMs,
+            uploadDurationMs = :uploadDurationMs,
+            responseWaitDurationMs = :responseWaitDurationMs,
+            totalAsrDurationMs = :totalAsrDurationMs,
+            serverModel = :serverModel,
+            createdAt = :createdAt,
+            updatedAt = :updatedAt,
+            deleted = :deleted,
+            syncStatus = 'SYNCED'
+        WHERE segmentId = :segmentId AND updatedAt < :updatedAt
+    """)
+    suspend fun applyRemote(
+        segmentId: String,
+        recordId: Long,
+        sessionId: String,
+        startTime: Long,
+        endTime: Long,
+        audioDurationMs: Long,
+        recognitionDurationMs: Long?,
+        text: String,
+        correctedText: String?,
+        correctedAt: Long?,
+        sourceSegmentId: String?,
+        sequenceNumber: Long?,
+        asrJobId: String?,
+        queueDurationMs: Long?,
+        uploadDurationMs: Long?,
+        responseWaitDurationMs: Long?,
+        totalAsrDurationMs: Long?,
+        serverModel: String?,
+        createdAt: Long,
+        updatedAt: Long,
+        deleted: Boolean
+    ): Int
+    @Query("UPDATE transcript_segments SET syncStatus = 'SYNCED' WHERE segmentId = :segmentId AND updatedAt = :uploadedUpdatedAt AND syncStatus = 'PENDING'")
+    suspend fun markSyncedIfUnchanged(segmentId: String, uploadedUpdatedAt: Long): Int
 }
 
 @Database(
     entities = [
         CourseEntity::class,
-        ClassRecordEntity::class,
-        TranscriptEntity::class,
+        SessionEntity::class,
+        SegmentEntity::class,
         AiResultEntity::class,
         AiResultSegmentEntity::class,
         AiConversationEntity::class,
@@ -117,7 +241,7 @@ data class TranscriptEntity(
         AsrSegmentDiagnosticEntity::class,
         AsrNetworkEventEntity::class
     ],
-    version = 9,
+    version = 10,
     exportSchema = false
 )
 abstract class ListenDatabase : RoomDatabase() {
@@ -253,10 +377,55 @@ abstract class ListenDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE courses ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0")
+
+                db.execSQL("ALTER TABLE records ADD COLUMN sessionId TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE records ADD COLUMN createdAt INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE records ADD COLUMN updatedAt INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE records ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE records ADD COLUMN syncStatus TEXT NOT NULL DEFAULT 'PENDING'")
+                db.execSQL("""
+                    UPDATE records
+                    SET sessionId = lower(hex(randomblob(4))) || '-' ||
+                        lower(hex(randomblob(2))) || '-4' ||
+                        substr(lower(hex(randomblob(2))), 2) || '-' ||
+                        substr('89ab', (random() & 3) + 1, 1) ||
+                        substr(lower(hex(randomblob(2))), 2) || '-' ||
+                        lower(hex(randomblob(6))),
+                        createdAt = startedAt,
+                        updatedAt = COALESCE(endedAt, startedAt)
+                """.trimIndent())
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_records_sessionId ON records(sessionId)")
+
+                db.execSQL("ALTER TABLE transcript_segments ADD COLUMN segmentId TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE transcript_segments ADD COLUMN sessionId TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE transcript_segments ADD COLUMN createdAt INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE transcript_segments ADD COLUMN updatedAt INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE transcript_segments ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE transcript_segments ADD COLUMN syncStatus TEXT NOT NULL DEFAULT 'PENDING'")
+                db.execSQL("""
+                    UPDATE transcript_segments
+                    SET segmentId = lower(hex(randomblob(4))) || '-' ||
+                        lower(hex(randomblob(2))) || '-4' ||
+                        substr(lower(hex(randomblob(2))), 2) || '-' ||
+                        substr('89ab', (random() & 3) + 1, 1) ||
+                        substr(lower(hex(randomblob(2))), 2) || '-' ||
+                        lower(hex(randomblob(6))),
+                        sessionId = (SELECT records.sessionId FROM records WHERE records.id = transcript_segments.recordId),
+                        createdAt = endTime,
+                        updatedAt = endTime
+                """.trimIndent())
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_transcript_segments_segmentId ON transcript_segments(segmentId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_transcript_segments_sessionId ON transcript_segments(sessionId)")
+            }
+        }
+
         @Volatile private var instance: ListenDatabase? = null
         fun get(context: Context): ListenDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, ListenDatabase::class.java, "listen.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
                 .build()
                 .also { instance = it }
         }

@@ -679,8 +679,10 @@ class AsrQueueRuntime private constructor(private val context: Context) {
         )
         database.withTransaction {
             dao.updateSegment(completed)
+            val sessionId = database.recordDao().sessionId(segment.recordId)
             if (
                 terminalState == AsrLifecycleState.COMPLETED &&
+                sessionId != null &&
                 database.transcriptDao().idForSourceSegment(segment.segmentId) == null
             ) {
                 val queueDuration = completed.clientQueueDurationMs
@@ -688,6 +690,8 @@ class AsrQueueRuntime private constructor(private val context: Context) {
                 database.transcriptDao().insert(
                     TranscriptEntity(
                         recordId = segment.recordId,
+                        segmentId = segment.segmentId,
+                        sessionId = sessionId,
                         startTime = segment.audioStartTime,
                         endTime = segment.audioEndTime,
                         audioDurationMs = segment.audioDurationMs,

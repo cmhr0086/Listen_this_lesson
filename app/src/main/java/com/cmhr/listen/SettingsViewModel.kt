@@ -12,10 +12,14 @@ import com.cmhr.listen.data.stt.AsrPromptAutoConfig
 import com.cmhr.listen.data.stt.AsrPromptMode
 import com.cmhr.listen.data.settings.ConnectionTestResult
 import com.cmhr.listen.data.settings.ServerSettings
+import com.cmhr.listen.data.settings.CloudSyncSettings
 import com.cmhr.listen.data.settings.ServerConnectionTester
 import com.cmhr.listen.data.ai.AiConnectionResult
 import com.cmhr.listen.data.ai.AiModelsResult
 import com.cmhr.listen.data.ai.AiServiceClient
+import com.cmhr.listen.data.course.ListenDatabase
+import com.cmhr.listen.data.sync.SyncRepository
+import com.cmhr.listen.data.sync.SyncSummary
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -33,6 +37,8 @@ data class SettingsUiState(
     val aiGeneration: AiGenerationSettings = AiGenerationSettings(),
     val globalAsrPromptMode: AsrPromptMode = AsrPromptMode.AUTO,
     val asrPromptAutoConfig: AsrPromptAutoConfig = AsrPromptAutoConfig(),
+    val cloudSync: CloudSyncSettings = CloudSyncSettings(),
+    val cloudSyncState: CloudSyncRunState = CloudSyncRunState.Idle,
     val availableAiModels: List<String> = emptyList(),
     val isLoadingAiModels: Boolean = false,
     val connectionTestState: ConnectionTestState = ConnectionTestState.Idle,
@@ -42,6 +48,13 @@ data class SettingsUiState(
 sealed interface ConnectionTestState {
     data object Idle : ConnectionTestState
     data object Testing : ConnectionTestState
+}
+
+sealed interface CloudSyncRunState {
+    data object Idle : CloudSyncRunState
+    data object Syncing : CloudSyncRunState
+    data class Success(val summary: SyncSummary) : CloudSyncRunState
+    data class Error(val message: String) : CloudSyncRunState
 }
 
 data class UiMessage(val text: String)
@@ -55,6 +68,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val client = OkHttpClient.Builder().connectTimeout(5, TimeUnit.SECONDS).readTimeout(5, TimeUnit.SECONDS).build()
     private val connectionTester = ServerConnectionTester(client)
     private val aiClient = AiServiceClient()
+    private val syncRepository = SyncRepository(ListenDatabase.get(application), repository)
 
     init { viewModelScope.launch { repository.settings.collect { settings ->
         _uiState.update { it.copy(
@@ -64,7 +78,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             aiPrompts = settings.aiPrompts,
             aiGeneration = settings.aiGeneration,
             globalAsrPromptMode = settings.globalAsrPromptMode,
-            asrPromptAutoConfig = settings.asrPromptAutoConfig
+            asrPromptAutoConfig = settings.asrPromptAutoConfig,
+            cloudSync = settings.cloudSync
         ) }
     } } }
 
@@ -109,6 +124,33 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun restoreDefaultAsrPromptAutoConfig() = viewModelScope.launch {
         repository.restoreDefaultAsrPromptAutoConfig()
         messageFlow.emit(UiMessage("自动 Prompt 门槛已恢复默认值。"))
+    }
+    fun saveCloudSyncServer(baseUrl: String, apiToken: String?) = viewModelScope.launch {
+        val result = runCatching { repository.saveCloudSyncServer(baseUrl, apiToken) }
+        messageFlow.emit(UiMessage(result.fold({ "云同步设置已保存。" }, { it.message ?: "云同步设置无效。" })))
+    }
+    fun clearCloudSyncApiToken() = viewModelScope.launch {
+        repository.clearCloudSyncApiToken()
+        messageFlow.emit(UiMessage("云同步 Token 已清除。"))
+    }
+    fun syncNow(baseUrl: String, apiToken: String?) = viewModelScope.launch {
+        if (_uiState.value.cloudSyncState is CloudSyncRunState.Syncing) return@launch
+        _uiState.update { it.copy(cloudSyncState = CloudSyncRunState.Syncing) }
+        val result = runCatching {
+            repository.saveCloudSyncServer(baseUrl, apiToken)
+            syncRepository.synchronize(baseUrl)
+        }
+        result.fold(
+            onSuccess = { summary ->
+                _uiState.update { it.copy(cloudSyncState = CloudSyncRunState.Success(summary)) }
+                messageFlow.emit(UiMessage("云同步完成。"))
+            },
+            onFailure = { error ->
+                val message = error.message ?: "云同步失败。"
+                _uiState.update { it.copy(cloudSyncState = CloudSyncRunState.Error(message)) }
+                messageFlow.emit(UiMessage(message))
+            }
+        )
     }
     fun testAiConnection(baseUrl: String, apiKeyInput: String) = viewModelScope.launch {
         _uiState.update { it.copy(aiConnectionTestState = ConnectionTestState.Testing) }

@@ -61,7 +61,7 @@ class AiRepository(
     suspend fun deleteResult(id: Long) {
         val paths = dao.resultAttachmentPaths(id)
         database.withTransaction {
-            database.transcriptDao().detachCorrectionResult(id)
+            database.transcriptDao().detachCorrectionResult(id, System.currentTimeMillis())
             dao.deleteResult(id)
         }
         attachmentStore?.deleteRelativePaths(paths)
@@ -86,7 +86,7 @@ class AiRepository(
     }
 
     suspend fun restoreOriginal(segmentId: Long) {
-        database.transcriptDao().restoreOriginal(segmentId)
+        database.transcriptDao().restoreOriginal(segmentId, System.currentTimeMillis())
     }
 
     suspend fun createConversation(

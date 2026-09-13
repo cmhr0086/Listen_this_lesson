@@ -14,10 +14,18 @@ import kotlinx.coroutines.flow.map
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import com.cmhr.listen.data.stt.AsrPromptAutoConfig
 import com.cmhr.listen.data.stt.AsrPromptMode
+import com.cmhr.listen.data.sync.SyncStateStore
+import java.util.UUID
 
 private val Context.appSettingsDataStore by preferencesDataStore(name = "app_settings")
 
 data class ServerSettings(val baseUrl: String = "http://10.0.0.195:8765", val hasApiKey: Boolean = false)
+data class CloudSyncSettings(
+    val baseUrl: String = "",
+    val hasApiToken: Boolean = false,
+    val deviceId: String = "",
+    val lastSyncAt: Long = 0
+)
 enum class AiProvider { OPENAI_COMPATIBLE, DEEPSEEK }
 enum class AiThinkingMode(val displayName: String) {
     DISABLED("关闭"), ENABLED("开启"), SERVICE_DEFAULT("跟随服务")
@@ -59,14 +67,16 @@ data class AppSettings(
     val aiGeneration: AiGenerationSettings = AiGenerationSettings(),
     val globalAsrPromptMode: AsrPromptMode = AsrPromptMode.AUTO,
     val asrPromptAutoConfig: AsrPromptAutoConfig = AsrPromptAutoConfig(),
+    val cloudSync: CloudSyncSettings = CloudSyncSettings(),
     val selectedCourseId: Long? = null,
     val selectedRecordId: Long? = null
 )
 
-/** DataStore owns ordinary settings; the API key value is AES-GCM encrypted with an Android Keystore key. */
-class AppSettingsRepository(private val context: Context) {
+/** DataStore owns ordinary settings; API keys and tokens are AES-GCM encrypted with Android Keystore keys. */
+class AppSettingsRepository(private val context: Context) : SyncStateStore {
     private val sttApiKeyStore = EncryptedSecretStore(STT_KEY_ALIAS)
     private val aiApiKeyStore = EncryptedSecretStore(AI_KEY_ALIAS)
+    private val syncApiTokenStore = EncryptedSecretStore(SYNC_TOKEN_KEY_ALIAS)
 
     val settings: Flow<AppSettings> = context.appSettingsDataStore.data.map { preferences ->
         AppSettings(
@@ -112,6 +122,12 @@ class AppSettingsRepository(private val context: Context) {
                 minSpeechFrameRatio = preferences[ASR_PROMPT_MIN_SPEECH_RATIO] ?: AsrPromptAutoConfig().minSpeechFrameRatio,
                 minSnrDb = preferences[ASR_PROMPT_MIN_SNR] ?: AsrPromptAutoConfig().minSnrDb
             ).validated(),
+            cloudSync = CloudSyncSettings(
+                baseUrl = preferences[CLOUD_SYNC_BASE_URL].orEmpty(),
+                hasApiToken = preferences[CLOUD_SYNC_API_TOKEN] != null,
+                deviceId = preferences[CLOUD_SYNC_DEVICE_ID].orEmpty(),
+                lastSyncAt = preferences[CLOUD_SYNC_LAST_SYNC_AT] ?: 0
+            ),
             selectedCourseId = preferences[SELECTED_COURSE],
             selectedRecordId = preferences[SELECTED_RECORD]
         )
@@ -210,6 +226,43 @@ class AppSettingsRepository(private val context: Context) {
         preferences.remove(ASR_PROMPT_MIN_SNR)
     }
 
+    suspend fun saveCloudSyncServer(baseUrl: String, apiToken: String?) {
+        val normalized = baseUrl.trim().trimEnd('/')
+        val parsed = normalized.toHttpUrlOrNull()
+        require(parsed != null && parsed.scheme == "https") {
+            "云同步服务器地址必须是有效的 https:// 地址。"
+        }
+        context.appSettingsDataStore.edit { preferences ->
+            preferences[CLOUD_SYNC_BASE_URL] = normalized
+            if (!apiToken.isNullOrBlank()) {
+                preferences[CLOUD_SYNC_API_TOKEN] = syncApiTokenStore.encrypt(apiToken.trim())
+            }
+        }
+    }
+
+    suspend fun clearCloudSyncApiToken() =
+        context.appSettingsDataStore.edit { it.remove(CLOUD_SYNC_API_TOKEN) }
+
+    override suspend fun readSyncApiToken(): String? =
+        context.appSettingsDataStore.data.first()[CLOUD_SYNC_API_TOKEN]?.let(syncApiTokenStore::decrypt)
+
+    override suspend fun getOrCreateDeviceId(): String {
+        var resolved: String? = null
+        context.appSettingsDataStore.edit { preferences ->
+            resolved = preferences[CLOUD_SYNC_DEVICE_ID]
+                ?: UUID.randomUUID().toString().also { preferences[CLOUD_SYNC_DEVICE_ID] = it }
+        }
+        return requireNotNull(resolved)
+    }
+
+    override suspend fun readLastSyncAt(): Long =
+        context.appSettingsDataStore.data.first()[CLOUD_SYNC_LAST_SYNC_AT] ?: 0
+
+    override suspend fun updateLastSyncAt(value: Long) {
+        require(value >= 0) { "同步游标不能为负数。" }
+        context.appSettingsDataStore.edit { it[CLOUD_SYNC_LAST_SYNC_AT] = value }
+    }
+
     suspend fun selectCourse(courseId: Long?) = context.appSettingsDataStore.edit { preferences ->
         if (courseId == null) preferences.remove(SELECTED_COURSE) else preferences[SELECTED_COURSE] = courseId
         preferences.remove(SELECTED_RECORD)
@@ -246,9 +299,14 @@ class AppSettingsRepository(private val context: Context) {
         val ASR_PROMPT_MIN_VAD = floatPreferencesKey("asr_prompt_min_vad")
         val ASR_PROMPT_MIN_SPEECH_RATIO = floatPreferencesKey("asr_prompt_min_speech_ratio")
         val ASR_PROMPT_MIN_SNR = floatPreferencesKey("asr_prompt_min_snr")
+        val CLOUD_SYNC_BASE_URL = stringPreferencesKey("cloud_sync_base_url")
+        val CLOUD_SYNC_API_TOKEN = stringPreferencesKey("encrypted_cloud_sync_api_token")
+        val CLOUD_SYNC_DEVICE_ID = stringPreferencesKey("cloud_sync_device_id")
+        val CLOUD_SYNC_LAST_SYNC_AT = longPreferencesKey("cloud_sync_last_sync_at")
         val SELECTED_COURSE = longPreferencesKey("selected_course_id")
         val SELECTED_RECORD = longPreferencesKey("selected_record_id")
         const val STT_KEY_ALIAS = "listen_stt_api_key"
         const val AI_KEY_ALIAS = "listen_ai_api_key"
+        const val SYNC_TOKEN_KEY_ALIAS = "listen_sync_api_token"
     }
 }

@@ -220,6 +220,12 @@ interface AsrDiagnosticsDao {
     @Query("SELECT * FROM asr_segment_diagnostics WHERE segmentId = :segmentId")
     suspend fun segment(segmentId: String): AsrSegmentDiagnosticEntity?
 
+    @Query("DELETE FROM asr_segment_diagnostics WHERE recordId = :recordId")
+    suspend fun deleteForRecord(recordId: Long): Int
+
+    @Query("DELETE FROM asr_segment_diagnostics WHERE recordId IN (:recordIds)")
+    suspend fun deleteForRecords(recordIds: List<Long>): Int
+
     @Query("SELECT * FROM asr_segment_diagnostics ORDER BY captureStartedAt DESC")
     fun observeAll(): Flow<List<AsrSegmentDiagnosticEntity>>
 

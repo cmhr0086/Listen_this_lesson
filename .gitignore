@@ -21,3 +21,7 @@ keystore.properties
 *.keystore
 /.codex-remote-attachments/
 /dist/
+/sync-server/.venv/
+/sync-server/.pytest_cache/
+/sync-server/**/__pycache__/
+/sync-server/*.db

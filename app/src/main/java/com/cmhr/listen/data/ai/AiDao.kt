@@ -26,6 +26,7 @@ interface AiDao {
         FROM ai_results r
         INNER JOIN records cr ON cr.id = r.recordId
         INNER JOIN courses c ON c.id = cr.courseId
+        WHERE cr.deleted = 0 AND c.deleted = 0
         UNION ALL
         SELECT 'CONVERSATION' AS kind, a.id AS id, a.recordId AS recordId,
                COALESCE(c.name, '通用对话') AS courseName, a.title AS title,
@@ -34,19 +35,20 @@ interface AiDao {
         LEFT JOIN records cr ON cr.id = a.recordId
         LEFT JOIN courses c ON c.id = cr.courseId
         WHERE a.originResultId IS NULL
+          AND (a.recordId IS NULL OR (cr.deleted = 0 AND c.deleted = 0))
         ORDER BY updatedAt DESC
     """)
     fun globalTimeline(): Flow<List<AiTimelineRow>>
 
     @Insert suspend fun insertResult(result: AiResultEntity): Long
     @Insert suspend fun insertResultSegments(links: List<AiResultSegmentEntity>)
-    @Query("SELECT * FROM ai_results WHERE recordId = :recordId ORDER BY createdAt DESC")
+    @Query("SELECT r.* FROM ai_results r INNER JOIN records s ON s.id = r.recordId WHERE r.recordId = :recordId AND s.deleted = 0 ORDER BY r.createdAt DESC")
     fun results(recordId: Long): Flow<List<AiResultEntity>>
-    @Query("SELECT * FROM ai_results ORDER BY createdAt DESC")
+    @Query("SELECT r.* FROM ai_results r INNER JOIN records s ON s.id = r.recordId WHERE s.deleted = 0 ORDER BY r.createdAt DESC")
     fun allResults(): Flow<List<AiResultEntity>>
-    @Query("SELECT * FROM ai_results WHERE id = :id") fun result(id: Long): Flow<AiResultEntity?>
-    @Query("SELECT * FROM ai_results WHERE id = :id") suspend fun resultOnce(id: Long): AiResultEntity?
-    @Query("SELECT t.* FROM transcript_segments t INNER JOIN ai_result_segments l ON l.segmentId = t.id WHERE l.resultId = :resultId ORDER BY t.sequenceNumber ASC, t.startTime ASC, t.id ASC")
+    @Query("SELECT r.* FROM ai_results r INNER JOIN records s ON s.id = r.recordId WHERE r.id = :id AND s.deleted = 0") fun result(id: Long): Flow<AiResultEntity?>
+    @Query("SELECT r.* FROM ai_results r INNER JOIN records s ON s.id = r.recordId WHERE r.id = :id AND s.deleted = 0") suspend fun resultOnce(id: Long): AiResultEntity?
+    @Query("SELECT t.* FROM transcript_segments t INNER JOIN ai_result_segments l ON l.segmentId = t.id WHERE l.resultId = :resultId AND t.deleted = 0 ORDER BY t.sequenceNumber ASC, t.startTime ASC, t.id ASC")
     fun resultSourceSegments(resultId: Long): Flow<List<TranscriptEntity>>
     @Query("UPDATE ai_results SET status = 'PENDING', output = NULL, reasoningContent = '', correctionPayload = NULL, errorMessage = NULL, finishedAt = NULL WHERE id = :id")
     suspend fun markResultPending(id: Long)
@@ -60,15 +62,15 @@ interface AiDao {
 
     @Insert suspend fun insertConversation(conversation: AiConversationEntity): Long
     @Insert suspend fun insertConversationSegments(links: List<AiConversationSegmentEntity>)
-    @Query("SELECT * FROM ai_conversations WHERE recordId = :recordId AND originResultId IS NULL ORDER BY updatedAt DESC")
+    @Query("SELECT a.* FROM ai_conversations a INNER JOIN records s ON s.id = a.recordId WHERE a.recordId = :recordId AND a.originResultId IS NULL AND s.deleted = 0 ORDER BY a.updatedAt DESC")
     fun conversations(recordId: Long): Flow<List<AiConversationEntity>>
-    @Query("SELECT * FROM ai_conversations WHERE originResultId IS NULL ORDER BY updatedAt DESC")
+    @Query("SELECT a.* FROM ai_conversations a LEFT JOIN records s ON s.id = a.recordId WHERE a.originResultId IS NULL AND (a.recordId IS NULL OR s.deleted = 0) ORDER BY a.updatedAt DESC")
     fun allConversations(): Flow<List<AiConversationEntity>>
-    @Query("SELECT * FROM ai_conversations WHERE id = :id") fun conversation(id: Long): Flow<AiConversationEntity?>
-    @Query("SELECT * FROM ai_conversations WHERE id = :id") suspend fun conversationOnce(id: Long): AiConversationEntity?
-    @Query("SELECT * FROM ai_conversations WHERE originResultId = :resultId LIMIT 1") fun conversationForResult(resultId: Long): Flow<AiConversationEntity?>
-    @Query("SELECT * FROM ai_conversations WHERE originResultId = :resultId LIMIT 1") suspend fun conversationForResultOnce(resultId: Long): AiConversationEntity?
-    @Query("SELECT t.* FROM transcript_segments t INNER JOIN ai_conversation_segments l ON l.segmentId = t.id WHERE l.conversationId = :conversationId ORDER BY t.sequenceNumber ASC, t.startTime ASC, t.id ASC")
+    @Query("SELECT a.* FROM ai_conversations a LEFT JOIN records s ON s.id = a.recordId WHERE a.id = :id AND (a.recordId IS NULL OR s.deleted = 0)") fun conversation(id: Long): Flow<AiConversationEntity?>
+    @Query("SELECT a.* FROM ai_conversations a LEFT JOIN records s ON s.id = a.recordId WHERE a.id = :id AND (a.recordId IS NULL OR s.deleted = 0)") suspend fun conversationOnce(id: Long): AiConversationEntity?
+    @Query("SELECT a.* FROM ai_conversations a LEFT JOIN records s ON s.id = a.recordId WHERE a.originResultId = :resultId AND (a.recordId IS NULL OR s.deleted = 0) LIMIT 1") fun conversationForResult(resultId: Long): Flow<AiConversationEntity?>
+    @Query("SELECT a.* FROM ai_conversations a LEFT JOIN records s ON s.id = a.recordId WHERE a.originResultId = :resultId AND (a.recordId IS NULL OR s.deleted = 0) LIMIT 1") suspend fun conversationForResultOnce(resultId: Long): AiConversationEntity?
+    @Query("SELECT t.* FROM transcript_segments t INNER JOIN ai_conversation_segments l ON l.segmentId = t.id WHERE l.conversationId = :conversationId AND t.deleted = 0 ORDER BY t.sequenceNumber ASC, t.startTime ASC, t.id ASC")
     fun conversationSourceSegments(conversationId: Long): Flow<List<TranscriptEntity>>
     @Query("UPDATE ai_conversations SET updatedAt = :updatedAt WHERE id = :id") suspend fun touchConversation(id: Long, updatedAt: Long)
     @Query("UPDATE ai_conversations SET title = :title, updatedAt = :updatedAt WHERE id = :id") suspend fun renameConversation(id: Long, title: String, updatedAt: Long)

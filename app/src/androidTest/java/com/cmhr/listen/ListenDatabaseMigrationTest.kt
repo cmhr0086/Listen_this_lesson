@@ -15,6 +15,8 @@ import com.cmhr.listen.data.course.ClassRecordEntity
 import com.cmhr.listen.data.course.CourseEntity
 import com.cmhr.listen.data.course.CourseRepository
 import com.cmhr.listen.data.course.ListenDatabase
+import com.cmhr.listen.data.course.SyncStatus
+import com.cmhr.listen.data.course.TranscriptEntity
 import com.cmhr.listen.data.stt.ACTIVE_ASR_STATES
 import com.cmhr.listen.data.stt.AsrClockBasis
 import com.cmhr.listen.data.stt.AsrLifecycleState
@@ -27,6 +29,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
 class ListenDatabaseMigrationTest {
@@ -37,7 +40,7 @@ class ListenDatabaseMigrationTest {
     @After fun after() { context.deleteDatabase(databaseName) }
 
     @Test
-    fun migratesV1ThroughV9AndSupportsCorrectionsReasoningGeneralConversationsAndAsrDiagnostics() = runBlocking {
+    fun migratesV1ThroughV10AndSupportsCorrectionsReasoningGeneralConversationsAndAsrDiagnostics() = runBlocking {
         val configuration = SupportSQLiteOpenHelper.Configuration.builder(context)
             .name(databaseName)
             .callback(object : SupportSQLiteOpenHelper.Callback(1) {
@@ -68,7 +71,8 @@ class ListenDatabaseMigrationTest {
                 ListenDatabase.MIGRATION_5_6,
                 ListenDatabase.MIGRATION_6_7,
                 ListenDatabase.MIGRATION_7_8,
-                ListenDatabase.MIGRATION_8_9
+                ListenDatabase.MIGRATION_8_9,
+                ListenDatabase.MIGRATION_9_10
             )
             .build()
         try {
@@ -79,6 +83,16 @@ class ListenDatabaseMigrationTest {
             assertEquals(null, database.transcriptDao().segments(1).first().single().correctedText)
             assertEquals(null, database.transcriptDao().segments(1).first().single().sourceSegmentId)
             assertEquals(null, database.transcriptDao().segments(1).first().single().sequenceNumber)
+            val migratedSession = database.recordDao().record(1).first()!!
+            val migratedSegment = database.transcriptDao().segments(1).first().single()
+            UUID.fromString(migratedSession.sessionId)
+            UUID.fromString(migratedSegment.segmentId)
+            assertEquals(migratedSession.sessionId, migratedSegment.sessionId)
+            assertEquals(2_000L, migratedSession.createdAt)
+            assertEquals(3_000L, migratedSession.updatedAt)
+            assertEquals(2_600L, migratedSegment.createdAt)
+            assertEquals(SyncStatus.PENDING.name, migratedSession.syncStatus)
+            assertEquals(SyncStatus.PENDING.name, migratedSegment.syncStatus)
 
             repeat(6) { index ->
                 database.asrDiagnosticsDao().insertSegment(
@@ -141,6 +155,80 @@ class ListenDatabaseMigrationTest {
             CourseRepository(database).deleteRecord(1)
             assertTrue(aiRepository.results(1).first().isEmpty())
             assertEquals("通用测试", aiRepository.conversationOnce(generalConversationId)?.title)
+        } finally {
+            database.close()
+        }
+    }
+
+    @Test
+    fun localSessionAndSegmentMutationsBecomePendingAndDeletesAreSoft() = runBlocking {
+        val database = Room.inMemoryDatabaseBuilder(context, ListenDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        try {
+            val courseId = database.courseDao().insert(CourseEntity(name = "同步测试", createdAt = 1_000))
+            val sessionId = database.recordDao().insert(
+                ClassRecordEntity(
+                    courseId = courseId,
+                    name = "原名称",
+                    startedAt = 2_000,
+                    createdAt = 2_000,
+                    updatedAt = 2_000,
+                    syncStatus = SyncStatus.SYNCED.name
+                )
+            )
+            val sessionUuid = database.recordDao().sessionId(sessionId)!!
+            UUID.fromString(sessionUuid)
+
+            database.recordDao().rename(sessionId, "新名称", 3_000)
+            val renamed = database.recordDao().record(sessionId).first()!!
+            assertEquals(3_000L, renamed.updatedAt)
+            assertEquals(SyncStatus.PENDING.name, renamed.syncStatus)
+
+            val localSegmentId = database.transcriptDao().insert(
+                TranscriptEntity(
+                    recordId = sessionId,
+                    sessionId = sessionUuid,
+                    startTime = 2_100,
+                    endTime = 2_600,
+                    audioDurationMs = 500,
+                    recognitionDurationMs = 100,
+                    text = "原始文本",
+                    correctedText = "纠正文本",
+                    createdAt = 2_600,
+                    updatedAt = 2_600,
+                    syncStatus = SyncStatus.SYNCED.name
+                )
+            )
+            val inserted = database.transcriptDao().segments(sessionId).first().single()
+            UUID.fromString(inserted.segmentId)
+            assertEquals(sessionUuid, inserted.sessionId)
+
+            database.transcriptDao().restoreOriginal(localSegmentId, 4_000)
+            val restored = database.transcriptDao().segments(sessionId).first().single()
+            assertEquals(4_000L, restored.updatedAt)
+            assertEquals(SyncStatus.PENDING.name, restored.syncStatus)
+
+            CourseRepository(database).deleteRecord(sessionId)
+            assertEquals(null, database.recordDao().record(sessionId).first())
+            assertTrue(database.transcriptDao().segments(sessionId).first().isEmpty())
+
+            database.openHelper.readableDatabase.query(
+                "SELECT deleted, syncStatus FROM records WHERE id = ?",
+                arrayOf(sessionId.toString())
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(1, cursor.getInt(0))
+                assertEquals(SyncStatus.PENDING.name, cursor.getString(1))
+            }
+            database.openHelper.readableDatabase.query(
+                "SELECT deleted, syncStatus FROM transcript_segments WHERE id = ?",
+                arrayOf(localSegmentId.toString())
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(1, cursor.getInt(0))
+                assertEquals(SyncStatus.PENDING.name, cursor.getString(1))
+            }
         } finally {
             database.close()
         }
@@ -361,7 +449,7 @@ class ListenDatabaseMigrationTest {
         }
 
         val database = Room.databaseBuilder(context, ListenDatabase::class.java, databaseName)
-            .addMigrations(ListenDatabase.MIGRATION_8_9)
+            .addMigrations(ListenDatabase.MIGRATION_8_9, ListenDatabase.MIGRATION_9_10)
             .build()
         try {
             val diagnostic = database.asrDiagnosticsDao().segment("legacy-clock")

@@ -115,6 +115,7 @@ class AiSourceSnapshotTest {
     private fun segment(id: Long, start: Long, text: String) = TranscriptEntity(
         id = id,
         recordId = 1,
+        sessionId = "test-session",
         startTime = start,
         endTime = start + 500,
         audioDurationMs = 500,
