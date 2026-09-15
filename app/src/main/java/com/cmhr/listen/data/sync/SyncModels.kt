@@ -70,6 +70,14 @@ data class SyncSummary(
     val serverTime: Long
 )
 
+data class SyncProgress(
+    val batchNumber: Int,
+    val completedSessions: Int,
+    val totalSessions: Int,
+    val completedSegments: Int,
+    val totalSegments: Int
+)
+
 interface SyncStateStore {
     suspend fun getOrCreateDeviceId(): String
     suspend fun readSyncApiToken(): String?

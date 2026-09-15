@@ -55,6 +55,7 @@ import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Image
+import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -101,6 +102,7 @@ import com.cmhr.listen.data.ai.PendingAiAttachment
 import com.cmhr.listen.data.ai.AiAttachmentEntity
 import com.cmhr.listen.data.ai.AiAttachmentKind
 import com.cmhr.listen.data.ai.AiAttachmentStore
+import com.cmhr.listen.data.ai.CameraCaptureTarget
 import com.cmhr.listen.data.ai.AiActionType
 import com.cmhr.listen.data.ai.AiRequestStatus
 import com.cmhr.listen.data.ai.AiStreamPhase
@@ -900,6 +902,7 @@ private fun AiChatComposer(
     var textFieldFocused by remember { mutableStateOf(false) }
     var restoreImeAfterPicker by remember { mutableStateOf(false) }
     var lastMenuDismissedAt by remember { mutableStateOf(0L) }
+    var cameraCaptureTarget by remember { mutableStateOf<CameraCaptureTarget?>(null) }
     val focusRequester = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
     val bottomChrome = bottomChromeLayout()
@@ -914,8 +917,8 @@ private fun AiChatComposer(
             keyboard?.show()
         }
     }
-    fun accept(uri: android.net.Uri?, kind: AiAttachmentKind) {
-        if (uri == null) return
+    fun accept(uri: android.net.Uri?, kind: AiAttachmentKind, afterPrepared: () -> Unit = {}) {
+        if (uri == null) { afterPrepared(); return }
         model.prepareAttachment(uri, kind) { attachment ->
             if (attachment != null) {
                 val current = latestAttachments
@@ -929,7 +932,19 @@ private fun AiChatComposer(
                     }
                 } else model.discardAttachment(attachment)
             }
+            afterPrepared()
         }
+    }
+    val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { captured ->
+        val target = cameraCaptureTarget
+        cameraCaptureTarget = null
+        if (captured && target != null) {
+            accept(target.uri, AiAttachmentKind.IMAGE) { model.discardCameraCapture(target) }
+        } else if (target != null) {
+            model.discardCameraCapture(target)
+        }
+        if (restoreImeAfterPicker) refocusRequest++
+        restoreImeAfterPicker = false
     }
     val imageLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         accept(uri, AiAttachmentKind.IMAGE)
@@ -990,6 +1005,25 @@ private fun AiChatComposer(
                             modifier = Modifier.widthIn(min = 200.dp).testTag("attachment-menu"),
                             properties = PopupProperties(focusable = false)
                         ) {
+                            DropdownMenuItem(
+                                text = { Text("拍照") },
+                                leadingIcon = { Icon(Icons.Outlined.PhotoCamera, contentDescription = null) },
+                                onClick = {
+                                    restoreImeAfterPicker = textFieldFocused && imeVisible
+                                    attachmentMenuExpanded = false
+                                    runCatching {
+                                        model.createCameraCaptureTarget().also { target ->
+                                            cameraCaptureTarget = target
+                                            cameraLauncher.launch(target.uri)
+                                        }
+                                    }.onFailure { error ->
+                                        cameraCaptureTarget?.let(model::discardCameraCapture)
+                                        cameraCaptureTarget = null
+                                        model.reportError(error.message ?: "无法启动相机。")
+                                    }
+                                },
+                                modifier = Modifier.testTag("take-photo-menu-item")
+                            )
                             DropdownMenuItem(
                                 text = { Text("选择图片") },
                                 leadingIcon = { Icon(Icons.Outlined.Image, contentDescription = null) },

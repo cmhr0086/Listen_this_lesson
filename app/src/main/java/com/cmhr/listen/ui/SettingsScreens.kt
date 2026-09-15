@@ -157,7 +157,10 @@ fun CloudSyncSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
     val syncing = state.cloudSyncState is CloudSyncRunState.Syncing
     val statusText = when (val syncState = state.cloudSyncState) {
         CloudSyncRunState.Idle -> "等待手动同步"
-        CloudSyncRunState.Syncing -> "正在上传本地变更并获取服务端增量…"
+        CloudSyncRunState.Syncing -> state.cloudSyncProgress?.let { progress ->
+            "正在上传本地变更：Session ${progress.completedSessions} / ${progress.totalSessions}，" +
+                "Segment ${progress.completedSegments} / ${progress.totalSegments}（第 ${progress.batchNumber} 批）"
+        } ?: "正在准备本地变更…"
         is CloudSyncRunState.Success -> with(syncState.summary) {
             "同步成功：上传 $uploadedSessions 个 Session、$uploadedSegments 个 Segment；接收 $receivedSessions 个 Session、$receivedSegments 个 Segment。"
         }

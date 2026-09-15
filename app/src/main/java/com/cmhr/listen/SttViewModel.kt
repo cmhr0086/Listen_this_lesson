@@ -25,6 +25,8 @@ import com.cmhr.listen.data.stt.AsrPromptPolicy
 import com.cmhr.listen.data.stt.AsrQueueRuntime
 import com.cmhr.listen.data.stt.AsrRuntimeSummary
 import com.cmhr.listen.data.stt.AsrSegmentDiagnosticEntity
+import com.cmhr.listen.recording.CaptureMode
+import com.cmhr.listen.recording.ClassroomCaptureRuntime
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -53,7 +55,8 @@ data class ListeningUiState(
     val currentCourseName: String? = null,
     val currentRecordName: String? = null,
     val asrHealth: AsrHealthSnapshot? = null,
-    val error: String? = null
+    val error: String? = null,
+    val captureMode: CaptureMode? = null
 )
 
 class SttViewModel(application: Application) : AndroidViewModel(application) {
@@ -62,6 +65,7 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
     private val appSettingsRepository = AppSettingsRepository(application)
     private val courseRepository = CourseRepository(ListenDatabase.get(application))
     private val asrRuntime = AsrQueueRuntime.get(application)
+    private val captureRuntime = ClassroomCaptureRuntime.get(application)
     private val _uiState = MutableStateFlow(ListeningUiState())
     val uiState: StateFlow<ListeningUiState> = _uiState.asStateFlow()
     private val _vadDiagnosticsState = MutableStateFlow(VadDiagnosticsUiState())
@@ -87,6 +91,24 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         asrRuntime.kick()
+        viewModelScope.launch {
+            captureRuntime.state.collect { capture ->
+                if (capture.mode == CaptureMode.RECORD_ONLY || capture.error != null || (_uiState.value.captureMode == CaptureMode.RECORD_ONLY && !capture.active)) {
+                    _uiState.update { current ->
+                        current.copy(
+                            isListening = capture.active,
+                            activeRecordId = capture.recordId,
+                            listeningStartedAtElapsedRealtimeMs = capture.startedElapsedMs,
+                            currentCourseName = capture.courseName ?: current.currentCourseName,
+                            currentRecordName = capture.recordName ?: current.currentRecordName,
+                            isSpeechDetected = false,
+                            captureMode = capture.mode,
+                            error = capture.error ?: current.error
+                        )
+                    }
+                }
+            }
+        }
         viewModelScope.launch {
             asrRuntime.observeRuntimeSummary().collect { summary ->
                 _uiState.update {
@@ -149,11 +171,16 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
                 return
             }
         }
+        if (!captureRuntime.tryClaimRealtime(recordId)) {
+            _uiState.update { it.copy(error = "当前已有录音或识别任务正在运行。") }
+            return
+        }
 
         listeningJob = viewModelScope.launch {
             val record = courseRepository.record(recordId).first()
             if (record == null) {
                 _uiState.update { it.copy(error = "课堂记录不存在或已被删除。") }
+                captureRuntime.releaseRealtime()
                 return@launch
             }
             val course = courseRepository.course(record.courseId).first()
@@ -181,9 +208,11 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
                     configuredVadConfig = currentVadConfig,
                     currentCourseName = course?.name,
                     currentRecordName = record.name,
-                    error = null
+                    error = null,
+                    captureMode = CaptureMode.REALTIME_ASR
                 )
             }
+            captureRuntime.updateRealtime(course?.name, record.name, _uiState.value.listeningStartedAtElapsedRealtimeMs ?: SystemClock.elapsedRealtime())
             _vadDiagnosticsState.update {
                 it.copy(
                     vadProbability = 0f,
@@ -305,6 +334,7 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
                 currentCoursePromptModeOverride = null
                 withContext(NonCancellable) { courseRepository.finishRecord(recordId) }
                 ListeningForegroundService.stop(getApplication())
+                captureRuntime.releaseRealtime()
                 sessionRecordId = null
                 currentCapturingSegmentId = null
                 currentCaptureStartedAt = null
@@ -314,7 +344,8 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
                         isListening = false,
                         activeRecordId = null,
                         listeningStartedAtElapsedRealtimeMs = null,
-                        isSpeechDetected = false
+                        isSpeechDetected = false,
+                        captureMode = null
                     )
                 }
                 _vadDiagnosticsState.update {
@@ -333,8 +364,20 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
 
     fun stopListening() {
         _vadDiagnosticsState.update { it.copy(segmentEndReason = "用户停止监听") }
-        listeningJob?.cancel()
-        listeningJob = null
+        if (captureRuntime.state.value.mode == CaptureMode.RECORD_ONLY) captureRuntime.stop()
+        else {
+            listeningJob?.cancel()
+            listeningJob = null
+        }
+    }
+
+    fun startRecordOnly(recordId: Long) {
+        if (captureRuntime.isBusy()) {
+            _uiState.update { it.copy(error = "当前已有录音或识别任务正在运行。") }
+            return
+        }
+        _uiState.update { it.copy(error = null) }
+        captureRuntime.startRecordOnly(recordId)
     }
 
     fun reportPermissionDenied() {

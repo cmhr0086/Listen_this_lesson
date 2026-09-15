@@ -32,6 +32,7 @@ import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SmartToy
 import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExtendedFloatingActionButton
@@ -78,6 +79,8 @@ import com.cmhr.listen.AppNavigationRequests
 import com.cmhr.listen.CourseViewModel
 import com.cmhr.listen.SettingsViewModel
 import com.cmhr.listen.SttViewModel
+import com.cmhr.listen.RecordingViewModel
+import com.cmhr.listen.recording.CaptureMode
 import com.cmhr.listen.data.ai.AiActionType
 import com.cmhr.listen.data.stt.AsrDiagnosticStateCounts
 import com.cmhr.listen.data.stt.AsrRuntimeSummary
@@ -170,7 +173,8 @@ fun ListenApp(
     stt: SttViewModel = viewModel(),
     courses: CourseViewModel = viewModel(),
     settings: SettingsViewModel = viewModel(),
-    ai: AiViewModel = viewModel()
+    ai: AiViewModel = viewModel(),
+    recordings: RecordingViewModel = viewModel()
 ) {
     val nav = rememberNavController()
     val backStackEntry by nav.currentBackStackEntryAsState()
@@ -179,12 +183,15 @@ fun ListenApp(
     val courseState by courses.uiState.collectAsStateWithLifecycle()
     val settingsState by settings.uiState.collectAsStateWithLifecycle()
     val aiState by ai.uiState.collectAsStateWithLifecycle()
+    val recordingState by recordings.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
     var creatingCourse by remember { mutableStateOf(false) }
     var creatingRecordForCourse by remember { mutableStateOf<Long?>(null) }
     var newName by remember { mutableStateOf("") }
     var pendingPermissionRecordId by remember { mutableStateOf<Long?>(null) }
+    var pendingCaptureMode by remember { mutableStateOf(CaptureMode.REALTIME_ASR) }
+    var modeSelectionRecordId by remember { mutableStateOf<Long?>(null) }
     var recordMenuExpanded by remember { mutableStateOf(false) }
     var showSelectionAiActions by remember { mutableStateOf(false) }
     var editingRecordCoursePrompt by remember { mutableStateOf(false) }
@@ -266,15 +273,50 @@ fun ListenApp(
 
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
         val recordId = pendingPermissionRecordId
+        val captureMode = pendingCaptureMode
         pendingPermissionRecordId = null
         val microphoneGranted = grants[Manifest.permission.RECORD_AUDIO]
             ?: (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
         val notificationGranted = Build.VERSION.SDK_INT < 33 || grants[Manifest.permission.POST_NOTIFICATIONS]
             ?: (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED)
         if (microphoneGranted && recordId != null) {
-            stt.startListening(recordId)
+            if (captureMode == CaptureMode.RECORD_ONLY) stt.startRecordOnly(recordId) else stt.startListening(recordId)
             if (!notificationGranted) stt.reportNotificationPermissionDenied()
         } else stt.reportPermissionDenied()
+    }
+
+    modeSelectionRecordId?.let { selectedRecordId ->
+        AlertDialog(
+            onDismissRequest = { modeSelectionRecordId = null },
+            title = { Text("识别模式") },
+            text = { Text("实时识别会边录边识别；仅录音不会调用 ASR，可稍后在详情页补识别。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingCaptureMode = CaptureMode.REALTIME_ASR
+                    pendingPermissionRecordId = selectedRecordId
+                    modeSelectionRecordId = null
+                    val permissions = buildList {
+                        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) add(Manifest.permission.RECORD_AUDIO)
+                        if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) add(Manifest.permission.POST_NOTIFICATIONS)
+                    }
+                    if (permissions.isEmpty()) { pendingPermissionRecordId = null; stt.startListening(selectedRecordId) }
+                    else permissionLauncher.launch(permissions.toTypedArray())
+                }) { Text("实时识别") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    pendingCaptureMode = CaptureMode.RECORD_ONLY
+                    pendingPermissionRecordId = selectedRecordId
+                    modeSelectionRecordId = null
+                    val permissions = buildList {
+                        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) add(Manifest.permission.RECORD_AUDIO)
+                        if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) add(Manifest.permission.POST_NOTIFICATIONS)
+                    }
+                    if (permissions.isEmpty()) { pendingPermissionRecordId = null; stt.startRecordOnly(selectedRecordId) }
+                    else permissionLauncher.launch(permissions.toTypedArray())
+                }) { Text("仅录音") }
+            }
+        )
     }
 
     if (creatingCourse) NameDialog(
@@ -510,19 +552,7 @@ fun ListenApp(
                         is FabState.NewRecord -> { newName = ""; creatingRecordForCourse = action.courseId }
                         is FabState.StopListening -> stt.stopListening()
                         is FabState.StartListening -> {
-                            val microphoneGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-                            val notificationGranted = Build.VERSION.SDK_INT < 33 ||
-                                ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
-                            if (microphoneGranted && notificationGranted) {
-                                stt.startListening(action.recordId)
-                            } else {
-                                pendingPermissionRecordId = action.recordId
-                                val permissions = buildList {
-                                    if (!microphoneGranted) add(Manifest.permission.RECORD_AUDIO)
-                                    if (Build.VERSION.SDK_INT >= 33 && !notificationGranted) add(Manifest.permission.POST_NOTIFICATIONS)
-                                }
-                                permissionLauncher.launch(permissions.toTypedArray())
-                            }
+                            modeSelectionRecordId = action.recordId
                         }
                         FabState.None -> Unit
                     }
@@ -591,6 +621,7 @@ fun ListenApp(
             }
             composable("record/{recordId}") { entry ->
                 val id = entry.arguments?.getString("recordId")?.toLongOrNull() ?: return@composable
+                LaunchedEffect(id) { recordings.selectRecord(id) }
                 RecordDetailsScreen(
                     recordId = id,
                     state = courseState,
@@ -603,7 +634,10 @@ fun ListenApp(
                     requestedFullAction = requestedFullAiAction,
                     consumeFullAction = { requestedFullAiAction = null },
                     openResult = { nav.navigate("record/$id/ai-result/$it") },
-                    openConversation = { nav.navigate("ai-conversation/$it") }
+                    openConversation = { nav.navigate("ai-conversation/$it") },
+                    recordings = recordingState,
+                    startOfflineRecognition = recordings::startRecognition,
+                    stopOfflineRecognition = recordings::stopRecognition
                 )
             }
             composable("settings") {

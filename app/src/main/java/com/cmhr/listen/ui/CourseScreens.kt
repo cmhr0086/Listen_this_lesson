@@ -27,6 +27,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -53,6 +54,11 @@ import com.cmhr.listen.AiViewModel
 import com.cmhr.listen.CourseUiState
 import com.cmhr.listen.CourseViewModel
 import com.cmhr.listen.ListeningUiState
+import com.cmhr.listen.RecordingUiState
+import com.cmhr.listen.data.recording.RecordingEntity
+import com.cmhr.listen.data.recording.RecordingState
+import com.cmhr.listen.recording.CaptureMode
+import com.cmhr.listen.audio.PcmRecorder
 import com.cmhr.listen.data.ai.AiActionType
 import com.cmhr.listen.data.course.ClassRecordEntity
 import com.cmhr.listen.data.course.CourseEntity
@@ -175,7 +181,10 @@ fun RecordDetailsScreen(
     requestedFullAction: AiActionType?,
     consumeFullAction: () -> Unit,
     openResult: (Long) -> Unit,
-    openConversation: (Long) -> Unit
+    openConversation: (Long) -> Unit,
+    recordings: RecordingUiState,
+    startOfflineRecognition: (String) -> Unit,
+    stopOfflineRecognition: () -> Unit
 ) {
     val record = state.selectedRecord?.takeIf { it.id == recordId }
     val course = record?.let { selected -> state.courses.firstOrNull { it.id == selected.courseId } }
@@ -251,6 +260,12 @@ fun RecordDetailsScreen(
                 }
                 listening.error?.let { item("listening-error") { ErrorCard(it) } }
                 aiState.error?.let { item("ai-error") { ErrorCard(it) } }
+                if (recordings.recordings.isNotEmpty()) {
+                    item("recordings-heading") { Text("本地录音", style = MaterialTheme.typography.titleLarge) }
+                    items(recordings.recordings, key = { "recording-${it.recordingId}" }) { recording ->
+                        RecordingCard(recording, recordings, startOfflineRecognition, stopOfflineRecognition)
+                    }
+                }
                 item("segment-heading") { Text("识别内容", style = MaterialTheme.typography.titleLarge) }
                 if (segments.isEmpty()) item("empty-segments") { Text("该课堂记录暂无识别内容。") }
                 items(displayedSegments, key = { "segment-${it.id}" }) { segment ->
@@ -275,6 +290,7 @@ fun RecordDetailsScreen(
 internal fun CompactListeningStatus(listening: ListeningUiState, active: Boolean) {
     val status = when {
         !active -> "未监听"
+        listening.captureMode == CaptureMode.RECORD_ONLY -> "仅录音，不调用 ASR"
         listening.isSpeechDetected -> "正在收音"
         listening.isRecognizing -> "正在识别"
         else -> "等待语音"
@@ -289,6 +305,53 @@ internal fun CompactListeningStatus(listening: ListeningUiState, active: Boolean
             Text("检测到语音：${if (active && listening.isSpeechDetected) "是" else "否"}", style = MaterialTheme.typography.bodySmall)
         }
     }
+}
+
+@Composable
+private fun RecordingCard(
+    recording: RecordingEntity,
+    state: RecordingUiState,
+    startRecognition: (String) -> Unit,
+    stopRecognition: () -> Unit
+) {
+    val runtime = state.processing
+    val active = runtime.activeRecordingId == recording.recordingId
+    val processed = if (active) runtime.processedFrames else recording.processedFrames
+    val total = recording.totalFrames.coerceAtLeast(1)
+    val progress = (processed.toFloat() / total).coerceIn(0f, 1f)
+    Card(Modifier.fillMaxWidth().testTag("recording-${recording.recordingId}")) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                when (recording.recordingState) {
+                    RecordingState.RECORDING -> "正在录音"
+                    RecordingState.RECORDED -> "待识别"
+                    RecordingState.PROCESSING -> "正在识别"
+                    RecordingState.COMPLETED -> "识别完成"
+                    RecordingState.FAILED -> "识别未完成"
+                },
+                style = MaterialTheme.typography.titleMedium
+            )
+            Text("本地录音 ${formatClock(recording.durationMs)}", style = MaterialTheme.typography.bodyMedium)
+            if (recording.recordingState == RecordingState.PROCESSING || recording.recordingState == RecordingState.FAILED) {
+                LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+                Text("${formatClock(processed * 1_000 / PcmRecorder.SAMPLE_RATE_HZ)} / ${formatClock(recording.durationMs)} (${(progress * 100).toInt()}%)", style = MaterialTheme.typography.bodySmall)
+            }
+            recording.errorMessage?.takeIf { it.isNotBlank() }?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            state.processing.error?.takeIf { active }?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            when {
+                active -> OutlinedButton(onClick = stopRecognition) { Text("停止识别") }
+                recording.recordingState == RecordingState.RECORDED -> Button(onClick = { startRecognition(recording.recordingId) }) { Text("开始识别") }
+                recording.recordingState == RecordingState.FAILED -> Button(onClick = { startRecognition(recording.recordingId) }) { Text("继续识别") }
+                else -> Unit
+            }
+        }
+    }
+}
+
+private fun formatClock(milliseconds: Long): String {
+    val seconds = milliseconds.coerceAtLeast(0) / 1_000
+    return if (seconds >= 3600) String.format(Locale.US, "%02d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60)
+    else String.format(Locale.US, "%02d:%02d", seconds / 60, seconds % 60)
 }
 
 @Composable

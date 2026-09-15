@@ -15,6 +15,8 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.cmhr.listen.data.stt.AsrQueueRuntime
+import com.cmhr.listen.recording.ClassroomCaptureRuntime
+import com.cmhr.listen.recording.CaptureMode
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 
@@ -26,6 +28,7 @@ object ListeningControlBus {
 
 class ListeningForegroundService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
+    private var recordOnlyActive = false
 
     override fun onCreate() {
         super.onCreate()
@@ -41,7 +44,8 @@ class ListeningForegroundService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val request = intent ?: return START_NOT_STICKY
         if (request.action == ACTION_STOP) {
-            ListeningControlBus.requestStop()
+            if (recordOnlyActive) ClassroomCaptureRuntime.get(applicationContext).stop()
+            else ListeningControlBus.requestStop()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
@@ -54,11 +58,14 @@ class ListeningForegroundService : Service() {
             recordName = request.getStringExtra(EXTRA_RECORD_NAME).orEmpty(),
             startedElapsed = request.getLongExtra(EXTRA_STARTED_ELAPSED, SystemClock.elapsedRealtime()),
             recognizing = request.getBooleanExtra(EXTRA_RECOGNIZING, false),
-            queueCount = request.getIntExtra(EXTRA_QUEUE_COUNT, 0)
+            queueCount = request.getIntExtra(EXTRA_QUEUE_COUNT, 0),
+            recordOnly = request.getBooleanExtra(EXTRA_RECORD_ONLY, false)
         )
         if (request.action == ACTION_START) {
+            recordOnlyActive = request.getBooleanExtra(EXTRA_RECORD_ONLY, false)
             acquireWakeLock()
-            AsrQueueRuntime.get(applicationContext).kick()
+            val mode = if (request.getBooleanExtra(EXTRA_RECORD_ONLY, false)) CaptureMode.RECORD_ONLY else CaptureMode.REALTIME_ASR
+            if (mode.usesAsr) AsrQueueRuntime.get(applicationContext).kick()
             ServiceCompat.startForeground(
                 this,
                 NOTIFICATION_ID,
@@ -97,7 +104,8 @@ class ListeningForegroundService : Service() {
         recordName: String,
         startedElapsed: Long,
         recognizing: Boolean,
-        queueCount: Int
+        queueCount: Int,
+        recordOnly: Boolean
     ): android.app.Notification {
         val openIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -105,13 +113,13 @@ class ListeningForegroundService : Service() {
         }
         val stopIntent = Intent(this, ListeningForegroundService::class.java).apply { action = ACTION_STOP }
         val whenWallClock = System.currentTimeMillis() - (SystemClock.elapsedRealtime() - startedElapsed).coerceAtLeast(0L)
-        val status = if (recognizing) "正在识别" else if (queueCount > 0) "等待识别（$queueCount）" else "等待语音"
+        val status = if (recordOnly) "仅录音" else if (recognizing) "正在识别" else if (queueCount > 0) "等待识别（$queueCount）" else "等待语音"
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_mic)
             .setContentTitle(courseName.ifBlank { "课堂监听中" })
             .setContentText("${recordName.ifBlank { "课堂记录" }} · $status")
             .setContentIntent(PendingIntent.getActivity(this, 10, openIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
-            .addAction(0, "停止监听", PendingIntent.getService(this, 11, stopIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
+            .addAction(0, if (recordOnly) "停止录音" else "停止监听", PendingIntent.getService(this, 11, stopIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
             .setWhen(whenWallClock)
             .setUsesChronometer(true)
             .setOngoing(true)
@@ -127,6 +135,7 @@ class ListeningForegroundService : Service() {
         private const val EXTRA_STARTED_ELAPSED = "started_elapsed"
         private const val EXTRA_RECOGNIZING = "recognizing"
         private const val EXTRA_QUEUE_COUNT = "queue_count"
+        private const val EXTRA_RECORD_ONLY = "record_only"
         private const val ACTION_START = "com.cmhr.listen.START_LISTENING_NOTIFICATION"
         private const val ACTION_UPDATE = "com.cmhr.listen.UPDATE_LISTENING_NOTIFICATION"
         private const val ACTION_STOP = "com.cmhr.listen.STOP_LISTENING"
@@ -135,6 +144,18 @@ class ListeningForegroundService : Service() {
 
         fun start(context: Context, state: ListeningUiState) {
             val intent = serviceIntent(context, state).setAction(ACTION_START)
+            ContextCompat.startForegroundService(context, intent)
+        }
+
+        fun startRecordOnly(context: Context, recordId: Long, courseName: String?, recordName: String?, startedElapsed: Long) {
+            val intent = Intent(context, ListeningForegroundService::class.java).apply {
+                action = ACTION_START
+                putExtra(EXTRA_RECORD_ID, recordId)
+                putExtra(EXTRA_COURSE_NAME, courseName)
+                putExtra(EXTRA_RECORD_NAME, recordName)
+                putExtra(EXTRA_STARTED_ELAPSED, startedElapsed)
+                putExtra(EXTRA_RECORD_ONLY, true)
+            }
             ContextCompat.startForegroundService(context, intent)
         }
 
@@ -155,6 +176,7 @@ class ListeningForegroundService : Service() {
                 putExtra(EXTRA_STARTED_ELAPSED, state.listeningStartedAtElapsedRealtimeMs ?: SystemClock.elapsedRealtime())
                 putExtra(EXTRA_RECOGNIZING, state.isRecognizing)
                 putExtra(EXTRA_QUEUE_COUNT, state.pendingQueueCount)
+                putExtra(EXTRA_RECORD_ONLY, state.captureMode == CaptureMode.RECORD_ONLY)
             }
     }
 }

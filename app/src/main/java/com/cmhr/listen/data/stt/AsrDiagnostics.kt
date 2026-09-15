@@ -382,6 +382,9 @@ interface AsrDiagnosticsDao {
     @Query("SELECT COALESCE(MAX(sequenceNumber), 0) + 1 FROM asr_segment_diagnostics WHERE recordId = :recordId")
     suspend fun nextSequenceNumber(recordId: Long): Long
 
+    @Query("UPDATE asr_segment_diagnostics SET state = CASE WHEN jobId IS NULL THEN 'QUEUED_LOCAL' ELSE 'QUEUED_SERVER' END, finishedAt = NULL, finishedElapsedMs = NULL, nextAttemptAt = NULL, failureStage = NULL, exceptionClass = NULL, safeErrorMessage = NULL WHERE segmentId = :segmentId AND state = 'FAILED' AND (wavRelativePath IS NOT NULL OR jobId IS NOT NULL)")
+    suspend fun retryFailed(segmentId: String): Int
+
     @Query("SELECT MIN(nextAttemptAt) FROM asr_segment_diagnostics WHERE state IN (:states) AND nextAttemptAt IS NOT NULL")
     suspend fun nextAttemptAt(states: List<String>): Long?
 

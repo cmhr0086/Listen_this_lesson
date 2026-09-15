@@ -21,6 +21,7 @@ import com.cmhr.listen.data.ai.AiStreamPhase
 import com.cmhr.listen.data.ai.CorrectionPayload
 import com.cmhr.listen.data.ai.CorrectionPayloadCodec
 import com.cmhr.listen.data.ai.PendingAiAttachment
+import com.cmhr.listen.data.ai.CameraCaptureTarget
 import com.cmhr.listen.data.course.ListenDatabase
 import com.cmhr.listen.data.course.TranscriptEntity
 import com.cmhr.listen.data.settings.AppSettingsRepository
@@ -239,6 +240,9 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
         }
         onReady(result.getOrNull())
     }
+
+    fun createCameraCaptureTarget(): CameraCaptureTarget = attachmentStore.createCameraCaptureTarget()
+    fun discardCameraCapture(target: CameraCaptureTarget) = attachmentStore.discardCameraCapture(target)
 
     fun discardAttachment(attachment: PendingAiAttachment) = attachmentStore.discard(attachment)
 

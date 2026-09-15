@@ -27,6 +27,9 @@ import com.cmhr.listen.data.ai.DEFAULT_CONVERSATION_PROMPT
 import com.cmhr.listen.data.stt.AsrDiagnosticsDao
 import com.cmhr.listen.data.stt.AsrNetworkEventEntity
 import com.cmhr.listen.data.stt.AsrSegmentDiagnosticEntity
+import com.cmhr.listen.data.recording.RecordingChunkEntity
+import com.cmhr.listen.data.recording.RecordingDao
+import com.cmhr.listen.data.recording.RecordingEntity
 import kotlinx.coroutines.flow.Flow
 import java.util.UUID
 
@@ -130,8 +133,11 @@ data class SessionSyncProjection(
     @Query("SELECT * FROM records WHERE id = :id AND deleted = 0") fun record(id: Long): Flow<SessionEntity?>
     @Query("SELECT sessionId FROM records WHERE id = :id AND deleted = 0") suspend fun sessionId(id: Long): String?
     @Query("SELECT * FROM records WHERE sessionId = :sessionId LIMIT 1") suspend fun sessionBySessionId(sessionId: String): SessionEntity?
-    @Query("SELECT r.*, c.name AS courseName FROM records r INNER JOIN courses c ON c.id = r.courseId WHERE r.syncStatus = 'PENDING' ORDER BY r.updatedAt, r.sessionId")
-    suspend fun pendingSessions(): List<SessionSyncProjection>
+    @Query("SELECT r.*, c.name AS courseName FROM records r INNER JOIN courses c ON c.id = r.courseId WHERE r.syncStatus = 'PENDING' ORDER BY r.updatedAt, r.id LIMIT :limit")
+    suspend fun pendingSessions(limit: Int): List<SessionSyncProjection>
+    @Query("SELECT COUNT(*) FROM records WHERE syncStatus = 'PENDING'") suspend fun pendingSessionCount(): Int
+    @Query("SELECT sessionId FROM records WHERE sessionId IN (:sessionIds) AND syncStatus = 'PENDING'")
+    suspend fun pendingSessionIds(sessionIds: List<String>): List<String>
     @Insert suspend fun insert(session: SessionEntity): Long
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertRemote(session: SessionEntity): Long
     @Query("UPDATE records SET name = :name, updatedAt = :updatedAt, syncStatus = 'PENDING' WHERE id = :id AND deleted = 0") suspend fun rename(id: Long, name: String, updatedAt: Long)
@@ -163,7 +169,12 @@ data class SessionSyncProjection(
     @Query("SELECT id FROM transcript_segments WHERE sourceSegmentId = :sourceSegmentId LIMIT 1")
     suspend fun idForSourceSegment(sourceSegmentId: String): Long?
     @Query("SELECT * FROM transcript_segments WHERE segmentId = :segmentId LIMIT 1") suspend fun segmentBySegmentId(segmentId: String): SegmentEntity?
-    @Query("SELECT * FROM transcript_segments WHERE syncStatus = 'PENDING' ORDER BY updatedAt, segmentId") suspend fun pendingSegments(): List<SegmentEntity>
+    @Query("SELECT COALESCE(MAX(sequenceNumber), 0) + 1 FROM transcript_segments WHERE recordId = :recordId") suspend fun nextSequenceNumber(recordId: Long): Long
+    @Query("SELECT t.* FROM transcript_segments t INNER JOIN records r ON r.id = t.recordId WHERE t.syncStatus = 'PENDING' AND r.syncStatus = 'SYNCED' ORDER BY t.updatedAt, t.id LIMIT :limit")
+    suspend fun pendingSegments(limit: Int): List<SegmentEntity>
+    @Query("SELECT COUNT(*) FROM transcript_segments WHERE syncStatus = 'PENDING'") suspend fun pendingSegmentCount(): Int
+    @Query("SELECT segmentId FROM transcript_segments WHERE segmentId IN (:segmentIds) AND syncStatus = 'PENDING'")
+    suspend fun pendingSegmentIds(segmentIds: List<String>): List<String>
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertRemote(segment: SegmentEntity): Long
     @Query("UPDATE transcript_segments SET correctedText = :correctedText, correctionResultId = :resultId, correctedAt = :correctedAt, updatedAt = :correctedAt, syncStatus = 'PENDING' WHERE recordId = :recordId AND id = :segmentId AND deleted = 0")
     suspend fun applyCorrection(recordId: Long, segmentId: Long, resultId: Long, correctedText: String, correctedAt: Long): Int
@@ -239,9 +250,11 @@ data class SessionSyncProjection(
         AiMessageEntity::class,
         AiAttachmentEntity::class,
         AsrSegmentDiagnosticEntity::class,
-        AsrNetworkEventEntity::class
+        AsrNetworkEventEntity::class,
+        RecordingEntity::class,
+        RecordingChunkEntity::class
     ],
-    version = 10,
+    version = 11,
     exportSchema = false
 )
 abstract class ListenDatabase : RoomDatabase() {
@@ -250,6 +263,7 @@ abstract class ListenDatabase : RoomDatabase() {
     abstract fun transcriptDao(): TranscriptDao
     abstract fun aiDao(): AiDao
     abstract fun asrDiagnosticsDao(): AsrDiagnosticsDao
+    abstract fun recordingDao(): RecordingDao
     companion object {
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
@@ -422,10 +436,23 @@ abstract class ListenDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS recordings (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, recordingId TEXT NOT NULL, recordId INTEGER NOT NULL, sessionId TEXT NOT NULL, localPath TEXT NOT NULL, startedAt INTEGER NOT NULL, endedAt INTEGER, durationMs INTEGER NOT NULL, totalFrames INTEGER NOT NULL, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'RECORDING', processedFrames INTEGER NOT NULL, activeWindowStartFrame INTEGER, activeWindowEndFrame INTEGER, vadConfigSnapshot TEXT, vadAlgorithmVersion INTEGER NOT NULL, processingRunId TEXT, errorMessage TEXT, FOREIGN KEY(recordId) REFERENCES records(id) ON UPDATE NO ACTION ON DELETE CASCADE)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_recordings_recordId ON recordings(recordId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_recordings_sessionId ON recordings(sessionId)")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_recordings_recordingId ON recordings(recordingId)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS recording_chunks (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, chunkId TEXT NOT NULL, recordingId TEXT NOT NULL, windowStartFrame INTEGER NOT NULL, windowEndFrame INTEGER NOT NULL, startFrame INTEGER NOT NULL, endFrame INTEGER NOT NULL, sequenceNumber INTEGER NOT NULL, contextSnapshot TEXT, state TEXT NOT NULL DEFAULT 'PLANNED', errorMessage TEXT, FOREIGN KEY(recordingId) REFERENCES recordings(recordingId) ON UPDATE NO ACTION ON DELETE CASCADE)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_recording_chunks_recordingId ON recording_chunks(recordingId)")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_recording_chunks_chunkId ON recording_chunks(chunkId)")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_recording_chunks_recordingId_windowStartFrame_startFrame_endFrame ON recording_chunks(recordingId, windowStartFrame, startFrame, endFrame)")
+            }
+        }
+
         @Volatile private var instance: ListenDatabase? = null
         fun get(context: Context): ListenDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, ListenDatabase::class.java, "listen.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11)
                 .build()
                 .also { instance = it }
         }

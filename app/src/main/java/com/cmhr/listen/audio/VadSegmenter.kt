@@ -12,7 +12,7 @@ class VadSegmenter(
     assetManager: AssetManager,
     private val configProvider: () -> VadConfig
 ) : AutoCloseable {
-    private val history = PcmHistoryBuffer(HISTORY_SAMPLES)
+    private val history = PcmHistoryBuffer(historySamplesFor(configProvider().validated()))
     private val vad = Vad(
         assetManager,
         VadModelConfig(
@@ -34,6 +34,7 @@ class VadSegmenter(
     private var candidateSpeechSamples = 0
     private var candidateSpeechStartSample = 0L
     private var activeSegmentStartSample: Long? = null
+    private var activeOwnershipSample: Long? = null
     private var activeConfig: VadConfig? = null
     private var silenceSamples = 0
     private var softLimitLogged = false
@@ -65,6 +66,7 @@ class VadSegmenter(
                     activeConfig = currentConfig
                     activeSegmentStartSample =
                         (candidateSpeechStartSample - currentConfig.preRollSamples).coerceAtLeast(0)
+                    activeOwnershipSample = candidateSpeechStartSample
                     candidateSpeechSamples = 0
                     silenceSamples = 0
                     lastStartReason = "连续语音达到 ${currentConfig.startConfirmMs} ms"
@@ -90,11 +92,13 @@ class VadSegmenter(
                         "达到最大长度",
                         hitMaxDuration = true,
                         config = segmentConfig,
-                        completedSegments,
-                        discardedShortDurationsMs
+                        ownershipSample = activeOwnershipSample ?: activeStart,
+                        completedSegments = completedSegments,
+                        discardedShortDurationsMs = discardedShortDurationsMs
                     )
                     activeSegmentStartSample = (maximumEnd - segmentConfig.overlapSamples)
                         .coerceAtLeast(0)
+                    activeOwnershipSample = maximumEnd
                     activeConfig = currentConfig
                     silenceSamples = 0
                     softLimitLogged = false
@@ -111,8 +115,9 @@ class VadSegmenter(
                         "自然静音结束",
                         hitMaxDuration = false,
                         config = segmentConfig,
-                        completedSegments,
-                        discardedShortDurationsMs
+                        ownershipSample = activeOwnershipSample ?: activeStart,
+                        completedSegments = completedSegments,
+                        discardedShortDurationsMs = discardedShortDurationsMs
                     )
                     resetActiveSegment()
                 }
@@ -142,6 +147,7 @@ class VadSegmenter(
         reason: String,
         hitMaxDuration: Boolean,
         config: VadConfig,
+        ownershipSample: Long,
         completedSegments: MutableList<CapturedPcmSegment>,
         discardedShortDurationsMs: MutableList<Long>
     ) {
@@ -158,7 +164,7 @@ class VadSegmenter(
         Log.d(TAG, "speech end: reason=$reason duration=${durationMs}ms")
         if (slice.pcm.size >= config.minSegmentSamples * PcmRecorder.BYTES_PER_SAMPLE) {
             Log.d(TAG, "segment emitted duration=${durationMs}ms reason=$reason")
-            completedSegments += CapturedPcmSegment(slice, hitMaxDuration, reason, quality)
+            completedSegments += CapturedPcmSegment(slice, hitMaxDuration, reason, quality, ownershipSample)
         } else {
             Log.d(TAG, "segment discarded: below min duration (${durationMs}ms)")
             discardedShortDurationsMs += durationMs
@@ -167,6 +173,7 @@ class VadSegmenter(
 
     private fun resetActiveSegment() {
         activeSegmentStartSample = null
+        activeOwnershipSample = null
         activeConfig = null
         candidateSpeechSamples = 0
         silenceSamples = 0
@@ -215,6 +222,27 @@ class VadSegmenter(
 
     override fun close() = vad.release()
 
+    /** Flushes a final active utterance when a finite PCM source reaches EOF. */
+    fun finish(): VadResult {
+        val config = activeConfig ?: configProvider().validated()
+        val completed = mutableListOf<CapturedPcmSegment>()
+        val discarded = mutableListOf<Long>()
+        activeSegmentStartSample?.let { start ->
+            emitSegment(
+                startSample = start,
+                endSample = history.endSample,
+                reason = "录音结束",
+                hitMaxDuration = false,
+                config = config,
+                ownershipSample = activeOwnershipSample ?: start,
+                completedSegments = completed,
+                discardedShortDurationsMs = discarded
+            )
+        }
+        resetActiveSegment()
+        return VadResult(0f, config, false, 0, lastStartReason, lastEndReason, completed, discarded)
+    }
+
 private fun ByteArray.toFloatSamples(): FloatArray = FloatArray(size / 2) { index ->
         val low = this[index * 2].toInt() and 0xff
         val high = this[index * 2 + 1].toInt()
@@ -223,8 +251,10 @@ private fun ByteArray.toFloatSamples(): FloatArray = FloatArray(size / 2) { inde
 
     companion object {
         private const val MODEL_ASSET = "silero_vad.int8.onnx"
-        private const val HISTORY_SAMPLES = PcmRecorder.SAMPLE_RATE_HZ * 20
         private const val TAG = "ListenVad"
+        private fun historySamplesFor(config: VadConfig): Int =
+            ((config.hardLimitMs + config.preRollMs + config.postRollMs + 1_000L) * PcmRecorder.SAMPLE_RATE_HZ / 1_000L)
+                .coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
     }
 }
 
@@ -267,5 +297,7 @@ data class CapturedPcmSegment(
     val pcmSlice: PcmSegmentSlice,
     val hitMaxDuration: Boolean,
     val endReason: String,
-    val quality: SegmentQuality
+    val quality: SegmentQuality,
+    /** Speech-start (or hard-split continuation) sample used for deterministic window ownership. */
+    val ownershipSample: Long = pcmSlice.startSample
 )

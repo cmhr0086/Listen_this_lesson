@@ -19,6 +19,7 @@ import com.cmhr.listen.data.ai.AiModelsResult
 import com.cmhr.listen.data.ai.AiServiceClient
 import com.cmhr.listen.data.course.ListenDatabase
 import com.cmhr.listen.data.sync.SyncRepository
+import com.cmhr.listen.data.sync.SyncProgress
 import com.cmhr.listen.data.sync.SyncSummary
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -39,6 +40,7 @@ data class SettingsUiState(
     val asrPromptAutoConfig: AsrPromptAutoConfig = AsrPromptAutoConfig(),
     val cloudSync: CloudSyncSettings = CloudSyncSettings(),
     val cloudSyncState: CloudSyncRunState = CloudSyncRunState.Idle,
+    val cloudSyncProgress: SyncProgress? = null,
     val availableAiModels: List<String> = emptyList(),
     val isLoadingAiModels: Boolean = false,
     val connectionTestState: ConnectionTestState = ConnectionTestState.Idle,
@@ -135,10 +137,12 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     }
     fun syncNow(baseUrl: String, apiToken: String?) = viewModelScope.launch {
         if (_uiState.value.cloudSyncState is CloudSyncRunState.Syncing) return@launch
-        _uiState.update { it.copy(cloudSyncState = CloudSyncRunState.Syncing) }
+        _uiState.update { it.copy(cloudSyncState = CloudSyncRunState.Syncing, cloudSyncProgress = null) }
         val result = runCatching {
             repository.saveCloudSyncServer(baseUrl, apiToken)
-            syncRepository.synchronize(baseUrl)
+            syncRepository.synchronize(baseUrl) { progress ->
+                _uiState.update { it.copy(cloudSyncProgress = progress) }
+            }
         }
         result.fold(
             onSuccess = { summary ->

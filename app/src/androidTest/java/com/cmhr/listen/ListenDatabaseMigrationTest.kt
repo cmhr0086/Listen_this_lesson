@@ -21,6 +21,8 @@ import com.cmhr.listen.data.stt.ACTIVE_ASR_STATES
 import com.cmhr.listen.data.stt.AsrClockBasis
 import com.cmhr.listen.data.stt.AsrLifecycleState
 import com.cmhr.listen.data.stt.AsrSegmentDiagnosticEntity
+import com.cmhr.listen.data.recording.RecordingEntity
+import com.cmhr.listen.data.recording.RecordingState
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -40,7 +42,7 @@ class ListenDatabaseMigrationTest {
     @After fun after() { context.deleteDatabase(databaseName) }
 
     @Test
-    fun migratesV1ThroughV10AndSupportsCorrectionsReasoningGeneralConversationsAndAsrDiagnostics() = runBlocking {
+    fun migratesV1ThroughV11AndSupportsRecordingState() = runBlocking {
         val configuration = SupportSQLiteOpenHelper.Configuration.builder(context)
             .name(databaseName)
             .callback(object : SupportSQLiteOpenHelper.Callback(1) {
@@ -72,7 +74,8 @@ class ListenDatabaseMigrationTest {
                 ListenDatabase.MIGRATION_6_7,
                 ListenDatabase.MIGRATION_7_8,
                 ListenDatabase.MIGRATION_8_9,
-                ListenDatabase.MIGRATION_9_10
+                ListenDatabase.MIGRATION_9_10,
+                ListenDatabase.MIGRATION_10_11
             )
             .build()
         try {
@@ -93,6 +96,11 @@ class ListenDatabaseMigrationTest {
             assertEquals(2_600L, migratedSegment.createdAt)
             assertEquals(SyncStatus.PENDING.name, migratedSession.syncStatus)
             assertEquals(SyncStatus.PENDING.name, migratedSegment.syncStatus)
+            val recordingId = UUID.randomUUID().toString()
+            database.recordingDao().insert(
+                RecordingEntity(recordingId = recordingId, recordId = 1, sessionId = migratedSession.sessionId, localPath = "$recordingId.wav", startedAt = 2_000, state = RecordingState.RECORDED.name)
+            )
+            assertEquals(recordingId, database.recordingDao().observeForSession(1).first().single().recordingId)
 
             repeat(6) { index ->
                 database.asrDiagnosticsDao().insertSegment(
@@ -449,7 +457,7 @@ class ListenDatabaseMigrationTest {
         }
 
         val database = Room.databaseBuilder(context, ListenDatabase::class.java, databaseName)
-            .addMigrations(ListenDatabase.MIGRATION_8_9, ListenDatabase.MIGRATION_9_10)
+            .addMigrations(ListenDatabase.MIGRATION_8_9, ListenDatabase.MIGRATION_9_10, ListenDatabase.MIGRATION_10_11)
             .build()
         try {
             val diagnostic = database.asrDiagnosticsDao().segment("legacy-clock")

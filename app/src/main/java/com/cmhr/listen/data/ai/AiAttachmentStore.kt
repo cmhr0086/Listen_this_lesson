@@ -6,6 +6,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.net.Uri
 import android.provider.OpenableColumns
+import androidx.core.content.FileProvider
 import androidx.exifinterface.media.ExifInterface
 import java.io.File
 import java.nio.ByteBuffer
@@ -25,10 +26,30 @@ data class PendingAiAttachment(
     val height: Int? = null
 )
 
+data class CameraCaptureTarget(val uri: Uri, val absolutePath: String)
+
 class AiAttachmentStore(private val context: Context) {
     private val root = File(context.filesDir, "ai_attachments")
     private val legacyRoot = File(context.filesDir, "ai_photos")
     private val stagingRoot = File(context.cacheDir, "ai_attachments")
+    private val cameraRoot = File(context.cacheDir, "ai_camera")
+
+    fun createCameraCaptureTarget(): CameraCaptureTarget {
+        cameraRoot.mkdirs()
+        val file = File(cameraRoot, "camera-${UUID.randomUUID()}.jpg")
+        check(file.createNewFile()) { "无法创建拍照临时文件。" }
+        return CameraCaptureTarget(
+            uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file),
+            absolutePath = file.absolutePath
+        )
+    }
+
+    fun discardCameraCapture(target: CameraCaptureTarget) {
+        runCatching {
+            val file = File(target.absolutePath)
+            if (file.parentFile?.canonicalFile == cameraRoot.canonicalFile) file.delete()
+        }
+    }
 
     suspend fun prepare(uri: Uri, expectedKind: AiAttachmentKind): PendingAiAttachment = withContext(Dispatchers.IO) {
         stagingRoot.mkdirs()

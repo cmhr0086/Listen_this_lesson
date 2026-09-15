@@ -19,11 +19,13 @@ import com.cmhr.listen.data.course.ListenDatabase
 import com.cmhr.listen.data.course.TranscriptEntity
 import com.cmhr.listen.data.settings.AppSettingsRepository
 import com.cmhr.listen.audio.WavEncoder
+import com.cmhr.listen.audio.PcmRecorder
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -291,6 +293,67 @@ class AsrQueueRuntime private constructor(private val context: Context) {
                 }
             }
         }
+    }
+
+    /** Durable enqueue path for offline recognition, whose UUID/timeline/sequence were committed first. */
+    suspend fun persistAndEnqueuePreallocated(
+        segmentId: String,
+        recordId: Long,
+        sequenceNumber: Long,
+        audioStartTime: Long,
+        audioEndTime: Long,
+        pcm: ByteArray,
+        contextSnapshot: String?
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (dao.segment(segmentId) != null) return@withContext true
+        val now = System.currentTimeMillis()
+        val elapsed = SystemClock.elapsedRealtime()
+        val directory = File(context.noBackupFilesDir, QUEUE_DIRECTORY)
+        val destination = File(directory, "$segmentId.wav")
+        val temporary = File(directory, "$segmentId.tmp")
+        val duration = pcm.size.toLong() * 1_000L / (PcmRecorder.SAMPLE_RATE_HZ * PcmRecorder.BYTES_PER_SAMPLE)
+        val diagnostic = AsrSegmentDiagnosticEntity(
+            segmentId = segmentId,
+            recordId = recordId,
+            sequenceNumber = sequenceNumber,
+            clockBasis = AsrClockBasis.ELAPSED_REALTIME.name,
+            bootCount = currentBootCount,
+            audioStartTime = audioStartTime,
+            audioEndTime = audioEndTime,
+            audioDurationMs = duration,
+            captureStartedAt = audioStartTime,
+            captureFinishedAt = audioEndTime,
+            queuedLocalAt = now,
+            captureStartedElapsedMs = elapsedStart(elapsed, duration),
+            captureFinishedElapsedMs = elapsed,
+            queuedLocalElapsedMs = elapsed,
+            contextSnapshot = contextSnapshot?.takeIf { it.isNotBlank() }
+        )
+        try {
+            check(directory.exists() || directory.mkdirs()) { "无法创建 ASR 临时目录。" }
+            FileOutputStream(temporary).use { output ->
+                output.write(WavEncoder.encodePcm16Mono(pcm)); output.fd.sync()
+            }
+            check(temporary.renameTo(destination)) { "无法提交 ASR 临时音频。" }
+            dao.insertSegment(diagnostic.copy(wavRelativePath = destination.name))
+            kick()
+            true
+        } catch (error: Exception) {
+            temporary.delete(); destination.delete()
+            runCatching { dao.insertSegment(diagnostic.copy(state = AsrLifecycleState.FAILED.name, finishedAt = System.currentTimeMillis(), failureStage = AsrFailureStage.LOCAL_PERSISTENCE.name, exceptionClass = error::class.java.simpleName, safeErrorMessage = "无法持久化待识别音频。")) }
+            false
+        }
+    }
+
+    suspend fun diagnostic(segmentId: String): AsrSegmentDiagnosticEntity? = dao.segment(segmentId)
+    suspend fun retryFailed(segmentId: String): Boolean = (dao.retryFailed(segmentId) > 0).also { if (it) kick() }
+    suspend fun nextSequenceNumber(recordId: Long): Long = dao.nextSequenceNumber(recordId)
+
+    /** Waits until all fire-and-forget realtime captures submitted before this call are durable. */
+    suspend fun awaitPendingPersistence() {
+        val barrier = CompletableDeferred<Unit>()
+        persistenceScope.launch { barrier.complete(Unit) }
+        barrier.await()
     }
 
     private suspend fun insertNewSegment(segment: AsrSegmentDiagnosticEntity) {

@@ -3,8 +3,16 @@ package com.cmhr.listen.data.course
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 
 object RecordNameGenerator {
-    fun defaultName(timestamp: Long = System.currentTimeMillis(), locale: Locale = Locale.getDefault()): String =
-        SimpleDateFormat("yyyy-MM-dd HH-mm 课堂记录", locale).format(Date(timestamp))
+    fun defaultName(
+        courseName: String,
+        timestamp: Long = System.currentTimeMillis(),
+        timeZone: TimeZone = TimeZone.getDefault()
+    ): String {
+        val localDate = SimpleDateFormat("MM-dd", Locale.US).apply { this.timeZone = timeZone }
+            .format(Date(timestamp))
+        return "$courseName-$localDate"
+    }
 }

@@ -11,11 +11,14 @@ import com.cmhr.listen.data.course.RecordNameGenerator
 import com.cmhr.listen.data.course.TranscriptEntity
 import com.cmhr.listen.data.settings.AppSettingsRepository
 import com.cmhr.listen.data.ai.AiAttachmentStore
+import com.cmhr.listen.data.recording.RecordingRepository
+import com.cmhr.listen.recording.OfflineRecognitionRuntime
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
@@ -33,6 +36,8 @@ data class CourseUiState(
 class CourseViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = CourseRepository(ListenDatabase.get(application), AiAttachmentStore(application))
     private val settings = AppSettingsRepository(application)
+    private val recordingRepository = RecordingRepository(application)
+    private val offlineRecognition = OfflineRecognitionRuntime.get(application)
     private val _uiState = MutableStateFlow(CourseUiState())
     val uiState: StateFlow<CourseUiState> = _uiState.asStateFlow()
 
@@ -64,14 +69,28 @@ class CourseViewModel(application: Application) : AndroidViewModel(application) 
     fun renameCourse(id: Long, name: String) = viewModelScope.launch { if (name.isNotBlank()) repository.renameCourse(id, name) }
     fun updateCourseAsrPrompt(id: Long, prompt: String) = viewModelScope.launch { repository.updateCourseAsrPrompt(id, prompt) }
     fun updateCourseAsrPromptMode(id: Long, mode: String?) = viewModelScope.launch { repository.updateCourseAsrPromptMode(id, mode) }
-    fun deleteCourse(id: Long) = viewModelScope.launch { repository.deleteCourse(id); if (_uiState.value.selectedCourse?.id == id) settings.selectCourse(null) }
+    fun deleteCourse(id: Long) = viewModelScope.launch {
+        val recordIds = ListenDatabase.get(getApplication()).recordDao().idsForCourse(id)
+        recordIds.forEach { recordId ->
+            if (offlineRecognition.isProcessingRecord(recordId)) offlineRecognition.stop()
+            recordingRepository.deleteForSession(recordId)
+        }
+        repository.deleteCourse(id)
+        if (_uiState.value.selectedCourse?.id == id) settings.selectCourse(null)
+    }
     fun enterCourse(id: Long) = viewModelScope.launch { settings.selectCourse(id) }
     fun createRecord(courseId: Long, name: String?) = viewModelScope.launch {
-        val defaultName = RecordNameGenerator.defaultName()
+        val courseName = repository.course(courseId).first()?.name ?: return@launch
+        val defaultName = RecordNameGenerator.defaultName(courseName)
         settings.selectRecord(courseId, repository.createRecord(courseId, name?.takeIf { it.isNotBlank() } ?: defaultName))
     }
     fun renameRecord(id: Long, name: String) = viewModelScope.launch { if (name.isNotBlank()) repository.renameRecord(id, name) }
-    fun deleteRecord(id: Long) = viewModelScope.launch { repository.deleteRecord(id); if (_uiState.value.selectedRecord?.id == id) settings.selectCourse(_uiState.value.selectedCourse?.id) }
+    fun deleteRecord(id: Long) = viewModelScope.launch {
+        if (offlineRecognition.isProcessingRecord(id)) offlineRecognition.stop()
+        recordingRepository.deleteForSession(id)
+        repository.deleteRecord(id)
+        if (_uiState.value.selectedRecord?.id == id) settings.selectCourse(_uiState.value.selectedCourse?.id)
+    }
     fun selectRecord(courseId: Long, recordId: Long) = viewModelScope.launch { settings.selectRecord(courseId, recordId) }
     fun deleteSegments(recordId: Long, ids: Set<Long>, onComplete: () -> Unit = {}) = viewModelScope.launch {
         repository.deleteSegments(recordId, ids.toList())

@@ -12,7 +12,10 @@ class SyncRepository(
     private val stateStore: SyncStateStore,
     private val remote: SyncRemoteDataSource = SyncApiClient()
 ) {
-    suspend fun synchronize(baseUrl: String): SyncSummary {
+    suspend fun synchronize(
+        baseUrl: String,
+        onProgress: (SyncProgress) -> Unit = {}
+    ): SyncSummary {
         val normalizedUrl = baseUrl.trim().trimEnd('/')
         require(normalizedUrl.startsWith("https://")) {
             "云同步服务器地址必须以 https:// 开头。"
@@ -20,35 +23,99 @@ class SyncRepository(
         val apiToken = stateStore.readSyncApiToken()?.trim()
         require(!apiToken.isNullOrEmpty()) { "请先配置云同步 Token。" }
         val deviceId = stateStore.getOrCreateDeviceId()
-        val lastSyncAt = stateStore.readLastSyncAt()
-        val pendingSessions = database.recordDao().pendingSessions()
-        val pendingSegments = database.transcriptDao().pendingSegments()
-        val request = SyncRequest(
-            deviceId = deviceId,
-            lastSyncAt = lastSyncAt,
-            sessions = pendingSessions.map { row -> row.session.toPayload(row.courseName) },
-            segments = pendingSegments.map(SegmentEntity::toPayload)
+        var workingCursor = stateStore.readLastSyncAt()
+        var totalSessions = database.recordDao().pendingSessionCount()
+        var totalSegments = database.transcriptDao().pendingSegmentCount()
+        var completedSessions = 0
+        var completedSegments = 0
+        var batchNumber = 0
+        var sentRequest = false
+        var uploadedSessions = 0
+        var uploadedSegments = 0
+        var receivedSessions = 0
+        var receivedSegments = 0
+
+        fun progress() = SyncProgress(
+            batchNumber = batchNumber,
+            completedSessions = completedSessions,
+            totalSessions = totalSessions,
+            completedSegments = completedSegments,
+            totalSegments = totalSegments
         )
+        onProgress(progress())
 
-        val response = remote.sync(normalizedUrl, apiToken, request)
-        require(response.serverTime >= lastSyncAt) { "云同步服务返回了倒退的同步游标。" }
+        while (true) {
+            // Always query the current first page. Confirmed rows disappear from
+            // PENDING, so OFFSET would skip records after every successful batch.
+            val pendingSessions = database.recordDao().pendingSessions(SESSION_BATCH_SIZE)
+            val pendingSegments = if (pendingSessions.isEmpty()) {
+                database.transcriptDao().pendingSegments(SEGMENT_BATCH_SIZE)
+            } else {
+                emptyList()
+            }
+            if (pendingSessions.isEmpty() && pendingSegments.isEmpty() && sentRequest) break
 
-        database.withTransaction {
-            mergeRemoteSessions(response.sessions)
-            mergeRemoteSegments(response.segments)
-            acknowledgeSessions(request.sessions, response.sessionAcks)
-            acknowledgeSegments(request.segments, response.segmentAcks)
+            val request = SyncRequest(
+                deviceId = deviceId,
+                lastSyncAt = workingCursor,
+                sessions = pendingSessions.map { row -> row.session.toPayload(row.courseName) },
+                segments = pendingSegments.map(SegmentEntity::toPayload)
+            )
+            batchNumber += 1
+            onProgress(progress())
+
+            val response = remote.sync(normalizedUrl, apiToken, request)
+            require(response.serverTime >= workingCursor) { "云同步服务返回了倒退的同步游标。" }
+
+            val batchResult = database.withTransaction {
+                mergeRemoteSessions(response.sessions)
+                mergeRemoteSegments(response.segments)
+                val acknowledgedSessions = acknowledgeSessions(request.sessions, response.sessionAcks)
+                val acknowledgedSegments = acknowledgeSegments(request.segments, response.segmentAcks)
+                val remainingSessions = if (request.sessions.isEmpty()) emptyList() else {
+                    database.recordDao().pendingSessionIds(request.sessions.map(SyncSessionPayload::sessionId))
+                }
+                val remainingSegments = if (request.segments.isEmpty()) emptyList() else {
+                    database.transcriptDao().pendingSegmentIds(request.segments.map(SyncSegmentPayload::segmentId))
+                }
+                BatchResult(acknowledgedSessions, acknowledgedSegments, remainingSessions.size, remainingSegments.size)
+            }
+
+            val processedSessions = request.sessions.size - batchResult.remainingSessions
+            val processedSegments = request.segments.size - batchResult.remainingSegments
+            if (request.sessions.isNotEmpty() && processedSessions == 0) {
+                error("当前 Session 批次未能确认任何记录，请检查时间戳冲突后重试。")
+            }
+            if (request.segments.isNotEmpty() && processedSegments == 0) {
+                error("当前 Segment 批次未能确认任何记录，请检查时间戳冲突后重试。")
+            }
+
+            completedSessions += processedSessions
+            completedSegments += processedSegments
+            uploadedSessions += batchResult.acknowledgedSessions
+            uploadedSegments += batchResult.acknowledgedSegments
+            receivedSessions += response.sessions.size
+            receivedSegments += response.segments.size
+            workingCursor = response.serverTime
+            sentRequest = true
+
+            val remainingSessionCount = database.recordDao().pendingSessionCount()
+            val remainingSegmentCount = database.transcriptDao().pendingSegmentCount()
+            totalSessions = maxOf(totalSessions, completedSessions + remainingSessionCount)
+            totalSegments = maxOf(totalSegments, completedSegments + remainingSegmentCount)
+            onProgress(progress())
         }
-        // Persist the cursor last. If this write fails, the old cursor causes a
-        // harmless idempotent replay rather than an incremental-window gap.
-        stateStore.updateLastSyncAt(response.serverTime)
+
+        // Persist only after every local batch and every corresponding server
+        // delta has succeeded. A failure replays from the old cursor safely.
+        stateStore.updateLastSyncAt(workingCursor)
 
         return SyncSummary(
-            uploadedSessions = response.sessionAcks.count { it.matches },
-            uploadedSegments = response.segmentAcks.count { it.matches },
-            receivedSessions = response.sessions.size,
-            receivedSegments = response.segments.size,
-            serverTime = response.serverTime
+            uploadedSessions = uploadedSessions,
+            uploadedSegments = uploadedSegments,
+            receivedSessions = receivedSessions,
+            receivedSegments = receivedSegments,
+            serverTime = workingCursor
         )
     }
 
@@ -121,24 +188,36 @@ class SyncRepository(
             ?: database.courseDao().insert(CourseEntity(name = normalized, createdAt = createdAt))
     }
 
-    private suspend fun acknowledgeSessions(uploaded: List<SyncSessionPayload>, acks: List<SyncAck>) {
+    private suspend fun acknowledgeSessions(uploaded: List<SyncSessionPayload>, acks: List<SyncAck>): Int {
         val versions = uploaded.associate { it.sessionId to it.updatedAt }
-        acks.filter(SyncAck::matches).forEach { ack ->
-            val uploadedVersion = versions[ack.id] ?: return@forEach
+        return acks.filter(SyncAck::matches).sumOf { ack ->
+            val uploadedVersion = versions[ack.id] ?: return@sumOf 0
             if (ack.updatedAt == uploadedVersion) {
                 database.recordDao().markSyncedIfUnchanged(ack.id, uploadedVersion)
-            }
+            } else 0
         }
     }
 
-    private suspend fun acknowledgeSegments(uploaded: List<SyncSegmentPayload>, acks: List<SyncAck>) {
+    private suspend fun acknowledgeSegments(uploaded: List<SyncSegmentPayload>, acks: List<SyncAck>): Int {
         val versions = uploaded.associate { it.segmentId to it.updatedAt }
-        acks.filter(SyncAck::matches).forEach { ack ->
-            val uploadedVersion = versions[ack.id] ?: return@forEach
+        return acks.filter(SyncAck::matches).sumOf { ack ->
+            val uploadedVersion = versions[ack.id] ?: return@sumOf 0
             if (ack.updatedAt == uploadedVersion) {
                 database.transcriptDao().markSyncedIfUnchanged(ack.id, uploadedVersion)
-            }
+            } else 0
         }
+    }
+
+    private data class BatchResult(
+        val acknowledgedSessions: Int,
+        val acknowledgedSegments: Int,
+        val remainingSessions: Int,
+        val remainingSegments: Int
+    )
+
+    private companion object {
+        const val SESSION_BATCH_SIZE = 50
+        const val SEGMENT_BATCH_SIZE = 100
     }
 }
 

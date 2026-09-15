@@ -5,6 +5,7 @@
 -->
 <data-extraction-rules>
     <cloud-backup>
+        <exclude domain="file" path="recordings/" />
         <exclude domain="file" path="datastore/app_settings.preferences_pb" />
         <exclude domain="file" path="ai_photos/" />
         <exclude domain="file" path="ai_attachments/" />
@@ -14,6 +15,7 @@
         -->
     </cloud-backup>
     <device-transfer>
+        <exclude domain="file" path="recordings/" />
         <exclude domain="file" path="datastore/app_settings.preferences_pb" />
         <exclude domain="file" path="ai_photos/" />
         <exclude domain="file" path="ai_attachments/" />

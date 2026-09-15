@@ -1,6 +1,8 @@
 package com.cmhr.listen
 
 import android.content.Context
+import android.content.ContentValues
+import android.database.sqlite.SQLiteDatabase
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -55,13 +57,11 @@ class SyncRepositoryTest {
     }
 
     @Test
-    fun pendingLocalRowsUploadAndOnlyUnchangedAcknowledgedVersionsBecomeSynced() = runBlocking {
+    fun localEditDuringUploadStaysPendingAndNextRunResumesNaturally() = runBlocking {
         withDatabase { database ->
             val (session, segment) = insertPendingGraph(database)
             val state = FakeSyncState(lastSyncAt = 50)
-            var captured: SyncRequest? = null
-            val remote = SyncRemoteDataSource { _, _, request ->
-                captured = request
+            val editingRemote = SyncRemoteDataSource { _, _, request ->
                 database.recordDao().rename(session.id, "网络请求期间的新编辑", 2_000)
                 SyncResponse(
                     serverTime = 100,
@@ -72,13 +72,168 @@ class SyncRepositoryTest {
                 )
             }
 
-            SyncRepository(database, state, remote).synchronize("https://sync.example.com")
+            val firstError = runCatching {
+                SyncRepository(database, state, editingRemote).synchronize("https://sync.example.com")
+            }.exceptionOrNull()
 
-            assertEquals(1, captured?.sessions?.size)
-            assertEquals(1, captured?.segments?.size)
+            assertNotNull(firstError)
             assertEquals(SyncStatus.PENDING.name, database.recordDao().sessionBySessionId(session.sessionId)?.syncStatus)
+            assertEquals(SyncStatus.PENDING.name, database.transcriptDao().segmentBySegmentId(segment.segmentId)?.syncStatus)
+            assertEquals(50L, state.lastSyncAt)
+
+            val resumedRemote = SyncRemoteDataSource { _, _, request -> successfulResponse(request) }
+            SyncRepository(database, state, resumedRemote).synchronize("https://sync.example.com")
+
+            assertEquals(SyncStatus.SYNCED.name, database.recordDao().sessionBySessionId(session.sessionId)?.syncStatus)
             assertEquals(SyncStatus.SYNCED.name, database.transcriptDao().segmentBySegmentId(segment.segmentId)?.syncStatus)
-            assertEquals(100L, state.lastSyncAt)
+            assertTrue(state.lastSyncAt > 50)
+        }
+    }
+
+    @Test
+    fun pendingSegmentsAreUploadedInFixedBatchesWithoutOffsetSkipping() = runBlocking {
+        withDatabase { database ->
+            val (_, segments) = insertPendingSegments(database, 205)
+            val state = FakeSyncState(lastSyncAt = 10)
+            val batchSizes = mutableListOf<Int>()
+            val progress = mutableListOf<com.cmhr.listen.data.sync.SyncProgress>()
+            val remote = SyncRemoteDataSource { _, _, request ->
+                batchSizes += request.segments.size
+                successfulResponse(request)
+            }
+
+            SyncRepository(database, state, remote).synchronize("https://sync.example.com", progress::add)
+
+            assertEquals(listOf(100, 100, 5), batchSizes)
+            assertEquals(0, database.transcriptDao().pendingSegmentCount())
+            assertTrue(segments.all { database.transcriptDao().segmentBySegmentId(it.segmentId)?.syncStatus == SyncStatus.SYNCED.name })
+            assertEquals(205, progress.last().completedSegments)
+            assertEquals(205, progress.last().totalSegments)
+        }
+    }
+
+    @Test
+    fun pendingSessionsAreUploadedInBatchesOfFifty() = runBlocking {
+        withDatabase { database ->
+            val courseId = database.courseDao().insert(CourseEntity(name = "Session 批量课程", createdAt = 1))
+            repeat(101) { index ->
+                database.recordDao().insert(
+                    ClassRecordEntity(
+                        courseId = courseId,
+                        name = "课堂 $index",
+                        startedAt = index.toLong() + 1,
+                        createdAt = index.toLong() + 1,
+                        updatedAt = index.toLong() + 1
+                    )
+                )
+            }
+            val batchSizes = mutableListOf<Int>()
+            val remote = SyncRemoteDataSource { _, _, request ->
+                batchSizes += request.sessions.size
+                successfulResponse(request)
+            }
+
+            SyncRepository(database, FakeSyncState(), remote).synchronize("https://sync.example.com")
+
+            assertEquals(listOf(50, 50, 1), batchSizes)
+            assertEquals(0, database.recordDao().pendingSessionCount())
+        }
+    }
+
+    @Test
+    fun middleBatchFailureKeepsEarlierBatchSyncedAndRetryContinuesRemainingRows() = runBlocking {
+        withDatabase { database ->
+            insertPendingSegments(database, 250)
+            val state = FakeSyncState(lastSyncAt = 20)
+            var calls = 0
+            val failingRemote = SyncRemoteDataSource { _, _, request ->
+                calls += 1
+                if (calls == 2) error("second batch failed")
+                successfulResponse(request)
+            }
+
+            val error = runCatching {
+                SyncRepository(database, state, failingRemote).synchronize("https://sync.example.com")
+            }.exceptionOrNull()
+
+            assertNotNull(error)
+            assertEquals(150, database.transcriptDao().pendingSegmentCount())
+            assertEquals(20L, state.lastSyncAt)
+
+            val resumedBatchSizes = mutableListOf<Int>()
+            val resumedRemote = SyncRemoteDataSource { _, _, request ->
+                resumedBatchSizes += request.segments.size
+                successfulResponse(request)
+            }
+            SyncRepository(database, state, resumedRemote).synchronize("https://sync.example.com")
+
+            assertEquals(listOf(100, 50), resumedBatchSizes)
+            assertEquals(0, database.transcriptDao().pendingSegmentCount())
+            assertTrue(state.lastSyncAt > 20)
+        }
+    }
+
+    @Test
+    fun onlyMatchingAcksConfirmRowsAsSynced() = runBlocking {
+        withDatabase { database ->
+            val (_, segments) = insertPendingSegments(database, 101)
+            val rejectedId = segments.first().segmentId
+            val remote = SyncRemoteDataSource { _, _, request ->
+                successfulResponse(request).copy(
+                    segmentAcks = request.segments.map {
+                        SyncAck(it.segmentId, it.updatedAt, it.segmentId != rejectedId)
+                    }
+                )
+            }
+
+            val error = runCatching {
+                SyncRepository(database, FakeSyncState(), remote).synchronize("https://sync.example.com")
+            }.exceptionOrNull()
+
+            assertNotNull(error)
+            assertEquals(1, database.transcriptDao().pendingSegmentCount())
+            assertEquals(SyncStatus.PENDING.name, database.transcriptDao().segmentBySegmentId(rejectedId)?.syncStatus)
+            assertTrue(segments.drop(1).all {
+                database.transcriptDao().segmentBySegmentId(it.segmentId)?.syncStatus == SyncStatus.SYNCED.name
+            })
+        }
+    }
+
+    @Test
+    fun elevenThousandSegmentsQueryReturnsOnlyOneCursorWindowSafePage() = runBlocking {
+        withDatabase { database ->
+            val courseId = database.courseDao().insert(CourseEntity(name = "大课堂", createdAt = 1))
+            val recordId = database.recordDao().insert(
+                ClassRecordEntity(courseId = courseId, name = "长录音", startedAt = 1, createdAt = 1, updatedAt = 1)
+            )
+            val session = requireNotNull(database.recordDao().sessionBySessionId(database.recordDao().sessionId(recordId)!!))
+            database.recordDao().markSyncedIfUnchanged(session.sessionId, session.updatedAt)
+            val writable = database.openHelper.writableDatabase
+            writable.beginTransaction()
+            try {
+                repeat(11_314) { index ->
+                    val values = ContentValues().apply {
+                        put("recordId", recordId)
+                        put("startTime", index.toLong())
+                        put("endTime", index.toLong() + 1)
+                        put("audioDurationMs", 1L)
+                        put("text", "短文本")
+                        put("segmentId", "00000000-0000-4000-8000-${index.toString().padStart(12, '0')}")
+                        put("sessionId", session.sessionId)
+                        put("createdAt", index.toLong() + 1)
+                        put("updatedAt", index.toLong() + 1)
+                        put("deleted", 0)
+                        put("syncStatus", SyncStatus.PENDING.name)
+                    }
+                    writable.insert("transcript_segments", SQLiteDatabase.CONFLICT_ABORT, values)
+                }
+                writable.setTransactionSuccessful()
+            } finally {
+                writable.endTransaction()
+            }
+
+            assertEquals(11_314, database.transcriptDao().pendingSegmentCount())
+            assertEquals(100, database.transcriptDao().pendingSegments(100).size)
         }
     }
 
@@ -218,6 +373,48 @@ class SyncRepositoryTest {
         val segment = database.transcriptDao().segments(localSessionId).first().single { it.id == localSegmentId }
         return session to segment
     }
+
+    private suspend fun insertPendingSegments(
+        database: ListenDatabase,
+        count: Int
+    ): Pair<ClassRecordEntity, List<TranscriptEntity>> {
+        val courseId = database.courseDao().insert(CourseEntity(name = "批量课程", createdAt = 900))
+        val recordId = database.recordDao().insert(
+            ClassRecordEntity(
+                courseId = courseId,
+                name = "批量课堂",
+                startedAt = 1_000,
+                createdAt = 1_000,
+                updatedAt = 1_000
+            )
+        )
+        val session = requireNotNull(database.recordDao().sessionBySessionId(database.recordDao().sessionId(recordId)!!))
+        database.recordDao().markSyncedIfUnchanged(session.sessionId, session.updatedAt)
+        repeat(count) { index ->
+            database.transcriptDao().insert(
+                TranscriptEntity(
+                    recordId = recordId,
+                    sessionId = session.sessionId,
+                    startTime = 1_010L + index,
+                    endTime = 1_011L + index,
+                    audioDurationMs = 1,
+                    recognitionDurationMs = 1,
+                    text = "分段 $index",
+                    createdAt = 1_011L + index,
+                    updatedAt = 1_011L + index
+                )
+            )
+        }
+        return session to database.transcriptDao().segments(recordId).first()
+    }
+
+    private fun successfulResponse(request: SyncRequest) = SyncResponse(
+        serverTime = request.lastSyncAt + 1,
+        sessions = request.sessions,
+        segments = request.segments,
+        sessionAcks = request.sessions.map { SyncAck(it.sessionId, it.updatedAt, true) },
+        segmentAcks = request.segments.map { SyncAck(it.segmentId, it.updatedAt, true) }
+    )
 
     private fun remoteSession(updatedAt: Long) = SyncSessionPayload(
         sessionId = "00000000-0000-4000-8000-000000000010",
