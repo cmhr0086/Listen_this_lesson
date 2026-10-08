@@ -35,6 +35,10 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material3.BadgedBox
+import androidx.compose.material3.Badge
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -54,6 +58,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -88,6 +93,7 @@ import com.cmhr.listen.data.stt.AsrRuntimeSummary
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.util.Locale
 
 private enum class MainDestination(val route: String, val label: String) {
@@ -126,7 +132,6 @@ private sealed interface FabState {
     data object None : FabState
     data object NewCourse : FabState
     data class NewRecord(val courseId: Long) : FabState
-    data class StopListening(val startedAtElapsedRealtimeMs: Long) : FabState
 }
 
 private fun isSettingsRoute(route: String?): Boolean = route == "settings" || route?.startsWith("settings/") == true
@@ -208,6 +213,7 @@ fun ListenApp(
     val recordingState by recordings.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
     // Why the "新建课程" dialog is open decides what happens with the new course.
     var courseCreation by remember { mutableStateOf<CourseCreation?>(null) }
     // Record-first flow: the course chosen on home before starting (null = use the suggestion),
@@ -475,11 +481,9 @@ fun ListenApp(
 
     val nested = route !in MainDestination.entries.map { it.route }.toSet()
     val bottomChrome = bottomChromeLayout()
-    // On the capturing record's own page the capture panel owns start/stop, so no FAB there.
-    val onCapturingRecordPage = route == "record/{recordId}" && recordId != null && recordId == sttState.activeRecordId
+    // Recording is controlled from the 录音 tab, the class page and the notification; the bottom
+    // bar's 录音 icon carries a red dot while capturing, so no floating stop button is needed.
     val fabState: FabState = when {
-        sttState.isListening && sttState.listeningStartedAtElapsedRealtimeMs != null && !onCapturingRecordPage ->
-            FabState.StopListening(requireNotNull(sttState.listeningStartedAtElapsedRealtimeMs))
         route == "courses" -> FabState.NewCourse
         route == "course/{courseId}" && courseId != null -> FabState.NewRecord(courseId)
         else -> FabState.None
@@ -524,7 +528,15 @@ fun ListenApp(
                     aiEnabled = aiState.selectedSegmentIds.isNotEmpty() && !aiState.isBusy,
                     close = ai::clearSelection,
                     process = { showSelectionAiActions = true },
-                    delete = { confirmDeleteTranscripts = true }
+                    delete = { confirmDeleteTranscripts = true },
+                    copy = {
+                        val selected = aiState.selectedSegmentIds
+                        val text = com.cmhr.listen.AiViewModel.orderTranscriptSegments(currentSegments.filter { it.id in selected })
+                            .joinToString("\n") { it.effectiveText }
+                        context.getSystemService(android.content.ClipboardManager::class.java)
+                            ?.setPrimaryClip(android.content.ClipData.newPlainText("课堂文字", text))
+                        scope.launch { snackbarHostState.showSnackbar("已复制 ${selected.size} 段文字", duration = SnackbarDuration.Short) }
+                    }
                 )
                 route == "record/{recordId}" && recordId != null -> RecordNormalTopBar(
                     title = currentRecord?.name ?: "记录详情",
@@ -630,15 +642,16 @@ fun ListenApp(
                                 }
                             },
                             icon = {
-                                Icon(
-                                    when (destination) {
-                                        MainDestination.RECORD -> Icons.Outlined.Mic
-                                        MainDestination.COURSES -> Icons.Outlined.School
-                                        MainDestination.AI -> Icons.Outlined.SmartToy
-                                        MainDestination.SETTINGS -> Icons.Outlined.Settings
-                                    },
-                                    contentDescription = destination.label
-                                )
+                                val capturing = destination == MainDestination.RECORD && sttState.isListening
+                                val glyph = when (destination) {
+                                    MainDestination.RECORD -> if (capturing) Icons.Filled.Mic else Icons.Outlined.Mic
+                                    MainDestination.COURSES -> Icons.Outlined.School
+                                    MainDestination.AI -> Icons.Outlined.SmartToy
+                                    MainDestination.SETTINGS -> Icons.Outlined.Settings
+                                }
+                                if (capturing) BadgedBox(badge = { Badge(containerColor = MaterialTheme.colorScheme.error, modifier = Modifier.testTag("capturing-badge")) }) {
+                                    Icon(glyph, contentDescription = "${destination.label}（正在录制）")
+                                } else Icon(glyph, contentDescription = destination.label)
                             },
                             label = { Text(destination.label) }
                         )
@@ -659,7 +672,6 @@ fun ListenApp(
                     when (action) {
                         FabState.NewCourse -> { newName = ""; courseCreation = CourseCreation.Plain }
                         is FabState.NewRecord -> { newName = ""; creatingRecordForCourse = action.courseId }
-                        is FabState.StopListening -> stt.stopListening()
                         FabState.None -> Unit
                     }
                 }
@@ -923,21 +935,23 @@ internal fun RecordSelectionTopBar(
     aiEnabled: Boolean,
     close: () -> Unit,
     process: () -> Unit,
-    delete: () -> Unit
+    delete: () -> Unit,
+    copy: () -> Unit = {}
 ) = TopAppBar(
     navigationIcon = {
         IconButton(onClick = close) { Icon(Icons.Outlined.Close, contentDescription = "退出选择") }
     },
     title = { Text("已选择 $selectedCount 条") },
     actions = {
+        IconButton(onClick = copy, enabled = selectedCount > 0) { Icon(Icons.Outlined.ContentCopy, contentDescription = "复制") }
         IconButton(onClick = delete, enabled = selectedCount > 0) { Icon(Icons.Outlined.Delete, contentDescription = "删除") }
         TextButton(onClick = process, enabled = aiEnabled) { Text("AI 处理") }
     },
     colors = TopAppBarDefaults.topAppBarColors(
-        containerColor = MaterialTheme.colorScheme.tertiaryContainer,
-        titleContentColor = MaterialTheme.colorScheme.onTertiaryContainer,
-        actionIconContentColor = MaterialTheme.colorScheme.onTertiaryContainer,
-        navigationIconContentColor = MaterialTheme.colorScheme.onTertiaryContainer
+        containerColor = MaterialTheme.colorScheme.primaryContainer,
+        titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        actionIconContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        navigationIconContentColor = MaterialTheme.colorScheme.onPrimaryContainer
     )
 )
 
@@ -1025,31 +1039,8 @@ private fun AnimatedAppFab(state: FabState, click: (FabState) -> Unit) {
             FabState.None -> Unit
             FabState.NewCourse -> AnimatedFabContent("新建课程", Icons.Outlined.Add) { click(state) }
             is FabState.NewRecord -> AnimatedFabContent("新建课堂记录", Icons.Outlined.Add) { click(state) }
-            is FabState.StopListening -> ListeningStopFab(state.startedAtElapsedRealtimeMs) { click(state) }
         }
     }
-}
-
-@Composable
-internal fun ListeningStopFab(startedAt: Long, click: () -> Unit) {
-    var elapsedMs by remember(startedAt) { mutableLongStateOf(0L) }
-    LaunchedEffect(startedAt) {
-        while (true) {
-            elapsedMs = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
-            delay(1_000)
-        }
-    }
-    val seconds = elapsedMs / 1_000
-    val elapsed = String.format(Locale.US, "%02d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60)
-    ExtendedFloatingActionButton(
-        modifier = Modifier.testTag("global-stop-listening").height(64.dp),
-        text = { Text("停止录制 $elapsed", style = MaterialTheme.typography.titleMedium) },
-        icon = { Icon(Icons.Outlined.Stop, contentDescription = "停止录制") },
-        onClick = click,
-        containerColor = MaterialTheme.colorScheme.error,
-        contentColor = MaterialTheme.colorScheme.onError,
-        shape = RoundedCornerShape(22.dp)
-    )
 }
 
 @Composable

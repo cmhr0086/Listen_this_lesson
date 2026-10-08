@@ -2,8 +2,6 @@ package com.cmhr.listen.ui
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -13,6 +11,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.material3.Icon
+import androidx.compose.material.icons.outlined.RadioButtonUnchecked
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.Icons
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -131,31 +135,48 @@ internal fun TranscriptLine(
         )
     }
     val shape = position.shape()
-    val selectedColor = MaterialTheme.colorScheme.secondaryContainer
-    Column(
+    // Selected lines get a tinted band (adjacent selections merge into one), and in selection mode
+    // every line shows a check mark, so state is readable without heavy borders.
+    val background = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+        .compositeOver(MaterialTheme.colorScheme.surfaceContainerHigh)
+    else MaterialTheme.colorScheme.surfaceContainerHigh
+    Row(
         modifier
             .fillMaxWidth()
             .clip(shape)
-            .background(if (selected) selectedColor else MaterialTheme.colorScheme.surfaceContainerHigh)
-            .then(if (selected) Modifier.border(2.dp, MaterialTheme.colorScheme.primary, shape) else Modifier)
+            .background(background)
             .testTag("segment-${segment.id}")
-            .semantics { this.selected = selected }
-            .semantics { onLongClick("选择片段") { toggle(); true } }
+            .semantics {
+                this.selected = selected
+                onLongClick("选择片段") { toggle(); true }
+                if (selectionMode) onClick(if (selected) "取消选择" else "选择") { toggle(); true }
+            }
             .then(
-                if (dragSelectionEnabled) Modifier.clickable(enabled = selectionMode) { toggle() }
+                if (dragSelectionEnabled) Modifier.selectionAwareTap(selectionMode) { if (selectionMode) toggle() }
                 else Modifier.combinedClickable(onClick = { if (selectionMode) toggle() }, onLongClick = toggle)
             )
             .padding(
-                start = 16.dp,
+                start = if (selectionMode) 8.dp else 16.dp,
                 end = 16.dp,
                 top = if (position == LinePosition.FIRST || position == LinePosition.ONLY) 14.dp else 4.dp,
                 bottom = if (position == LinePosition.LAST || position == LinePosition.ONLY) 14.dp else 4.dp
-            )
+            ),
+        verticalAlignment = Alignment.Top
     ) {
-        Text(segment.effectiveText, style = MaterialTheme.typography.bodyLarge)
-        if (segment.correctedText != null) {
-            TextButton(onClick = { showCorrection = true }, enabled = !selectionMode, modifier = Modifier.align(Alignment.End)) {
-                Text("AI 已纠错")
+        if (selectionMode) {
+            Icon(
+                if (selected) Icons.Filled.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
+                contentDescription = null,
+                tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                modifier = Modifier.padding(top = 2.dp, end = 8.dp).size(20.dp)
+            )
+        }
+        Column(Modifier.weight(1f)) {
+            Text(segment.effectiveText, style = MaterialTheme.typography.bodyLarge)
+            if (segment.correctedText != null) {
+                TextButton(onClick = { showCorrection = true }, enabled = !selectionMode, modifier = Modifier.align(Alignment.End)) {
+                    Text("AI 已纠错")
+                }
             }
         }
     }

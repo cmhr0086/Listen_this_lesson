@@ -238,7 +238,7 @@ fun GlobalAiScreen(model: AiViewModel, newConversation: () -> Unit = {}, openIte
                             this.selected = selected
                             onLongClick("选择 AI 内容") { model.toggleContentSelection(null, item.key); true }
                         }
-                        .clickable { if (selectionMode) model.toggleContentSelection(null, item.key) else openItem(item.key, item.recordId) },
+                        .selectionAwareTap(selectionMode) { if (selectionMode) model.toggleContentSelection(null, item.key) else openItem(item.key, item.recordId) },
                     colors = CardDefaults.cardColors(
                         containerColor = if (selected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceVariant
                     ),

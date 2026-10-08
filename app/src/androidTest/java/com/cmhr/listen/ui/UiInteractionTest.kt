@@ -101,15 +101,6 @@ class UiInteractionTest {
     }
 
     @Test
-    fun listeningStopUsesGlobalRedFab() {
-        composeRule.setContent {
-            ListenTheme { ListeningStopFab(SystemClock.elapsedRealtime(), click = {}) }
-        }
-        composeRule.onNodeWithTag("global-stop-listening").assertExists()
-        composeRule.onNodeWithContentDescription("停止录制").assertExists()
-    }
-
-    @Test
     fun idleCapturePanelOffersBothModesAndStartsTheChosenOne() {
         var started: CaptureMode? = null
         composeRule.setContent {
@@ -522,6 +513,51 @@ class UiInteractionTest {
         composeRule.onNodeWithTag("course-asr-prompt-modes").performScrollToIndex(3)
         composeRule.onNodeWithTag("course-asr-prompt-always").performClick().assertIsSelected()
         composeRule.runOnIdle { assertEquals("ALWAYS", mode) }
+    }
+
+    @Test
+    fun longPressInDragSelectionListKeepsTheLineSelectedAfterRelease() {
+        val segments = (1L..3L).map { id ->
+            TranscriptEntity(id = id, recordId = 1, sessionId = "s", startTime = id * 1_000, endTime = id * 1_000 + 900, audioDurationMs = 900, recognitionDurationMs = null, text = "第 $id 句")
+        }
+        var selected by mutableStateOf(emptySet<Long>())
+        composeRule.setContent {
+            ListenTheme {
+                val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+                val controller = rememberDragSelectionController(listState, segments.map { it.id }, selected) { selected = it }
+                androidx.compose.foundation.lazy.LazyColumn(Modifier.fillMaxSize().dragSelectionViewport(controller), state = listState) {
+                    items(segments.size) { index ->
+                        val segment = segments[index]
+                        TranscriptLine(
+                            segment = segment,
+                            position = linePosition(index, segments.size),
+                            selected = segment.id in selected,
+                            selectionMode = selected.isNotEmpty(),
+                            dragSelectionEnabled = true,
+                            modifier = Modifier.dragSelectableItem(segment.id, controller)
+                        ) { selected = if (segment.id in selected) selected - segment.id else selected + segment.id }
+                    }
+                }
+            }
+        }
+
+        composeRule.onNodeWithTag("segment-2").performTouchInput { longClick() }
+
+        composeRule.runOnIdle { assertEquals(setOf(2L), selected) }
+        composeRule.onNodeWithTag("segment-2").assertIsSelected()
+        // A plain tap in selection mode still toggles another line.
+        composeRule.onNodeWithTag("segment-3").performClick()
+        composeRule.runOnIdle { assertEquals(setOf(2L, 3L), selected) }
+    }
+
+    @Test
+    fun selectionTopBarCopiesSelectedText() {
+        var copied = false
+        composeRule.setContent {
+            ListenTheme { RecordSelectionTopBar(2, aiEnabled = true, close = {}, process = {}, delete = {}, copy = { copied = true }) }
+        }
+        composeRule.onNodeWithContentDescription("复制").assertIsEnabled().performClick()
+        composeRule.runOnIdle { assertTrue(copied) }
     }
 
     @Test
