@@ -1,5 +1,9 @@
 package com.cmhr.listen
 
+import com.cmhr.listen.data.settings.AppearanceSettings
+import com.cmhr.listen.ui.theme.DarkModePreference
+import com.cmhr.listen.ui.theme.ThemePalette
+
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -32,6 +36,7 @@ import java.util.concurrent.TimeUnit
 
 data class SettingsUiState(
     val developerMode: Boolean = false,
+    val appearance: AppearanceSettings = AppearanceSettings(),
     val server: ServerSettings = ServerSettings(),
     val ai: AiServiceSettings = AiServiceSettings(),
     val aiPrompts: AiPromptSettings = AiPromptSettings(),
@@ -75,6 +80,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     init { viewModelScope.launch { repository.settings.collect { settings ->
         _uiState.update { it.copy(
             developerMode = settings.developerMode,
+            appearance = settings.appearance,
             server = settings.server,
             ai = settings.ai,
             aiPrompts = settings.aiPrompts,
@@ -86,6 +92,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     } } }
 
     fun setDeveloperMode(enabled: Boolean) = viewModelScope.launch { repository.setDeveloperMode(enabled) }
+    fun setThemePalette(palette: ThemePalette) = viewModelScope.launch { repository.setThemePalette(palette) }
+    fun setDarkMode(mode: DarkModePreference) = viewModelScope.launch { repository.setDarkMode(mode) }
     fun saveServer(baseUrl: String, apiKey: String?) = viewModelScope.launch {
         val result = runCatching { repository.saveServer(baseUrl, apiKey) }
         messageFlow.emit(UiMessage(result.fold({ "服务器设置已保存。" }, { it.message ?: "服务器地址无效。" })))

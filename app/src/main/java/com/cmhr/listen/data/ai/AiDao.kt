@@ -14,7 +14,9 @@ data class AiTimelineRow(
     val title: String,
     val updatedAt: Long,
     val status: String,
-    val preview: String
+    val preview: String,
+    /** Class record the item came from; null for general conversations. */
+    val recordName: String? = null
 )
 
 @Dao
@@ -22,7 +24,8 @@ interface AiDao {
     @Query("""
         SELECT 'RESULT' AS kind, r.id AS id, r.recordId AS recordId, c.name AS courseName,
                r.actionType AS title, COALESCE(r.finishedAt, r.createdAt) AS updatedAt,
-               r.status AS status, COALESCE(r.output, r.errorMessage, '') AS preview
+               r.status AS status, COALESCE(r.output, r.errorMessage, '') AS preview,
+               cr.name AS recordName
         FROM ai_results r
         INNER JOIN records cr ON cr.id = r.recordId
         INNER JOIN courses c ON c.id = cr.courseId
@@ -30,7 +33,9 @@ interface AiDao {
         UNION ALL
         SELECT 'CONVERSATION' AS kind, a.id AS id, a.recordId AS recordId,
                COALESCE(c.name, '通用对话') AS courseName, a.title AS title,
-               a.updatedAt AS updatedAt, 'SUCCESS' AS status, 'AI 对话' AS preview
+               a.updatedAt AS updatedAt, 'SUCCESS' AS status,
+               COALESCE((SELECT m.content FROM ai_messages m WHERE m.conversationId = a.id ORDER BY m.id DESC LIMIT 1), '') AS preview,
+               cr.name AS recordName
         FROM ai_conversations a
         LEFT JOIN records cr ON cr.id = a.recordId
         LEFT JOIN courses c ON c.id = cr.courseId

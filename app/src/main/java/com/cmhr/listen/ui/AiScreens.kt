@@ -189,7 +189,7 @@ fun AiResultsScreen(recordId: Long, model: AiViewModel, openItem: (AiContentKey)
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun GlobalAiScreen(model: AiViewModel, openItem: (AiContentKey, Long?) -> Unit) {
+fun GlobalAiScreen(model: AiViewModel, newConversation: () -> Unit = {}, openItem: (AiContentKey, Long?) -> Unit) {
     val contents by model.globalContents().collectAsStateWithLifecycle(initialValue = emptyList())
     val state by model.uiState.collectAsStateWithLifecycle()
     val scope = AiContentSelectionScope(null)
@@ -213,7 +213,18 @@ fun GlobalAiScreen(model: AiViewModel, openItem: (AiContentKey, Long?) -> Unit) 
     ) {
         state.error?.let { message -> item("global-ai-error") { Text(message, color = MaterialTheme.colorScheme.error) } }
         if (contents.isEmpty()) {
-            item("global-ai-empty") { Text("还没有 AI 内容。使用右上角按钮开始新对话，或从课堂记录处理识别片段。") }
+            item("global-ai-empty") {
+                Column(Modifier.fillMaxWidth().padding(top = 24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("还没有 AI 内容", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "可以直接提问，也可以在课堂详情里长按选择文字，让 AI 纠错、回答或整理成笔记。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+                    Button(onClick = newConversation, modifier = Modifier.testTag("ai-empty-new-conversation")) { Text("新建对话") }
+                }
+            }
         }
         grouped.forEach { (label, itemsForDay) ->
             item("day-$label") { Text(label, style = MaterialTheme.typography.titleMedium) }
@@ -233,9 +244,31 @@ fun GlobalAiScreen(model: AiViewModel, openItem: (AiContentKey, Long?) -> Unit) 
                     ),
                     border = if (selected) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null
                 ) {
-                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                        Text(item.courseName, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelLarge)
-                        Text(item.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(item.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f, fill = false))
+                            Text(
+                                " · " + java.text.SimpleDateFormat("HH:mm", java.util.Locale.CHINA).format(java.util.Date(item.updatedAt)),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        aiPreviewLine(item.preview)?.let { line ->
+                            Text(
+                                line,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (item.status == AiRequestStatus.ERROR.name) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                        Text(
+                            listOfNotNull(item.courseName, item.recordName?.takeIf { it.isNotBlank() && it != item.courseName }).joinToString(" · "),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
             }
@@ -1198,3 +1231,11 @@ private fun PhotoThumbnail(path: String) {
         )
     }
 }
+
+/** First meaningful line of an AI reply for list previews: Markdown markers and blank lines dropped. */
+internal fun aiPreviewLine(text: String): String? = text.lineSequence()
+    .map { it.trim().trimStart('#', '>', '-', '*', '|', ' ').replace("**", "").replace("`", "").trim() }
+    .filter { it.isNotEmpty() && !it.all { ch -> ch == '-' || ch == '|' || ch == ':' || ch == ' ' } }
+    .take(2)
+    .joinToString(" ")
+    .takeIf { it.isNotBlank() }

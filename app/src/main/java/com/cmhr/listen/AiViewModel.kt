@@ -74,7 +74,8 @@ data class AiContentItem(
     val title: String,
     val updatedAt: Long,
     val status: String,
-    val preview: String
+    val preview: String,
+    val recordName: String? = null
 )
 
 /**
@@ -148,7 +149,8 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
                 } else row.title,
                 updatedAt = row.updatedAt,
                 status = row.status,
-                preview = row.preview
+                preview = row.preview,
+                recordName = row.recordName
             )
         }
     }

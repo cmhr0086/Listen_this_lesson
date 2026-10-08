@@ -83,11 +83,29 @@ internal fun CapturePanel(
     listening: ListeningUiState,
     processing: OfflineRecognitionState,
     start: (CaptureMode) -> Unit,
-    stop: () -> Unit
+    stop: () -> Unit,
+    compact: Boolean = false
 ) {
     val activeHere = listening.isListening && listening.activeRecordId == recordId
-    if (activeHere) ActiveCapturePanel(listening, stop)
-    else IdleCapturePanel(captureBlockedReason(listening, recordId, processing), listening.error, start)
+    when {
+        activeHere -> ActiveCapturePanel(listening, stop)
+        compact -> CompactCaptureRow(captureBlockedReason(listening, recordId, processing), start)
+        else -> IdleCapturePanel(captureBlockedReason(listening, recordId, processing), listening.error, start)
+    }
+}
+
+/** For a finished class: continuing is possible but should not dominate the page. */
+@Composable
+private fun CompactCaptureRow(blockedReason: String?, start: (CaptureMode) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().testTag("capture-panel-compact"),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text("继续录制", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+        OutlinedButton(onClick = { start(CaptureMode.REALTIME_ASR) }, enabled = blockedReason == null, modifier = Modifier.testTag("start-realtime")) { Text("实时转写") }
+        OutlinedButton(onClick = { start(CaptureMode.RECORD_ONLY) }, enabled = blockedReason == null, modifier = Modifier.testTag("start-record-only")) { Text("仅录音") }
+    }
 }
 
 @Composable

@@ -54,6 +54,7 @@ import com.cmhr.listen.CourseViewModel
 import com.cmhr.listen.ListeningUiState
 import com.cmhr.listen.RecordingUiState
 import com.cmhr.listen.recording.CaptureMode
+import com.cmhr.listen.data.recording.RecordingState
 import com.cmhr.listen.data.ai.AiActionType
 import com.cmhr.listen.data.course.ClassRecordEntity
 import com.cmhr.listen.data.course.CourseEntity
@@ -175,11 +176,23 @@ fun RecordDetailsScreen(
     val segments = state.detailSegments.filter { it.recordId == recordId }
     val selectedIds = aiState.takeIf { it.selectionRecordId == recordId }?.selectedSegmentIds.orEmpty()
     val selectionMode = aiState.selectionRecordId == recordId
-    val displayedSegments = segments.asReversed()
+    // Reading order: oldest first, merged into paragraphs; the newest text appears at the bottom.
+    val orderedSegments = remember(segments) { AiViewModel.orderTranscriptSegments(segments) }
+    val groups = remember(orderedSegments) { groupTranscript(orderedSegments) }
+    val capturingHere = listening.isListening && listening.activeRecordId == recordId
+    val realtimeHere = capturingHere && listening.captureMode == CaptureMode.REALTIME_ASR
+    var recordingsExpanded by remember(recordId) { mutableStateOf(false) }
     val listState = rememberLazyListState()
+    // Follow new text during realtime transcription, unless the user scrolled up to read.
+    androidx.compose.runtime.LaunchedEffect(orderedSegments.size, realtimeHere) {
+        if (!realtimeHere || orderedSegments.isEmpty()) return@LaunchedEffect
+        val info = listState.layoutInfo
+        val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: return@LaunchedEffect
+        if (lastVisible >= info.totalItemsCount - 3) listState.animateScrollToItem((info.totalItemsCount - 1).coerceAtLeast(0))
+    }
     val dragSelection = rememberDragSelectionController(
         listState = listState,
-        orderedKeys = displayedSegments.map { it.id },
+        orderedKeys = orderedSegments.map { it.id },
         selectedKeys = selectedIds,
         onSelectionChanged = { aiModel.replaceSelection(recordId, it) }
     )
@@ -239,10 +252,17 @@ fun RecordDetailsScreen(
                     RecordDetailCard(course, record)
                 }
                 item("capture-panel") {
-                    CapturePanel(recordId, listening, recordings.processing, startCapture, stopCapture)
+                    // A finished class with content only needs a small "继续录制" entry.
+                    val compact = !capturingHere && record.endedAt != null && (segments.isNotEmpty() || recordings.recordings.isNotEmpty())
+                    CapturePanel(recordId, listening, recordings.processing, startCapture, stopCapture, compact = compact)
                 }
                 aiState.error?.let { item("ai-error") { ErrorCard(it) } }
-                if (recordings.recordings.isNotEmpty()) {
+                val allRecognized = recordings.recordings.isNotEmpty() && recordings.recordings.all { it.recordingState == RecordingState.COMPLETED }
+                if (allRecognized && !recordingsExpanded) {
+                    item("recordings-collapsed") {
+                        RecordingsCollapsedRow(recordings.recordings.size, recordings.recordings.totalDurationMs()) { recordingsExpanded = true }
+                    }
+                } else if (recordings.recordings.isNotEmpty()) {
                     item("recordings-heading") {
                         SectionHeading("录音", "${recordings.recordings.size} 段 · 共 ${formatClockDuration(recordings.recordings.totalDurationMs())}")
                     }
@@ -260,7 +280,9 @@ fun RecordDetailsScreen(
                         )
                     }
                 }
-                item("segment-heading") { SectionHeading("文字", if (segments.isEmpty()) null else "${segments.size} 段") }
+                item("segment-heading") {
+                    SectionHeading("文字", if (segments.isEmpty()) null else "${segments.size} 段 · ${groups.size} 个段落")
+                }
                 if (segments.isEmpty()) item("empty-segments") {
                     Text(
                         if (recordings.recordings.isEmpty()) "还没有文字。用「实时转写」上课，或先「仅录音」再识别。"
@@ -269,21 +291,40 @@ fun RecordDetailsScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                items(displayedSegments, key = { "segment-${it.id}" }) { segment ->
-                    val selected = segment.id in selectedIds
-                    SelectableTranscriptCard(
-                        segment = segment,
-                        selected = selected,
-                        selectionMode = selectionMode,
-                        developerMode = false,
-                        dragSelectionEnabled = true,
-                        modifier = Modifier.dragSelectableItem(segment.id, dragSelection),
-                        toggle = { aiModel.toggleSelection(recordId, segment.id) },
-                        restoreOriginal = { aiModel.restoreOriginal(segment.id) }
-                    )
+                items(groups, key = { "group-${it.segments.first().id}" }) { group ->
+                    // No gaps between lines: a paragraph reads as one block, lines stay individually selectable.
+                    Column {
+                        TranscriptGroupHeader(group)
+                        group.segments.forEachIndexed { index, segment ->
+                            TranscriptLine(
+                                segment = segment,
+                                position = linePosition(index, group.segments.size),
+                                selected = segment.id in selectedIds,
+                                selectionMode = selectionMode,
+                                dragSelectionEnabled = true,
+                                modifier = Modifier.dragSelectableItem(segment.id, dragSelection),
+                                toggle = { aiModel.toggleSelection(recordId, segment.id) },
+                                restoreOriginal = { aiModel.restoreOriginal(segment.id) }
+                            )
+                        }
+                    }
+                }
+                if (realtimeHere && (listening.pendingQueueCount > 0 || listening.isRecognizing)) {
+                    item("recognizing-tail") { RecognizingTail(listening.pendingQueueCount) }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun RecordingsCollapsedRow(count: Int, totalMs: Long, expand: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = expand).padding(vertical = 8.dp).testTag("recordings-collapsed"),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("录音 $count 段 · 共 ${formatClockDuration(totalMs)} · 已全部识别", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+        Text("展开", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
     }
 }
 
@@ -298,78 +339,6 @@ private fun SectionHeading(title: String, detail: String?) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 8.dp, bottom = 2.dp)
             )
-        }
-    }
-}
-
-@Composable
-internal fun SelectableTranscriptCard(
-    segment: TranscriptEntity,
-    selected: Boolean,
-    selectionMode: Boolean,
-    developerMode: Boolean = false,
-    dragSelectionEnabled: Boolean = false,
-    modifier: Modifier = Modifier,
-    restoreOriginal: () -> Unit = {},
-    toggle: () -> Unit
-) {
-    var showCorrection by remember(segment.id) { mutableStateOf(false) }
-    if (showCorrection && segment.correctedText != null) {
-        AlertDialog(
-            onDismissRequest = { showCorrection = false },
-            title = { Text("AI 纠错对照") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("原始 ASR", style = MaterialTheme.typography.labelLarge)
-                    Text(segment.text)
-                    Text("当前纠正文", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                    Text(segment.correctedText)
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { restoreOriginal(); showCorrection = false }) { Text("恢复原文") }
-            },
-            dismissButton = { TextButton(onClick = { showCorrection = false }) { Text("关闭") } }
-        )
-    }
-    Card(
-        modifier = modifier
-            .fillMaxWidth()
-            .testTag("segment-${segment.id}")
-            .semantics { this.selected = selected }
-            .semantics { onLongClick("选择片段") { toggle(); true } }
-            .then(
-                if (dragSelectionEnabled) Modifier.clickable(enabled = selectionMode) { toggle() }
-                else Modifier.combinedClickable(
-                    onClick = { if (selectionMode) toggle() },
-                    onLongClick = toggle
-                )
-            ),
-        colors = CardDefaults.cardColors(
-            containerColor = if (selected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceVariant
-        ),
-        border = if (selected) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null
-    ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(formatDateTime(segment.startTime), style = MaterialTheme.typography.titleSmall)
-            if (developerMode) {
-                Text(
-                    "开始：${formatDateTime(segment.startTime)}  ·  结束：${formatDateTime(segment.endTime)}",
-                    style = MaterialTheme.typography.bodySmall
-                )
-                Text(
-                    "音频：${formatClockDuration(segment.audioDurationMs)}  ·  ASR：${segment.recognitionDurationMs?.let(::formatDuration) ?: "—"}",
-                    style = MaterialTheme.typography.bodySmall
-                )
-            }
-            Text(segment.effectiveText, style = MaterialTheme.typography.bodyLarge)
-            if (segment.correctedText != null) {
-                TextButton(
-                    onClick = { showCorrection = true },
-                    enabled = !selectionMode,
-                    modifier = Modifier.align(Alignment.End)
-                ) { Text("AI 已纠错") }
-            }
         }
     }
 }
@@ -461,22 +430,18 @@ internal fun AsrPromptDialog(
     dismissButton = { TextButton(onClick = dismiss) { Text("取消") } }
 )
 
+/** The record name is in the top bar; this line only adds course and time. */
 @Composable
 private fun RecordDetailCard(
     course: CourseEntity,
     record: ClassRecordEntity
 ) {
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(course.name, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(record.name, style = MaterialTheme.typography.titleLarge)
-            Text(
-                formatRecordSpan(record.startedAt, record.endedAt),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-    }
+    Text(
+        "${course.name} · ${formatRecordSpan(record.startedAt, record.endedAt)}",
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp).testTag("record-summary-line")
+    )
 }
 
 @Composable

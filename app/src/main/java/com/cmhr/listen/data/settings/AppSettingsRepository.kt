@@ -1,5 +1,8 @@
 package com.cmhr.listen.data.settings
 
+import com.cmhr.listen.ui.theme.DarkModePreference
+import com.cmhr.listen.ui.theme.ThemePalette
+
 import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
@@ -59,8 +62,14 @@ data class AiGenerationSettings(
         chatTemperature = chatTemperature.coerceIn(0f, 2f)
     )
 }
+data class AppearanceSettings(
+    val palette: ThemePalette = ThemePalette.Default,
+    val darkMode: DarkModePreference = DarkModePreference.SYSTEM
+)
+
 data class AppSettings(
     val developerMode: Boolean = false,
+    val appearance: AppearanceSettings = AppearanceSettings(),
     val server: ServerSettings = ServerSettings(),
     val ai: AiServiceSettings = AiServiceSettings(),
     val aiPrompts: AiPromptSettings = AiPromptSettings(),
@@ -81,6 +90,10 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
     val settings: Flow<AppSettings> = context.appSettingsDataStore.data.map { preferences ->
         AppSettings(
             developerMode = preferences[DEVELOPER_MODE] ?: false,
+            appearance = AppearanceSettings(
+                palette = preferences[THEME_PALETTE]?.let { runCatching { ThemePalette.valueOf(it) }.getOrNull() } ?: ThemePalette.Default,
+                darkMode = preferences[DARK_MODE]?.let { runCatching { DarkModePreference.valueOf(it) }.getOrNull() } ?: DarkModePreference.SYSTEM
+            ),
             server = ServerSettings(
                 baseUrl = preferences[BASE_URL] ?: ServerSettings().baseUrl,
                 hasApiKey = preferences[API_KEY] != null
@@ -134,6 +147,8 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
     }
 
     suspend fun setDeveloperMode(enabled: Boolean) = context.appSettingsDataStore.edit { it[DEVELOPER_MODE] = enabled }
+    suspend fun setThemePalette(palette: ThemePalette) = context.appSettingsDataStore.edit { it[THEME_PALETTE] = palette.name }
+    suspend fun setDarkMode(mode: DarkModePreference) = context.appSettingsDataStore.edit { it[DARK_MODE] = mode.name }
 
     suspend fun saveServer(baseUrl: String, apiKey: String?) {
         val normalized = baseUrl.trim().trimEnd('/')
@@ -275,6 +290,8 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
 
     private companion object {
         val DEVELOPER_MODE = booleanPreferencesKey("developer_mode")
+        val THEME_PALETTE = stringPreferencesKey("theme_palette")
+        val DARK_MODE = stringPreferencesKey("dark_mode")
         val BASE_URL = stringPreferencesKey("server_base_url")
         val API_KEY = stringPreferencesKey("encrypted_api_key")
         val AI_PROVIDER = stringPreferencesKey("ai_provider")

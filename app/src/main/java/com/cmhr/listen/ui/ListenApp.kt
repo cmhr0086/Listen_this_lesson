@@ -168,6 +168,7 @@ private fun routeTitle(route: String?): String = when (route) {
     "settings/vad-presets" -> "VAD 预设"
     "settings/ai-service" -> "AI 配置"
     "settings/cloud-sync" -> "云同步"
+    "settings/appearance" -> "外观"
     "settings/ai-prompts" -> "AI 提示词"
     "settings/asr-prompt-policy" -> "ASR 提示词模式"
     "settings/ai-generation" -> "AI 生成参数"
@@ -526,6 +527,7 @@ fun ListenApp(
                     delete = { confirmDeleteTranscripts = true }
                 )
                 route == "record/{recordId}" && recordId != null -> RecordNormalTopBar(
+                    title = currentRecord?.name ?: "记录详情",
                     menuExpanded = recordMenuExpanded,
                     setMenuExpanded = { recordMenuExpanded = it },
                     back = { nav.popBackStack() },
@@ -619,6 +621,8 @@ fun ListenApp(
                         NavigationBarItem(
                             selected = selected,
                             onClick = {
+                                // Restored tab stacks may land on a nested page; remember the tab explicitly.
+                                lastMainTab = destination
                                 nav.navigate(destination.route) {
                                     launchSingleTop = true
                                     popUpTo(MainDestination.RECORD.route) { saveState = true }
@@ -713,7 +717,7 @@ fun ListenApp(
                 )
             }
             composable("ai") {
-                GlobalAiScreen(ai) { key, ownerRecordId ->
+                GlobalAiScreen(ai, newConversation = openNewConversation) { key, ownerRecordId ->
                     when (key.kind) {
                         com.cmhr.listen.AiContentKind.RESULT -> ownerRecordId?.let {
                             nav.navigate("ai/result/$it/${key.id}")
@@ -782,12 +786,14 @@ fun ListenApp(
                     onAsrPromptPolicy = { nav.navigate("settings/asr-prompt-policy") },
                     onAiGeneration = { nav.navigate("settings/ai-generation") },
                     onCloudSync = { nav.navigate("settings/cloud-sync") },
-                    onAsrDiagnostics = { nav.navigate("settings/asr-diagnostics") }
+                    onAsrDiagnostics = { nav.navigate("settings/asr-diagnostics") },
+                    onAppearance = { nav.navigate("settings/appearance") }
                 )
             }
             composable("settings/stt-service") { SttServiceSettingsScreen(settingsState, settings) }
             composable("settings/ai-service") { AiServiceSettingsScreen(settingsState, settings) }
             composable("settings/cloud-sync") { CloudSyncSettingsScreen(settingsState, settings) }
+            composable("settings/appearance") { AppearanceSettingsScreen(settingsState, settings) }
             composable("settings/ai-prompts") { AiPromptsSettingsScreen(settingsState, settings) }
             composable("settings/asr-prompt-policy") { AsrPromptPolicySettingsScreen(settingsState, settings) }
             composable("settings/ai-generation") { AiGenerationSettingsScreen(settingsState, settings) }
@@ -967,9 +973,10 @@ internal fun RecordNormalTopBar(
     exportTxt: () -> Unit,
     openResults: () -> Unit,
     select: () -> Unit,
-    editAsrPrompt: () -> Unit
+    editAsrPrompt: () -> Unit,
+    title: String = "记录详情"
 ) = TopAppBar(
-    title = { Text("记录详情") },
+    title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
     navigationIcon = {
         IconButton(onClick = back) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回") }
     },
@@ -983,12 +990,13 @@ internal fun RecordNormalTopBar(
             modifier = Modifier.widthIn(min = 240.dp),
             shape = RoundedCornerShape(20.dp)
         ) {
+            // AI · 导出与选择 · 课程设置
             DropdownMenuItem(text = { Text("整理成笔记") }, onClick = organizeNotes)
-            HorizontalDivider()
-            DropdownMenuItem(text = { Text("导出 TXT") }, onClick = exportTxt)
             DropdownMenuItem(text = { Text("AI 结果") }, onClick = openResults)
             HorizontalDivider()
-            DropdownMenuItem(text = { Text("选择") }, onClick = select)
+            DropdownMenuItem(text = { Text("选择片段") }, onClick = select)
+            DropdownMenuItem(text = { Text("导出 TXT") }, onClick = exportTxt)
+            HorizontalDivider()
             DropdownMenuItem(text = { Text("ASR 提示词") }, onClick = editAsrPrompt)
         }
     }

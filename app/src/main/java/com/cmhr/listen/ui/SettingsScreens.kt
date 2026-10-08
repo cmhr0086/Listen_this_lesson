@@ -1,5 +1,16 @@
 package com.cmhr.listen.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Surface
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import com.cmhr.listen.ui.theme.DarkModePreference
+import com.cmhr.listen.ui.theme.ThemePalette
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -34,6 +45,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -69,7 +81,8 @@ fun SettingsScreen(
     onAsrPromptPolicy: () -> Unit,
     onAiGeneration: () -> Unit,
     onCloudSync: () -> Unit = {},
-    onAsrDiagnostics: () -> Unit = {}
+    onAsrDiagnostics: () -> Unit = {},
+    onAppearance: () -> Unit = {}
 ) = SettingsOverview(
     state = state,
     setDeveloperMode = model::setDeveloperMode,
@@ -81,7 +94,8 @@ fun SettingsScreen(
     onAsrPromptPolicy = onAsrPromptPolicy,
     onAiGeneration = onAiGeneration,
     onCloudSync = onCloudSync,
-    onAsrDiagnostics = onAsrDiagnostics
+    onAsrDiagnostics = onAsrDiagnostics,
+    onAppearance = onAppearance
 )
 
 @Composable
@@ -96,7 +110,8 @@ internal fun SettingsOverview(
     onAsrPromptPolicy: () -> Unit,
     onAiGeneration: () -> Unit,
     onCloudSync: () -> Unit = {},
-    onAsrDiagnostics: () -> Unit = {}
+    onAsrDiagnostics: () -> Unit = {},
+    onAppearance: () -> Unit = {}
 ) {
     LazyColumn(
         Modifier.fillMaxSize(),
@@ -106,23 +121,37 @@ internal fun SettingsOverview(
         item("stt-link") {
             SettingsLink(
                 "STT 服务器",
-                "${state.server.baseUrl.ifBlank { "未设置地址" }} · ${if (state.server.hasApiKey) "Key 已配置" else "Key 未配置"}",
-                onSttService
+                state.server.baseUrl.ifBlank { "未设置地址" },
+                onSttService,
+                attention = if (state.server.hasApiKey && state.server.baseUrl.isNotBlank()) null else "未配置",
+                done = state.server.hasApiKey && state.server.baseUrl.isNotBlank()
             )
         }
         item("ai-link") {
             SettingsLink(
                 "AI 配置",
-                "${providerName(state.ai.provider)} · ${state.ai.model.ifBlank { "未设置模型" }} · ${if (state.ai.hasApiKey) "Key 已配置" else "Key 未配置"}",
-                onAiService
+                "${providerName(state.ai.provider)} · ${state.ai.model.ifBlank { "未设置模型" }}",
+                onAiService,
+                attention = if (state.ai.hasApiKey && state.ai.model.isNotBlank()) null else "可选 · 未配置",
+                done = state.ai.hasApiKey && state.ai.model.isNotBlank()
             )
         }
         item("cloud-sync-link") {
+            val configured = state.cloudSync.baseUrl.isNotBlank() && state.cloudSync.hasApiToken
             SettingsLink(
                 "云同步",
-                if (state.cloudSync.lastSyncAt > 0) "上次同步：${formatSyncTime(state.cloudSync.lastSyncAt)}" else "尚未同步",
-                onCloudSync
+                when {
+                    !configured -> "可在多台设备之间同步课堂文字"
+                    state.cloudSync.lastSyncAt > 0 -> "上次同步：${formatSyncTime(state.cloudSync.lastSyncAt)}"
+                    else -> "已配置，尚未同步"
+                },
+                onCloudSync,
+                attention = if (configured) null else "可选 · 未配置",
+                done = configured
             )
+        }
+        item("appearance-link") {
+            SettingsLink("外观", "${state.appearance.palette.label} · ${state.appearance.darkMode.label}", onAppearance)
         }
         item("asr-prompt-policy-link") {
             SettingsLink("ASR 提示词模式", "全局模式：${state.globalAsrPromptMode.displayName}", onAsrPromptPolicy)
@@ -645,5 +674,70 @@ private fun MsParameter(label: String, description: String, value: Long, range: 
 }
 
 @Composable private fun SectionTitle(text: String) = Text(text, style = MaterialTheme.typography.titleLarge)
-@Composable private fun SettingsLink(title: String, description: String, click: () -> Unit) = Card(Modifier.fillMaxWidth().clickable(onClick = click)) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) { Text(title, style = MaterialTheme.typography.titleMedium); Text(description, style = MaterialTheme.typography.bodyMedium) } }
+/** A settings row; [attention] flags something the user still has to set up, [done] confirms it. */
+@Composable
+private fun SettingsLink(title: String, description: String, click: () -> Unit, attention: String? = null, done: Boolean = false) =
+    Card(Modifier.fillMaxWidth().clickable(onClick = click)) {
+        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(title, style = MaterialTheme.typography.titleMedium)
+                Text(description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2)
+            }
+            when {
+                attention != null -> Surface(color = MaterialTheme.colorScheme.tertiaryContainer, contentColor = MaterialTheme.colorScheme.onTertiaryContainer, shape = MaterialTheme.shapes.small) {
+                    Text(attention, style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp))
+                }
+                done -> Text("已配置", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+            }
+        }
+    }
+
+/** 外观: accent palette and light/dark preference; stored in DataStore, applied app-wide immediately. */
+@Composable
+fun AppearanceSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
+    val palettes = ThemePalette.entries.filter { it != ThemePalette.DYNAMIC || android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S }
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        item("palette") {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("主题色", style = MaterialTheme.typography.titleMedium)
+                    Text("状态颜色（待识别、出错等）在所有主题色下保持一致。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    palettes.forEach { palette ->
+                        Row(
+                            Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                                .selectable(state.appearance.palette == palette, role = Role.RadioButton) { model.setThemePalette(palette) }
+                                .testTag("palette-${palette.name.lowercase()}"),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(selected = state.appearance.palette == palette, onClick = null)
+                            Box(Modifier.padding(start = 12.dp).size(20.dp).background(palette.swatch, CircleShape))
+                            Text(
+                                palette.label + if (palette == ThemePalette.Default) "（默认）" else "",
+                                Modifier.padding(start = 12.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        item("dark-mode") {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("深色模式", style = MaterialTheme.typography.titleMedium)
+                    DarkModePreference.entries.forEach { mode ->
+                        Row(
+                            Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                                .selectable(state.appearance.darkMode == mode, role = Role.RadioButton) { model.setDarkMode(mode) }
+                                .testTag("dark-mode-${mode.name.lowercase()}"),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(selected = state.appearance.darkMode == mode, onClick = null)
+                            Text(mode.label, Modifier.padding(start = 12.dp))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 private fun providerName(provider: AiProvider) = if (provider == AiProvider.DEEPSEEK) "DeepSeek" else "OpenAI 通用接口"

@@ -539,7 +539,13 @@ class UiInteractionTest {
         var selected by mutableStateOf(false)
         composeRule.setContent {
             ListenTheme {
-                SelectableTranscriptCard(segment, selected, selectionMode = selected) { selected = !selected }
+                TranscriptLine(
+                    segment = segment,
+                    position = LinePosition.ONLY,
+                    selected = selected,
+                    selectionMode = selected,
+                    dragSelectionEnabled = false
+                ) { selected = !selected }
             }
         }
 
@@ -573,7 +579,7 @@ class UiInteractionTest {
 
         composeRule.onNodeWithText("记录详情").assertTextContains("记录详情")
         composeRule.onNodeWithContentDescription("更多操作").performClick()
-        listOf("整理成笔记", "导出 TXT", "AI 结果", "选择", "ASR 提示词").forEach {
+        listOf("整理成笔记", "导出 TXT", "AI 结果", "选择片段", "ASR 提示词").forEach {
             composeRule.onNodeWithText(it).assertExists()
         }
         composeRule.onNodeWithText("总结").assertDoesNotExist()
