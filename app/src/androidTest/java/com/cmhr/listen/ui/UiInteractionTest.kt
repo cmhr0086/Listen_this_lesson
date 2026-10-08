@@ -27,6 +27,9 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import com.cmhr.listen.recording.CaptureMode
+import com.cmhr.listen.data.course.CourseEntity
+import com.cmhr.listen.data.course.CourseSuggestion
+import com.cmhr.listen.data.course.CourseSummary
 import com.cmhr.listen.recording.OfflineRecognitionState
 import com.cmhr.listen.data.recording.RecordingEntity
 import com.cmhr.listen.data.recording.RecordingState
@@ -186,6 +189,65 @@ class UiInteractionTest {
         composeRule.onNodeWithTag("start-realtime").assertIsNotEnabled()
         composeRule.onNodeWithTag("start-record-only").assertIsNotEnabled()
         composeRule.onNodeWithText("「高数-10-08」正在录制", substring = true).assertExists()
+    }
+
+    @Test
+    fun homeStartsAClassWithTheSuggestedCourseWithoutNavigating() {
+        var started: CaptureMode? = null
+        var picked = false
+        val course = CourseSummary(CourseEntity(id = 7, name = "毛概", createdAt = 1), recordCount = 3, lastStartedAt = 1_000)
+        composeRule.setContent {
+            ListenTheme {
+                HomeScreen(
+                    courses = listOf(course),
+                    recent = emptyList(),
+                    startCourse = course,
+                    suggestion = CourseSuggestion(7, CourseSuggestion.Reason.USUAL_TIME),
+                    listening = ListeningUiState(),
+                    processing = OfflineRecognitionState(),
+                    pendingRecordingCounts = emptyMap(),
+                    pickCourse = { picked = true },
+                    start = { started = it },
+                    stop = {},
+                    openRecord = {},
+                    openActiveRecord = {},
+                    openCourse = {},
+                    courseMenu = {}
+                )
+            }
+        }
+        composeRule.onNodeWithTag("start-course-chip").assertTextContains("毛概")
+        composeRule.onNodeWithText("按你平时的上课时间猜的", substring = true).assertExists()
+        composeRule.onNodeWithText("3 节课", substring = true).assertExists()
+        composeRule.onNodeWithTag("home-start-record-only").performClick()
+        composeRule.onNodeWithTag("start-course-chip").performClick()
+        composeRule.runOnIdle {
+            assertEquals(CaptureMode.RECORD_ONLY, started)
+            assertTrue(picked)
+        }
+    }
+
+    @Test
+    fun coursePickerConfirmsTheChosenCourse() {
+        var confirmed: Long? = null
+        val courses = listOf(1L to "英语", 2L to "毛概").map { (id, name) -> CourseSummary(CourseEntity(id = id, name = name, createdAt = id), 1, id) }
+        composeRule.setContent {
+            ListenTheme {
+                CoursePickerDialog(
+                    title = "这节课保存到哪门课？",
+                    message = null,
+                    courses = courses,
+                    initialCourseId = 1,
+                    confirmLabel = "保存",
+                    confirm = { confirmed = it },
+                    createNew = {},
+                    dismiss = {}
+                )
+            }
+        }
+        composeRule.onNodeWithTag("pick-course-2").performClick()
+        composeRule.onNodeWithTag("course-picker-confirm").performClick()
+        composeRule.runOnIdle { assertEquals(2L, confirmed) }
     }
 
     @Test

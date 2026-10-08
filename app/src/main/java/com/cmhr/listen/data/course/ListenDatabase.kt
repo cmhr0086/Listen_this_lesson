@@ -113,6 +113,23 @@ data class SegmentEntity(
 
 typealias TranscriptEntity = SegmentEntity
 
+/** A course with how often and how recently it was used, for home and course lists. */
+data class CourseSummary(
+    @Embedded val course: CourseEntity,
+    val recordCount: Int,
+    val lastStartedAt: Long?
+)
+
+/** A class record with its course name and transcript size, for list rows. */
+data class SessionSummary(
+    @Embedded val session: SessionEntity,
+    val courseName: String,
+    val segmentCount: Int
+)
+
+/** Minimal history used to guess which course is being attended right now. */
+data class CourseStart(val courseId: Long, val startedAt: Long)
+
 data class SessionSyncProjection(
     @Embedded val session: SessionEntity,
     val courseName: String
@@ -121,7 +138,16 @@ data class SessionSyncProjection(
 @Dao interface CourseDao {
     @Query("SELECT * FROM courses WHERE deleted = 0 ORDER BY createdAt DESC") fun courses(): Flow<List<CourseEntity>>
     @Query("SELECT * FROM courses WHERE id = :id AND deleted = 0") fun course(id: Long): Flow<CourseEntity?>
+    @Query("SELECT * FROM courses WHERE id = :id AND deleted = 0") suspend fun courseNow(id: Long): CourseEntity?
     @Query("SELECT id FROM courses WHERE name = :name AND deleted = 0 ORDER BY id LIMIT 1") suspend fun idByName(name: String): Long?
+    @Query("""
+        SELECT c.*, COUNT(r.id) AS recordCount, MAX(r.startedAt) AS lastStartedAt
+        FROM courses c LEFT JOIN records r ON r.courseId = c.id AND r.deleted = 0
+        WHERE c.deleted = 0
+        GROUP BY c.id
+        ORDER BY COALESCE(MAX(r.startedAt), c.createdAt) DESC, c.id DESC
+    """)
+    fun courseSummaries(): Flow<List<CourseSummary>>
     @Insert suspend fun insert(course: CourseEntity): Long
     @Query("UPDATE courses SET name = :name WHERE id = :id") suspend fun rename(id: Long, name: String)
     @Query("UPDATE courses SET asrPrompt = :prompt WHERE id = :id") suspend fun updateAsrPrompt(id: Long, prompt: String)
@@ -131,6 +157,27 @@ data class SessionSyncProjection(
 @Dao interface RecordDao {
     @Query("SELECT * FROM records WHERE courseId = :courseId AND deleted = 0 ORDER BY startedAt DESC") fun records(courseId: Long): Flow<List<SessionEntity>>
     @Query("SELECT * FROM records WHERE id = :id AND deleted = 0") fun record(id: Long): Flow<SessionEntity?>
+    @Query("""
+        SELECT r.*, c.name AS courseName,
+            (SELECT COUNT(*) FROM transcript_segments t WHERE t.recordId = r.id AND t.deleted = 0) AS segmentCount
+        FROM records r INNER JOIN courses c ON c.id = r.courseId
+        WHERE r.deleted = 0 AND c.deleted = 0
+        ORDER BY r.startedAt DESC, r.id DESC LIMIT :limit
+    """)
+    fun recentSummaries(limit: Int): Flow<List<SessionSummary>>
+    @Query("""
+        SELECT r.*, c.name AS courseName,
+            (SELECT COUNT(*) FROM transcript_segments t WHERE t.recordId = r.id AND t.deleted = 0) AS segmentCount
+        FROM records r INNER JOIN courses c ON c.id = r.courseId
+        WHERE r.courseId = :courseId AND r.deleted = 0
+        ORDER BY r.startedAt DESC, r.id DESC
+    """)
+    fun summariesForCourse(courseId: Long): Flow<List<SessionSummary>>
+    @Query("SELECT r.courseId, r.startedAt FROM records r INNER JOIN courses c ON c.id = r.courseId WHERE r.deleted = 0 AND c.deleted = 0 AND r.startedAt >= :since")
+    suspend fun courseStartsSince(since: Long): List<CourseStart>
+    @Query("SELECT * FROM records WHERE id = :id AND deleted = 0") suspend fun recordNow(id: Long): SessionEntity?
+    @Query("UPDATE records SET courseId = :courseId, name = :name, updatedAt = :updatedAt, syncStatus = 'PENDING' WHERE id = :id AND deleted = 0")
+    suspend fun moveToCourse(id: Long, courseId: Long, name: String, updatedAt: Long): Int
     @Query("SELECT sessionId FROM records WHERE id = :id AND deleted = 0") suspend fun sessionId(id: Long): String?
     @Query("SELECT * FROM records WHERE sessionId = :sessionId LIMIT 1") suspend fun sessionBySessionId(sessionId: String): SessionEntity?
     @Query("SELECT r.*, c.name AS courseName FROM records r INNER JOIN courses c ON c.id = r.courseId WHERE r.syncStatus = 'PENDING' ORDER BY r.updatedAt, r.id LIMIT :limit")

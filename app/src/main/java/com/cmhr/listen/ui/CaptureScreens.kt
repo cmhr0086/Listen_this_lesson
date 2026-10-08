@@ -117,7 +117,7 @@ private fun IdleCapturePanel(blockedReason: String?, error: String?, start: (Cap
 }
 
 @Composable
-private fun CaptureModeButton(
+internal fun CaptureModeButton(
     modifier: Modifier,
     icon: ImageVector,
     title: String,

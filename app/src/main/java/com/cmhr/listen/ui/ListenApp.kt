@@ -63,6 +63,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.core.content.ContextCompat
@@ -88,7 +89,7 @@ import kotlinx.coroutines.delay
 import java.util.Locale
 
 private enum class MainDestination(val route: String, val label: String) {
-    COURSES("courses", "课程"),
+    COURSES("courses", "上课"),
     AI("ai", "AI 会话"),
     SETTINGS("settings", "设置")
 }
@@ -135,8 +136,16 @@ private fun mainDestinationForRoute(route: String?): MainDestination = when {
     else -> MainDestination.COURSES
 }
 
+/** What to do with a course created from the "新建课程" dialog. */
+private sealed interface CourseCreation {
+    data object Plain : CourseCreation
+    data class ThenStart(val mode: CaptureMode) : CourseCreation
+    data object ThenPickForStart : CourseCreation
+    data class ThenFile(val recordId: Long) : CourseCreation
+}
+
 private fun routeTitle(route: String?): String = when (route) {
-    "courses" -> "课程"
+    "courses" -> "上课"
     "ai" -> "AI 会话"
     "ai/new" -> "新对话"
     "ai/new/{recordId}" -> "课堂新对话"
@@ -183,7 +192,16 @@ fun ListenApp(
     val recordingState by recordings.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
-    var creatingCourse by remember { mutableStateOf(false) }
+    // Why the "新建课程" dialog is open decides what happens with the new course.
+    var courseCreation by remember { mutableStateOf<CourseCreation?>(null) }
+    // Record-first flow: the course chosen on home before starting (null = use the suggestion),
+    // and the record that must be filed under a course once its capture stops.
+    var startCourseOverride by remember { mutableStateOf<Long?>(null) }
+    var pickingStartCourse by remember { mutableStateOf(false) }
+    var pendingQuickStartCourseId by remember { mutableStateOf<Long?>(null) }
+    var awaitingFilingRecordId by remember { mutableStateOf<Long?>(null) }
+    var filingCaptureSeen by remember { mutableStateOf(false) }
+    var filingRecordId by remember { mutableStateOf<Long?>(null) }
     var creatingRecordForCourse by remember { mutableStateOf<Long?>(null) }
     var newName by remember { mutableStateOf("") }
     var pendingPermissionRecordId by remember { mutableStateOf<Long?>(null) }
@@ -267,18 +285,64 @@ fun ListenApp(
         exportContent = null
     }
 
+    // Creates the record only after permissions are granted, so a denial leaves no empty record.
+    val beginQuickStart: (Long, CaptureMode) -> Unit = { courseId, mode ->
+        courses.createRecord(courseId, null) { recordId ->
+            awaitingFilingRecordId = recordId
+            filingCaptureSeen = false
+            if (mode == CaptureMode.RECORD_ONLY) stt.startRecordOnly(recordId) else stt.startListening(recordId)
+            nav.navigate("record/$recordId")
+        }
+    }
+
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
         val recordId = pendingPermissionRecordId
+        val quickStartCourseId = pendingQuickStartCourseId
         val captureMode = pendingCaptureMode
         pendingPermissionRecordId = null
+        pendingQuickStartCourseId = null
         val microphoneGranted = grants[Manifest.permission.RECORD_AUDIO]
             ?: (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
         val notificationGranted = Build.VERSION.SDK_INT < 33 || grants[Manifest.permission.POST_NOTIFICATIONS]
             ?: (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED)
-        if (microphoneGranted && recordId != null) {
+        if (microphoneGranted && quickStartCourseId != null) {
+            beginQuickStart(quickStartCourseId, captureMode)
+            if (!notificationGranted) stt.reportNotificationPermissionDenied()
+        } else if (microphoneGranted && recordId != null) {
             if (captureMode == CaptureMode.RECORD_ONLY) stt.startRecordOnly(recordId) else stt.startListening(recordId)
             if (!notificationGranted) stt.reportNotificationPermissionDenied()
         } else stt.reportPermissionDenied()
+    }
+
+    val missingCapturePermissions: () -> List<String> = {
+        buildList {
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) add(Manifest.permission.RECORD_AUDIO)
+            if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    val startCourseId = startCourseOverride?.takeIf { id -> courseState.courseSummaries.any { it.course.id == id } }
+        ?: courseState.suggestion?.courseId
+    val quickStart: (Long, CaptureMode) -> Unit = { courseId, mode ->
+        val permissions = missingCapturePermissions()
+        if (permissions.isEmpty()) beginQuickStart(courseId, mode)
+        else {
+            pendingCaptureMode = mode
+            pendingQuickStartCourseId = courseId
+            permissionLauncher.launch(permissions.toTypedArray())
+        }
+    }
+
+    // Once a quick-started capture has actually run and then stopped (panel, FAB or notification),
+    // ask where to file it. Waiting for "seen active" avoids firing before capture starts.
+    LaunchedEffect(sttState.isListening, sttState.activeRecordId, awaitingFilingRecordId) {
+        val awaiting = awaitingFilingRecordId ?: return@LaunchedEffect
+        if (sttState.isListening && sttState.activeRecordId == awaiting) filingCaptureSeen = true
+        else if (filingCaptureSeen && !sttState.isListening) {
+            filingRecordId = awaiting
+            awaitingFilingRecordId = null
+            filingCaptureSeen = false
+        }
     }
 
     val startCapture: (Long, CaptureMode) -> Unit = { selectedRecordId, mode ->
@@ -294,13 +358,54 @@ fun ListenApp(
         } else permissionLauncher.launch(permissions.toTypedArray())
     }
 
-    if (creatingCourse) NameDialog(
-        title = "新建课程",
-        value = newName,
-        update = { newName = it },
-        confirm = { courses.createCourse(newName); newName = ""; creatingCourse = false },
-        dismiss = { creatingCourse = false }
+    courseCreation?.let { purpose ->
+        NameDialog(
+            title = "新建课程",
+            value = newName,
+            update = { newName = it },
+            confirm = {
+                courses.createCourse(newName) { created ->
+                    when (purpose) {
+                        CourseCreation.Plain -> Unit
+                        is CourseCreation.ThenStart -> quickStart(created, purpose.mode)
+                        CourseCreation.ThenPickForStart -> startCourseOverride = created
+                        is CourseCreation.ThenFile -> courses.moveRecord(purpose.recordId, created)
+                    }
+                }
+                newName = ""
+                courseCreation = null
+            },
+            dismiss = { courseCreation = null }
+        )
+    }
+    if (pickingStartCourse) CoursePickerDialog(
+        title = "这节课是哪门课？",
+        message = "只是先选一个，录完还可以改。",
+        courses = courseState.courseSummaries,
+        initialCourseId = startCourseId,
+        confirmLabel = "确定",
+        confirm = { startCourseOverride = it; pickingStartCourse = false },
+        createNew = { pickingStartCourse = false; newName = ""; courseCreation = CourseCreation.ThenPickForStart },
+        dismiss = { pickingStartCourse = false }
     )
+    filingRecordId?.let { filing ->
+        val summary = courseState.recentSessions.firstOrNull { it.session.id == filing }
+        CoursePickerDialog(
+            title = "这节课保存到哪门课？",
+            message = summary?.let { "「${it.session.name}」· ${formatSessionWhen(it.session.startedAt, it.session.endedAt)}" },
+            courses = courseState.courseSummaries,
+            initialCourseId = summary?.session?.courseId,
+            confirmLabel = "保存",
+            confirm = { courseId ->
+                courses.moveRecord(filing, courseId)
+                startCourseOverride = null
+                filingRecordId = null
+            },
+            createNew = { filingRecordId = null; newName = ""; courseCreation = CourseCreation.ThenFile(filing) },
+            dismiss = { filingRecordId = null },
+            dismissLabel = "保持不变"
+        )
+    }
     creatingRecordForCourse?.let { courseId ->
         NameDialog(
             title = "新建课堂记录",
@@ -468,7 +573,11 @@ fun ListenApp(
                     }
                 )
                 else -> TopAppBar(
-                    title = { Text(routeTitle(route)) },
+                    title = {
+                        val courseName = courseId?.takeIf { route == "course/{courseId}" }
+                            ?.let { id -> courseState.courseSummaries.firstOrNull { it.course.id == id }?.course?.name }
+                        Text(courseName ?: routeTitle(route), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    },
                     navigationIcon = {
                         if (nested) IconButton(onClick = { nav.popBackStack() }) {
                             Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
@@ -528,7 +637,7 @@ fun ListenApp(
             Box(Modifier.padding(bottom = composerFabClearance)) {
                 AnimatedAppFab(state = fabState) { action ->
                     when (action) {
-                        FabState.NewCourse -> { newName = ""; creatingCourse = true }
+                        FabState.NewCourse -> { newName = ""; courseCreation = CourseCreation.Plain }
                         is FabState.NewRecord -> { newName = ""; creatingRecordForCourse = action.courseId }
                         is FabState.StopListening -> stt.stopListening()
                         FabState.None -> Unit
@@ -555,10 +664,33 @@ fun ListenApp(
             popExitTransition = { slideOutOfContainer(AnimatedContentTransitionScope.SlideDirection.Right, tween(220)) }
         ) {
             composable("courses") {
-                CoursesScreen(courseState, sttState, courses) { id ->
-                    courses.enterCourse(id)
-                    nav.navigate("course/$id")
-                }
+                LaunchedEffect(Unit) { courses.refreshSuggestion() }
+                HomeScreen(
+                    courses = courseState.courseSummaries,
+                    recent = courseState.recentSessions,
+                    startCourse = courseState.courseSummaries.firstOrNull { it.course.id == startCourseId },
+                    suggestion = courseState.suggestion,
+                    listening = sttState,
+                    processing = recordingState.processing,
+                    pendingRecordingCounts = recordingState.pendingCounts,
+                    pickCourse = { pickingStartCourse = true },
+                    start = { mode ->
+                        val courseId = startCourseId
+                        if (courseId == null) { newName = ""; courseCreation = CourseCreation.ThenStart(mode) }
+                        else quickStart(courseId, mode)
+                    },
+                    stop = stt::stopListening,
+                    openRecord = { summary ->
+                        courses.selectRecord(summary.session.courseId, summary.session.id)
+                        nav.navigate("record/${summary.session.id}")
+                    },
+                    openActiveRecord = { sttState.activeRecordId?.let { nav.navigate("record/$it") } },
+                    openCourse = { id ->
+                        courses.enterCourse(id)
+                        nav.navigate("course/$id")
+                    },
+                    courseMenu = { summary -> CourseMenu(summary.course, sttState, courses) }
+                )
             }
             composable("ai") {
                 GlobalAiScreen(ai) { key, ownerRecordId ->

@@ -43,6 +43,27 @@ class CourseRepository(
         }
         attachmentStore?.deleteRecord(id)
     }
+    val courseSummaries: Flow<List<CourseSummary>> = database.courseDao().courseSummaries()
+    fun recentSummaries(limit: Int) = database.recordDao().recentSummaries(limit)
+    fun summariesForCourse(courseId: Long) = database.recordDao().summariesForCourse(courseId)
+    suspend fun courseStartsSince(since: Long) = database.recordDao().courseStartsSince(since)
+
+    /**
+     * Files a record under another course. Only the record row changes: segments, recordings and
+     * AI content hang off the record, and sync carries the course by name, so other devices follow.
+     * An auto-generated name ("旧课程-MM-dd") is regenerated for the new course; a name the user
+     * typed is kept.
+     */
+    suspend fun moveRecord(recordId: Long, targetCourseId: Long, now: Long = System.currentTimeMillis()): Boolean =
+        database.withTransaction {
+            val record = database.recordDao().recordNow(recordId) ?: return@withTransaction false
+            if (record.courseId == targetCourseId) return@withTransaction true
+            val target = database.courseDao().courseNow(targetCourseId) ?: return@withTransaction false
+            val source = database.courseDao().courseNow(record.courseId)
+            val generated = source != null && record.name == RecordNameGenerator.defaultName(source.name, record.startedAt)
+            val name = if (generated) RecordNameGenerator.defaultName(target.name, record.startedAt) else record.name
+            database.recordDao().moveToCourse(recordId, targetCourseId, name, maxOf(now, record.updatedAt + 1)) > 0
+        }
     suspend fun reopenRecord(id: Long) = database.recordDao().reopen(id, System.currentTimeMillis())
     suspend fun finishRecord(id: Long) = database.recordDao().end(id, System.currentTimeMillis())
     suspend fun saveSegment(recordId: Long, start: Long, end: Long, duration: Long, recognitionDuration: Long?, text: String): Long {

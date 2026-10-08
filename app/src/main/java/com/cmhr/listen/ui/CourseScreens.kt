@@ -61,51 +61,6 @@ import com.cmhr.listen.data.course.TranscriptEntity
 import com.cmhr.listen.data.stt.AsrPromptMode
 
 @Composable
-fun CoursesScreen(
-    state: CourseUiState,
-    listening: ListeningUiState,
-    model: CourseViewModel,
-    openCourse: (Long) -> Unit
-) {
-    var warning by remember { mutableStateOf<String?>(null) }
-    var deleteTarget by remember { mutableStateOf<CourseEntity?>(null) }
-    LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        warning?.let { message ->
-            item("course-warning") { ErrorCard(message) }
-        }
-        if (state.courses.isEmpty()) item("empty-courses") { Text("尚未创建课程，请使用右下角按钮新建。") }
-        items(state.courses, key = { "course-${it.id}" }) { course ->
-            CourseCard(
-                course = course,
-                selected = state.selectedCourse?.id == course.id,
-                enter = { openCourse(course.id) },
-                rename = { model.renameCourse(course.id, it) },
-                editAsrPrompt = { prompt, mode ->
-                    model.updateCourseAsrPrompt(course.id, prompt)
-                    model.updateCourseAsrPromptMode(course.id, mode)
-                },
-                delete = {
-                    if (listening.activeRecordId != null) warning = "监听期间不能删除课程，请先停止监听。"
-                    else deleteTarget = course
-                }
-            )
-        }
-    }
-    deleteTarget?.let { course ->
-        TimedDeleteDialog(
-            title = "删除课程",
-            message = "将删除“${course.name}”及其所有课堂记录、识别内容和 AI 内容。",
-            confirm = { model.deleteCourse(course.id); deleteTarget = null },
-            dismiss = { deleteTarget = null }
-        )
-    }
-}
-
-@Composable
 fun CourseRecordsScreen(
     courseId: Long,
     state: CourseUiState,
@@ -116,41 +71,72 @@ fun CourseRecordsScreen(
 ) {
     var switchMessage by remember { mutableStateOf<String?>(null) }
     var deleteTarget by remember { mutableStateOf<ClassRecordEntity?>(null) }
+    var renameTarget by remember { mutableStateOf<ClassRecordEntity?>(null) }
+    var renameDraft by remember { mutableStateOf("") }
+    var moveTarget by remember { mutableStateOf<ClassRecordEntity?>(null) }
     androidx.compose.runtime.LaunchedEffect(courseId) {
         if (state.selectedCourse?.id != courseId) model.enterCourse(courseId)
     }
-    val course = state.courses.firstOrNull { it.id == courseId }
-        ?: state.selectedCourse?.takeIf { it.id == courseId }
-    val records = state.records.filter { it.courseId == courseId }
+    val records = state.recordSummaries.filter { it.session.courseId == courseId }
     LazyColumn(
         Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
+        contentPadding = ListWithFabPadding,
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        item("course-name") { Text(course?.name ?: "课程", style = MaterialTheme.typography.titleLarge) }
         if (listening.isListening && listening.activeRecordId != null) item("active-listening-hint") {
             Text("「${listening.currentRecordName ?: "当前课堂"}」正在录制，停止后才能打开其他课堂记录。", color = MaterialTheme.colorScheme.primary)
         }
         switchMessage?.let { item("switch-warning") { ErrorCard(it) } }
-        if (records.isEmpty()) item("empty-records") { Text("尚无课堂记录，请使用右下角按钮新建。") }
-        items(records, key = { "record-${it.id}" }) { record ->
-            RecordCard(
-                record = record,
-                selected = state.selectedRecord?.id == record.id,
-                capturing = listening.isListening && listening.activeRecordId == record.id,
+        if (records.isEmpty()) item("empty-records") {
+            Text("还没有课堂记录。可以在首页直接「开始上课」，或用右下角按钮新建。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        items(records, key = { "record-${it.session.id}" }) { summary ->
+            val record = summary.session
+            val capturing = listening.isListening && listening.activeRecordId == record.id
+            SessionRow(
+                summary = summary,
+                showCourse = false,
+                capturing = capturing,
                 pendingRecordings = pendingRecordingCounts[record.id] ?: 0,
-                select = {
+                open = {
                     val activeId = listening.activeRecordId
                     if (activeId == null || activeId == record.id) openRecord(record.id)
                     else switchMessage = "「${listening.currentRecordName ?: "另一条课堂记录"}」正在录制，请先停止。"
                 },
-                rename = { model.renameRecord(record.id, it) },
-                delete = {
-                    if (listening.activeRecordId == record.id) switchMessage = "这条课堂记录正在录制，停止后才能删除。"
-                    else deleteTarget = record
+                menu = {
+                    RowMenu(
+                        description = "${record.name} 的操作",
+                        actions = listOf(
+                            "重命名" to { renameDraft = record.name; renameTarget = record },
+                            "移到其他课程" to {
+                                if (capturing) switchMessage = "这条课堂记录正在录制，停止后才能移动。" else moveTarget = record
+                            },
+                            "删除" to {
+                                if (capturing) switchMessage = "这条课堂记录正在录制，停止后才能删除。" else deleteTarget = record
+                            }
+                        )
+                    )
                 }
             )
         }
+    }
+    renameTarget?.let { record ->
+        NameDialog("重命名课堂记录", renameDraft, { renameDraft = it }, { model.renameRecord(record.id, renameDraft); renameTarget = null }, { renameTarget = null })
+    }
+    moveTarget?.let { record ->
+        CoursePickerDialog(
+            title = "移到哪门课？",
+            message = "文字、录音和 AI 内容会一起移动。",
+            courses = state.courseSummaries,
+            initialCourseId = record.courseId,
+            confirmLabel = "移动",
+            confirm = { model.moveRecord(record.id, it); moveTarget = null },
+            createNew = {
+                moveTarget = null
+                switchMessage = "请先在首页新建课程，再回来移动。"
+            },
+            dismiss = { moveTarget = null }
+        )
     }
     deleteTarget?.let { record ->
         TimedDeleteDialog(
@@ -388,49 +374,51 @@ internal fun SelectableTranscriptCard(
     }
 }
 
+/** "⋮" for a course: ASR 提示词 / 重命名 / 删除, each with its dialog. */
 @Composable
-private fun CourseCard(
-    course: CourseEntity,
-    selected: Boolean,
-    enter: () -> Unit,
-    rename: (String) -> Unit,
-    editAsrPrompt: (String, String?) -> Unit,
-    delete: () -> Unit
-) {
+internal fun CourseMenu(course: CourseEntity, listening: ListeningUiState, model: CourseViewModel) {
     var renaming by remember { mutableStateOf(false) }
     var editingPrompt by remember { mutableStateOf(false) }
+    var deleting by remember { mutableStateOf(false) }
+    var warning by remember { mutableStateOf<String?>(null) }
     var name by remember(course.id, course.name) { mutableStateOf(course.name) }
     var prompt by remember(course.id, course.asrPrompt) { mutableStateOf(course.asrPrompt) }
     var promptMode by remember(course.id, course.asrPromptModeOverride) { mutableStateOf(course.asrPromptModeOverride) }
-    if (renaming) NameDialog("重命名课程", name, { name = it }, { rename(name); renaming = false }, { renaming = false })
+    RowMenu(
+        description = "${course.name} 的操作",
+        actions = listOf(
+            "重命名" to { renaming = true },
+            "ASR 提示词" to { editingPrompt = true },
+            "删除课程" to {
+                if (listening.isListening) warning = "正在录制时不能删除课程，请先停止。" else deleting = true
+            }
+        )
+    )
+    if (renaming) NameDialog("重命名课程", name, { name = it }, { model.renameCourse(course.id, name); renaming = false }, { renaming = false })
     if (editingPrompt) AsrPromptDialog(
         prompt = prompt,
         update = { prompt = it },
         modeOverride = promptMode,
         updateMode = { promptMode = it },
-        save = { editAsrPrompt(prompt, promptMode); editingPrompt = false },
+        save = {
+            model.updateCourseAsrPrompt(course.id, prompt)
+            model.updateCourseAsrPromptMode(course.id, promptMode)
+            editingPrompt = false
+        },
         dismiss = { editingPrompt = false }
     )
-    Card(Modifier.fillMaxWidth().clickable(onClick = enter)) {
-        Row(
-            Modifier.fillMaxWidth().padding(start = 16.dp, top = 12.dp, end = 8.dp, bottom = 12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text(course.name, style = MaterialTheme.typography.titleMedium)
-                if (selected) Text("当前课程", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall)
-                if (course.asrPrompt.isNotBlank()) Text("已配置 ASR 提示词", style = MaterialTheme.typography.bodySmall)
-            }
-            IconButton(onClick = { editingPrompt = true }, modifier = Modifier.size(40.dp)) {
-                Icon(Icons.Outlined.Description, contentDescription = "编辑 ASR 提示词")
-            }
-            IconButton(onClick = { renaming = true }, modifier = Modifier.size(40.dp)) {
-                Icon(Icons.Outlined.Edit, contentDescription = "重命名课程")
-            }
-            IconButton(onClick = delete, modifier = Modifier.size(40.dp)) {
-                Icon(Icons.Outlined.Delete, contentDescription = "删除课程", tint = MaterialTheme.colorScheme.error)
-            }
-        }
+    if (deleting) TimedDeleteDialog(
+        title = "删除课程",
+        message = "将删除“${course.name}”及其所有课堂记录、识别内容和 AI 内容。",
+        confirm = { model.deleteCourse(course.id); deleting = false },
+        dismiss = { deleting = false }
+    )
+    warning?.let { message ->
+        AlertDialog(
+            onDismissRequest = { warning = null },
+            text = { Text(message) },
+            confirmButton = { TextButton(onClick = { warning = null }) { Text("知道了") } }
+        )
     }
 }
 
@@ -472,43 +460,6 @@ internal fun AsrPromptDialog(
     confirmButton = { TextButton(onClick = save) { Text("保存") } },
     dismissButton = { TextButton(onClick = dismiss) { Text("取消") } }
 )
-
-@Composable
-private fun RecordCard(
-    record: ClassRecordEntity,
-    selected: Boolean,
-    capturing: Boolean,
-    pendingRecordings: Int,
-    select: () -> Unit,
-    rename: (String) -> Unit,
-    delete: () -> Unit
-) {
-    var editing by remember { mutableStateOf(false) }
-    var name by remember(record.id, record.name) { mutableStateOf(record.name) }
-    if (editing) NameDialog("重命名课堂记录", name, { name = it }, { rename(name); editing = false }, { editing = false })
-    Card(Modifier.fillMaxWidth().clickable(onClick = select)) {
-        Row(
-            Modifier.fillMaxWidth().padding(start = 16.dp, top = 12.dp, end = 8.dp, bottom = 12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text(record.name, style = MaterialTheme.typography.titleMedium)
-                Text(formatDateTime(record.startedAt), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                when {
-                    capturing -> Text("● 正在录制", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelMedium)
-                    pendingRecordings > 0 -> Text("$pendingRecordings 段录音待识别", color = MaterialTheme.colorScheme.tertiary, style = MaterialTheme.typography.labelMedium)
-                    selected -> Text("上次打开", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium)
-                }
-            }
-            IconButton(onClick = { editing = true }, modifier = Modifier.size(40.dp)) {
-                Icon(Icons.Outlined.Edit, contentDescription = "重命名课堂记录")
-            }
-            IconButton(onClick = delete, modifier = Modifier.size(40.dp)) {
-                Icon(Icons.Outlined.Delete, contentDescription = "删除课堂记录", tint = MaterialTheme.colorScheme.error)
-            }
-        }
-    }
-}
 
 @Composable
 private fun RecordDetailCard(
