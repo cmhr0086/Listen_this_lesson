@@ -361,13 +361,13 @@ Authorization: Bearer <SYNC_API_TOKEN>
 - 服务端不保存 `syncStatus`。
 - `/health` 无鉴权；Token 缺失或错误返回 401。
 
-Android 当前批量：Session 50、Segment 100。DAO 每次查询当前前 N 条 PENDING，按 `updatedAt, id` 排序，不使用 OFFSET。Session 先于其 Segment 上传。
+Android 当前批量（v1.0.4 起，见 `SyncBatchLimits`）：Session 200、Segment 500，且每批按 UTF-8 约 400 KB 封顶；条数上限需保持在 SQLite 999 绑定参数以内。DAO 每次查询当前前 N 条 PENDING，按 `updatedAt, id` 排序，不使用 OFFSET。Session 先于其 Segment 上传。
 
 Ack 只有在 `id`、本次上传的 `updatedAt` 与 `matches=true` 同时满足时才确认；DAO 还会再次检查本地 `updatedAt` 未变化，防止请求期间本地编辑被误标为 `SYNCED`。
 
 每批成功后只确认该批。中途失败时此前批次保持成功，剩余数据保持 PENDING。持久化 `lastSyncAt` 只在所有批次及服务端增量合并都成功后更新。
 
-服务端使用 SQLite `BEGIN IMMEDIATE`，在事务内分配单调 `serverTime` 并写 `serverChangedAt`，返回 `(lastSyncAt, serverTime]`。不要用请求到达顺序或客户端 `updatedAt` 代替服务端增量游标。
+服务端使用 SQLite `BEGIN IMMEDIATE`，在事务内分配单调 `serverTime` 并写 `serverChangedAt`，返回 `(lastSyncAt, serverTime]`。v1.0.4 / sync-server 1.1.0 起，增量结果不再包含本次请求中 `matches=true` 的行（客户端已持有完全相同的版本），`matches=false` 的行始终返回权威版本。服务端响应头 `X-Listen-Sync-Capabilities: gzip-request` 表示可接受 gzip 请求体，客户端只在看到该声明后才压缩上传。不要用请求到达顺序或客户端 `updatedAt` 代替服务端增量游标。
 
 ## 10. AI 拍照附件
 
