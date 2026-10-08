@@ -132,8 +132,9 @@ def test_new_session_and_segment_upload_then_second_device_download(client):
 
     assert uploaded["sessionAcks"] == [{"id": session["sessionId"], "updatedAt": 1_000, "matches": True}]
     assert uploaded["segmentAcks"] == [{"id": segment["segmentId"], "updatedAt": 1_100, "matches": True}]
-    assert uploaded["sessions"] == [session]
-    assert uploaded["segments"] == [segment]
+    # Accepted uploads are acknowledged, not echoed back to the uploader.
+    assert uploaded["sessions"] == []
+    assert uploaded["segments"] == []
 
     downloaded = sync(client, device_id=device_b)
     assert downloaded["sessions"] == [session]
@@ -154,7 +155,10 @@ def test_segment_modification_and_soft_deletes_are_incremental(client):
         last_sync_at=initial["serverTime"],
         segments=[changed_segment],
     )
-    assert changed["segments"] == [changed_segment]
+    assert changed["segmentAcks"] == [{"id": segment["segmentId"], "updatedAt": 2_000, "matches": True}]
+    assert changed["segments"] == []
+    other_device = sync(client, device_id=str(uuid4()), last_sync_at=initial["serverTime"])
+    assert other_device["segments"] == [changed_segment]
 
     deleted_session = {**session, "updatedAt": 3_000, "deleted": True}
     deleted_segment = {**changed_segment, "updatedAt": 3_100, "deleted": True}
@@ -165,8 +169,10 @@ def test_segment_modification_and_soft_deletes_are_incremental(client):
         sessions=[deleted_session],
         segments=[deleted_segment],
     )
-    assert tombstones["sessions"][0]["deleted"] is True
-    assert tombstones["segments"][0]["deleted"] is True
+    assert all(ack["matches"] for ack in tombstones["sessionAcks"] + tombstones["segmentAcks"])
+    other_device = sync(client, device_id=str(uuid4()), last_sync_at=changed["serverTime"])
+    assert other_device["sessions"][0]["deleted"] is True
+    assert other_device["segments"][0]["deleted"] is True
 
 
 def test_older_client_never_overwrites_newer_server_and_receives_authority(client):
@@ -191,7 +197,9 @@ def test_newer_client_overwrites_older_server(client):
     response = sync(client, device_id=device, last_sync_at=first["serverTime"], sessions=[newer])
 
     assert response["sessionAcks"][0]["matches"] is True
-    assert response["sessions"][0]["name"] == "更新名称"
+    assert response["sessions"] == []
+    downloaded = sync(client, device_id=str(uuid4()))
+    assert downloaded["sessions"][0]["name"] == "更新名称"
 
 
 def test_repeating_identical_sync_is_idempotent(client):
@@ -211,8 +219,8 @@ def test_repeating_identical_sync_is_idempotent(client):
 
     assert repeated["sessionAcks"][0]["matches"] is True
     assert repeated["segmentAcks"][0]["matches"] is True
-    assert len(repeated["sessions"]) == 1
-    assert len(repeated["segments"]) == 1
+    assert repeated["sessions"] == []
+    assert repeated["segments"] == []
     assert empty_delta["sessions"] == []
     assert empty_delta["segments"] == []
 
@@ -265,3 +273,62 @@ def test_server_change_cursor_does_not_miss_late_arrival_with_old_business_times
     )
 
     assert [item["sessionId"] for item in downloaded["sessions"]] == [late["sessionId"]]
+
+
+def test_matched_rows_are_not_echoed_but_other_changes_still_arrive(client):
+    device_a, device_b = str(uuid4()), str(uuid4())
+    from_b = session_payload()
+    sync(client, device_id=device_b, sessions=[from_b])
+    mine = session_payload()
+
+    response = sync(client, device_id=device_a, sessions=[mine])
+
+    assert [item["sessionId"] for item in response["sessions"]] == [from_b["sessionId"]]
+
+
+def test_sync_response_advertises_gzip_request_support(client):
+    response = client.post(
+        "/api/v1/sync",
+        headers={"Authorization": f"Bearer {API_TOKEN}"},
+        json={"deviceId": str(uuid4()), "lastSyncAt": 0, "sessions": [], "segments": []},
+    )
+    assert response.headers["X-Listen-Sync-Capabilities"] == "gzip-request"
+
+
+def test_gzip_compressed_request_body_is_accepted(client):
+    import gzip
+    import json
+
+    session = session_payload()
+    body = json.dumps({"deviceId": str(uuid4()), "lastSyncAt": 0, "sessions": [session], "segments": []}).encode()
+    response = client.post(
+        "/api/v1/sync",
+        content=gzip.compress(body),
+        headers={"Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json", "Content-Encoding": "gzip"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["sessionAcks"][0]["matches"] is True
+
+
+def test_corrupt_gzip_request_body_is_rejected(client):
+    response = client.post(
+        "/api/v1/sync",
+        content=b"not gzip",
+        headers={"Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json", "Content-Encoding": "gzip"},
+    )
+    assert response.status_code == 400
+
+
+def test_large_responses_are_gzip_compressed(client):
+    device = str(uuid4())
+    session = session_payload()
+    segments = [segment_payload(session_id=session["sessionId"]) for _ in range(40)]
+    sync(client, device_id=device, sessions=[session], segments=segments)
+
+    response = client.post(
+        "/api/v1/sync",
+        headers={"Authorization": f"Bearer {API_TOKEN}", "Accept-Encoding": "gzip"},
+        json={"deviceId": str(uuid4()), "lastSyncAt": 0, "sessions": [], "segments": []},
+    )
+    assert response.headers.get("content-encoding") == "gzip"
+    assert len(response.json()["segments"]) == 40

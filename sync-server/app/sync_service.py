@@ -80,6 +80,18 @@ def _merge_segments(db: Session, incoming: list[SegmentPayload], changed_at: int
     ]
 
 
+def _delta_filter(changed_at, row_id, last_sync_at: int, server_time: int, acks: list[SyncAck]) -> list:
+    matched_ids = [ack.id for ack in acks if ack.matches]
+    rejected_ids = [ack.id for ack in acks if not ack.matches]
+    changed = changed_at > last_sync_at
+    if rejected_ids:
+        changed = or_(changed, row_id.in_(rejected_ids))
+    conditions = [changed, changed_at <= server_time]
+    if matched_ids:
+        conditions.append(row_id.not_in(matched_ids))
+    return conditions
+
+
 def synchronize(db: Session, request: SyncRequest) -> SyncResponse:
     # The engine begins this transaction with BEGIN IMMEDIATE. The cutoff is
     # persisted in the same transaction, and every accepted row gets exactly
@@ -89,23 +101,24 @@ def synchronize(db: Session, request: SyncRequest) -> SyncResponse:
         session_acks = _merge_sessions(db, request.sessions, server_time)
         segment_acks = _merge_segments(db, request.segments, server_time)
 
-        requested_session_ids = [item.sessionId for item in request.sessions]
-        requested_segment_ids = [item.segmentId for item in request.segments]
-        session_filter = SessionRecord.serverChangedAt > request.lastSyncAt
-        segment_filter = SegmentRecord.serverChangedAt > request.lastSyncAt
-        if requested_session_ids:
-            session_filter = or_(session_filter, SessionRecord.sessionId.in_(requested_session_ids))
-        if requested_segment_ids:
-            segment_filter = or_(segment_filter, SegmentRecord.segmentId.in_(requested_segment_ids))
+        # A matching ack means the client already holds exactly the server row, so echoing it
+        # back only doubles traffic. Rows the client lost (matches=False) are always returned,
+        # even if older than the cursor, so the client can adopt the authoritative version.
+        session_filter = _delta_filter(
+            SessionRecord.serverChangedAt, SessionRecord.sessionId, request.lastSyncAt, server_time, session_acks
+        )
+        segment_filter = _delta_filter(
+            SegmentRecord.serverChangedAt, SegmentRecord.segmentId, request.lastSyncAt, server_time, segment_acks
+        )
 
         session_rows = db.scalars(
             select(SessionRecord)
-            .where(session_filter, SessionRecord.serverChangedAt <= server_time)
+            .where(*session_filter)
             .order_by(SessionRecord.serverChangedAt, SessionRecord.sessionId)
         ).all()
         segment_rows = db.scalars(
             select(SegmentRecord)
-            .where(segment_filter, SegmentRecord.serverChangedAt <= server_time)
+            .where(*segment_filter)
             .order_by(SegmentRecord.serverChangedAt, SegmentRecord.segmentId)
         ).all()
 

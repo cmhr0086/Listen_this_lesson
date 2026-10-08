@@ -6,11 +6,27 @@ import com.cmhr.listen.data.course.ListenDatabase
 import com.cmhr.listen.data.course.SegmentEntity
 import com.cmhr.listen.data.course.SessionEntity
 import com.cmhr.listen.data.course.SyncStatus
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+
+/**
+ * Upload batch limits. Item caps stay under SQLite's 999 bound-variable limit on old Android
+ * (acks are checked with `IN (...)`), and the byte cap keeps each request well under nginx's
+ * default 1 MiB body limit even when segments carry long text.
+ */
+data class SyncBatchLimits(
+    val sessions: Int = 200,
+    val segments: Int = 500,
+    val maxPayloadBytes: Int = 400_000
+) {
+    init { require(sessions in 1..900 && segments in 1..900 && maxPayloadBytes > 0) }
+}
 
 class SyncRepository(
     private val database: ListenDatabase,
     private val stateStore: SyncStateStore,
-    private val remote: SyncRemoteDataSource = SyncApiClient()
+    private val remote: SyncRemoteDataSource = SyncApiClient(),
+    private val limits: SyncBatchLimits = SyncBatchLimits()
 ) {
     suspend fun synchronize(
         baseUrl: String,
@@ -47,19 +63,23 @@ class SyncRepository(
         while (true) {
             // Always query the current first page. Confirmed rows disappear from
             // PENDING, so OFFSET would skip records after every successful batch.
-            val pendingSessions = database.recordDao().pendingSessions(SESSION_BATCH_SIZE)
-            val pendingSegments = if (pendingSessions.isEmpty()) {
-                database.transcriptDao().pendingSegments(SEGMENT_BATCH_SIZE)
+            val sessionPayloads = database.recordDao().pendingSessions(limits.sessions)
+                .map { row -> row.session.toPayload(row.courseName) }
+                .takeWithinBytes(limits.maxPayloadBytes) { payloadJson.encodeToString(it).toByteArray(Charsets.UTF_8).size }
+            val segmentPayloads = if (sessionPayloads.isEmpty()) {
+                database.transcriptDao().pendingSegments(limits.segments)
+                    .map(SegmentEntity::toPayload)
+                    .takeWithinBytes(limits.maxPayloadBytes) { payloadJson.encodeToString(it).toByteArray(Charsets.UTF_8).size }
             } else {
                 emptyList()
             }
-            if (pendingSessions.isEmpty() && pendingSegments.isEmpty() && sentRequest) break
+            if (sessionPayloads.isEmpty() && segmentPayloads.isEmpty() && sentRequest) break
 
             val request = SyncRequest(
                 deviceId = deviceId,
                 lastSyncAt = workingCursor,
-                sessions = pendingSessions.map { row -> row.session.toPayload(row.courseName) },
-                segments = pendingSegments.map(SegmentEntity::toPayload)
+                sessions = sessionPayloads,
+                segments = segmentPayloads
             )
             batchNumber += 1
             onProgress(progress())
@@ -216,9 +236,22 @@ class SyncRepository(
     )
 
     private companion object {
-        const val SESSION_BATCH_SIZE = 50
-        const val SEGMENT_BATCH_SIZE = 100
+        // Only used to measure each payload's UTF-8 size for the per-request byte cap.
+        val payloadJson = Json { encodeDefaults = true; explicitNulls = true }
     }
+}
+
+/** Longest prefix whose estimated size fits [maxBytes]; always keeps the first item so sync progresses. */
+internal inline fun <T> List<T>.takeWithinBytes(maxBytes: Int, size: (T) -> Int): List<T> {
+    var total = 0
+    val result = ArrayList<T>(this.size)
+    for (item in this) {
+        val itemSize = size(item)
+        if (result.isNotEmpty() && total + itemSize > maxBytes) break
+        result += item
+        total += itemSize
+    }
+    return result
 }
 
 private fun SessionEntity.toPayload(courseName: String) = SyncSessionPayload(

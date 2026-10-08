@@ -102,7 +102,7 @@ class SyncRepositoryTest {
                 successfulResponse(request)
             }
 
-            SyncRepository(database, state, remote).synchronize("https://sync.example.com", progress::add)
+            SyncRepository(database, state, remote, SMALL_BATCHES).synchronize("https://sync.example.com", progress::add)
 
             assertEquals(listOf(100, 100, 5), batchSizes)
             assertEquals(0, database.transcriptDao().pendingSegmentCount())
@@ -133,10 +133,47 @@ class SyncRepositoryTest {
                 successfulResponse(request)
             }
 
-            SyncRepository(database, FakeSyncState(), remote).synchronize("https://sync.example.com")
+            SyncRepository(database, FakeSyncState(), remote, SMALL_BATCHES).synchronize("https://sync.example.com")
 
             assertEquals(listOf(50, 50, 1), batchSizes)
             assertEquals(0, database.recordDao().pendingSessionCount())
+        }
+    }
+
+    @Test
+    fun defaultLimitsUploadFiveHundredSegmentsPerRequest() = runBlocking {
+        withDatabase { database ->
+            insertPendingSegments(database, 1_205)
+            val batchSizes = mutableListOf<Int>()
+            val remote = SyncRemoteDataSource { _, _, request ->
+                if (request.segments.isNotEmpty()) batchSizes += request.segments.size
+                successfulResponse(request)
+            }
+
+            SyncRepository(database, FakeSyncState(), remote).synchronize("https://sync.example.com")
+
+            assertEquals(listOf(500, 500, 205), batchSizes)
+            assertEquals(0, database.transcriptDao().pendingSegmentCount())
+        }
+    }
+
+    @Test
+    fun byteCapSplitsBatchesOfLongSegments() = runBlocking {
+        withDatabase { database ->
+            insertPendingSegments(database, 10)
+            val sizes = mutableListOf<Int>()
+            val remote = SyncRemoteDataSource { _, _, request ->
+                if (request.segments.isNotEmpty()) sizes += request.segments.size
+                successfulResponse(request)
+            }
+            // Each test segment encodes to a few hundred bytes, so a 1 KB cap allows only a few per request.
+            SyncRepository(database, FakeSyncState(), remote, com.cmhr.listen.data.sync.SyncBatchLimits(maxPayloadBytes = 1_000))
+                .synchronize("https://sync.example.com")
+
+            assertTrue(sizes.size > 1)
+            assertTrue(sizes.all { it in 1..4 })
+            assertEquals(10, sizes.sum())
+            assertEquals(0, database.transcriptDao().pendingSegmentCount())
         }
     }
 
@@ -153,7 +190,7 @@ class SyncRepositoryTest {
             }
 
             val error = runCatching {
-                SyncRepository(database, state, failingRemote).synchronize("https://sync.example.com")
+                SyncRepository(database, state, failingRemote, SMALL_BATCHES).synchronize("https://sync.example.com")
             }.exceptionOrNull()
 
             assertNotNull(error)
@@ -165,7 +202,7 @@ class SyncRepositoryTest {
                 resumedBatchSizes += request.segments.size
                 successfulResponse(request)
             }
-            SyncRepository(database, state, resumedRemote).synchronize("https://sync.example.com")
+            SyncRepository(database, state, resumedRemote, SMALL_BATCHES).synchronize("https://sync.example.com")
 
             assertEquals(listOf(100, 50), resumedBatchSizes)
             assertEquals(0, database.transcriptDao().pendingSegmentCount())
@@ -465,3 +502,6 @@ private class FakeSyncState(
         lastSyncAt = value
     }
 }
+
+/** The pre-1.0.4 limits; keeps the multi-batch / resume tests small. */
+private val SMALL_BATCHES = com.cmhr.listen.data.sync.SyncBatchLimits(sessions = 50, segments = 100)
