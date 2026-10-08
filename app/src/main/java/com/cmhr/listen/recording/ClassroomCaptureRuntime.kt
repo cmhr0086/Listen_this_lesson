@@ -8,6 +8,8 @@ import com.cmhr.listen.audio.PcmRecorder
 import com.cmhr.listen.audio.StreamingWavRecorder
 import com.cmhr.listen.data.course.CourseRepository
 import com.cmhr.listen.data.course.ListenDatabase
+import com.cmhr.listen.data.recording.RecordingEntity
+import com.cmhr.listen.data.recording.RecordingRecovery
 import com.cmhr.listen.data.recording.RecordingRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -64,7 +66,7 @@ class ClassroomCaptureRuntime private constructor(private val context: Context) 
     private val _state = MutableStateFlow(CaptureRuntimeState())
     val state: StateFlow<CaptureRuntimeState> = _state.asStateFlow()
 
-    init { scope.launch { recordings.recoverInterrupted() } }
+    init { scope.launch { RecordingRecovery.ensure(recordings) } }
 
     fun tryClaimRealtime(recordId: Long): Boolean {
         if (!RecordingOperationGuard.tryAcquire(REALTIME_OWNER) || !mutex.tryLock()) {
@@ -95,44 +97,41 @@ class ClassroomCaptureRuntime private constructor(private val context: Context) 
         }
         job = scope.launch {
             var writer: StreamingWavRecorder? = null
-            var row: com.cmhr.listen.data.recording.RecordingEntity? = null
+            var row: RecordingEntity? = null
             try {
+                RecordingRecovery.ensure(recordings)
                 val record = courses.record(recordId).first() ?: error("课堂记录不存在或已被删除。")
                 val course = courses.course(record.courseId).first()
                 courses.reopenRecord(recordId)
-                row = recordings.create(recordId, record.sessionId)
+                val created = recordings.create(recordId, record.sessionId).also { row = it }
                 val startedElapsed = SystemClock.elapsedRealtime()
-                _state.value = CaptureRuntimeState(true, CaptureMode.RECORD_ONLY, recordId, row.recordingId, startedElapsed, course?.name, record.name)
+                _state.value = CaptureRuntimeState(true, CaptureMode.RECORD_ONLY, recordId, created.recordingId, startedElapsed, course?.name, record.name)
                 ListeningForegroundService.startRecordOnly(context, recordId, course?.name, record.name, startedElapsed)
-                writer = StreamingWavRecorder(File(recordings.directory, row.localPath))
+                val activeWriter = StreamingWavRecorder(File(recordings.directory, created.localPath)).also { writer = it }
                 var lastCheckpoint = startedElapsed
                 recorder.listen(onPcmChunk = { pcm ->
-                    writer.append(pcm)
+                    activeWriter.append(pcm)
                     val nowElapsed = SystemClock.elapsedRealtime()
                     if (nowElapsed - lastCheckpoint >= CHECKPOINT_MS) {
-                        writer.sync()
-                        recordings.updateCaptureProgress(row.recordingId, writer.totalFrames)
-                        _state.value = _state.value.copy(durationMs = writer.totalFrames * 1_000 / PcmRecorder.SAMPLE_RATE_HZ)
+                        // Header + fsync first, then publish: the saved length shown in the UI is
+                        // always audio that survives a process kill.
+                        activeWriter.checkpoint()
+                        recordings.updateCaptureProgress(created.recordingId, activeWriter.checkpointedFrames)
+                        _state.value = _state.value.copy(durationMs = activeWriter.checkpointedFrames * 1_000 / PcmRecorder.SAMPLE_RATE_HZ)
                         lastCheckpoint = nowElapsed
                     }
                 })
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
-                row?.let { recordings.recording(it.recordingId)?.let { current -> recordings.updateCaptureProgress(current.recordingId, writer?.totalFrames ?: 0) } }
                 _state.value = _state.value.copy(error = error.message ?: "录音失败。")
             } finally {
                 withContext(NonCancellable) {
                     val currentRow = row
-                    val currentWriter = writer
-                    if (currentRow != null && currentWriter != null) {
-                        runCatching {
-                            val part = currentWriter.finish()
-                            val final = File(recordings.directory, "${currentRow.recordingId}.wav")
-                            check(part.renameTo(final)) { "无法完成录音文件。" }
-                            recordings.finalizeCapture(currentRow, final)
-                        }.onFailure { recordings.recording(currentRow.recordingId)?.let { recordings.updateCaptureProgress(it.recordingId, currentWriter.totalFrames) } }
-                    } else currentWriter?.close()
+                    writer?.let { active -> runCatching { active.finish() }.onFailure { active.close() } }
+                    if (currentRow != null) {
+                        runCatching { recordings.finalizeCapture(currentRow, File(recordings.directory, currentRow.localPath)) }
+                    }
                     runCatching { courses.finishRecord(recordId) }
                     ListeningForegroundService.stop(context)
                     _state.value = CaptureRuntimeState(error = _state.value.error)
@@ -147,7 +146,7 @@ class ClassroomCaptureRuntime private constructor(private val context: Context) 
     fun isBusy(): Boolean = RecordingOperationGuard.isBusy()
 
     companion object {
-        private const val CHECKPOINT_MS = 5_000L
+        private const val CHECKPOINT_MS = 2_000L
         private const val REALTIME_OWNER = "realtime_capture"
         private const val RECORD_ONLY_OWNER = "record_only_capture"
         @Volatile private var instance: ClassroomCaptureRuntime? = null

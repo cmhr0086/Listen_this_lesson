@@ -27,7 +27,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -38,7 +37,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -55,18 +53,12 @@ import com.cmhr.listen.CourseUiState
 import com.cmhr.listen.CourseViewModel
 import com.cmhr.listen.ListeningUiState
 import com.cmhr.listen.RecordingUiState
-import com.cmhr.listen.data.recording.RecordingEntity
-import com.cmhr.listen.data.recording.RecordingState
 import com.cmhr.listen.recording.CaptureMode
-import com.cmhr.listen.audio.PcmRecorder
 import com.cmhr.listen.data.ai.AiActionType
 import com.cmhr.listen.data.course.ClassRecordEntity
 import com.cmhr.listen.data.course.CourseEntity
 import com.cmhr.listen.data.course.TranscriptEntity
 import com.cmhr.listen.data.stt.AsrPromptMode
-import android.os.SystemClock
-import kotlinx.coroutines.delay
-import java.util.Locale
 
 @Composable
 fun CoursesScreen(
@@ -119,6 +111,7 @@ fun CourseRecordsScreen(
     state: CourseUiState,
     listening: ListeningUiState,
     model: CourseViewModel,
+    pendingRecordingCounts: Map<Long, Int> = emptyMap(),
     openRecord: (Long) -> Unit
 ) {
     var switchMessage by remember { mutableStateOf<String?>(null) }
@@ -135,8 +128,8 @@ fun CourseRecordsScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item("course-name") { Text(course?.name ?: "课程", style = MaterialTheme.typography.titleLarge) }
-        if (listening.activeRecordId != null) item("active-listening-hint") {
-            Text("当前正在监听；停止后才能新建或切换课堂记录。", color = MaterialTheme.colorScheme.primary)
+        if (listening.isListening && listening.activeRecordId != null) item("active-listening-hint") {
+            Text("「${listening.currentRecordName ?: "当前课堂"}」正在录制，停止后才能打开其他课堂记录。", color = MaterialTheme.colorScheme.primary)
         }
         switchMessage?.let { item("switch-warning") { ErrorCard(it) } }
         if (records.isEmpty()) item("empty-records") { Text("尚无课堂记录，请使用右下角按钮新建。") }
@@ -144,14 +137,16 @@ fun CourseRecordsScreen(
             RecordCard(
                 record = record,
                 selected = state.selectedRecord?.id == record.id,
+                capturing = listening.isListening && listening.activeRecordId == record.id,
+                pendingRecordings = pendingRecordingCounts[record.id] ?: 0,
                 select = {
                     val activeId = listening.activeRecordId
                     if (activeId == null || activeId == record.id) openRecord(record.id)
-                    else switchMessage = "当前正在记录 ${listening.currentRecordName ?: "另一条课堂记录"}，请先停止监听。"
+                    else switchMessage = "「${listening.currentRecordName ?: "另一条课堂记录"}」正在录制，请先停止。"
                 },
                 rename = { model.renameRecord(record.id, it) },
                 delete = {
-                    if (listening.activeRecordId == record.id) switchMessage = "当前记录正在监听，停止后才能删除。"
+                    if (listening.activeRecordId == record.id) switchMessage = "这条课堂记录正在录制，停止后才能删除。"
                     else deleteTarget = record
                 }
             )
@@ -183,15 +178,17 @@ fun RecordDetailsScreen(
     openResult: (Long) -> Unit,
     openConversation: (Long) -> Unit,
     recordings: RecordingUiState,
+    startCapture: (CaptureMode) -> Unit,
+    stopCapture: () -> Unit,
     startOfflineRecognition: (String) -> Unit,
-    stopOfflineRecognition: () -> Unit
+    stopOfflineRecognition: () -> Unit,
+    deleteRecording: (String) -> Unit
 ) {
     val record = state.selectedRecord?.takeIf { it.id == recordId }
     val course = record?.let { selected -> state.courses.firstOrNull { it.id == selected.courseId } }
     val segments = state.detailSegments.filter { it.recordId == recordId }
     val selectedIds = aiState.takeIf { it.selectionRecordId == recordId }?.selectedSegmentIds.orEmpty()
     val selectionMode = aiState.selectionRecordId == recordId
-    val isThisRecordListening = listening.activeRecordId == recordId && listening.isListening
     val displayedSegments = segments.asReversed()
     val listState = rememberLazyListState()
     val dragSelection = rememberDragSelectionController(
@@ -255,19 +252,37 @@ fun RecordDetailsScreen(
                 item("record-summary") {
                     RecordDetailCard(course, record)
                 }
-                item("listening-status") {
-                    CompactListeningStatus(listening, isThisRecordListening)
+                item("capture-panel") {
+                    CapturePanel(recordId, listening, recordings.processing, startCapture, stopCapture)
                 }
-                listening.error?.let { item("listening-error") { ErrorCard(it) } }
                 aiState.error?.let { item("ai-error") { ErrorCard(it) } }
                 if (recordings.recordings.isNotEmpty()) {
-                    item("recordings-heading") { Text("本地录音", style = MaterialTheme.typography.titleLarge) }
+                    item("recordings-heading") {
+                        SectionHeading("录音", "${recordings.recordings.size} 段 · 共 ${formatClockDuration(recordings.recordings.totalDurationMs())}")
+                    }
+                    val recognitionAllowed = !listening.isListening && !recordings.processing.isProcessing
+                    val numbered = recordings.recordings.sortedBy { it.startedAt }.withIndex().associate { (index, value) -> value.recordingId to index + 1 }
                     items(recordings.recordings, key = { "recording-${it.recordingId}" }) { recording ->
-                        RecordingCard(recording, recordings, startOfflineRecognition, stopOfflineRecognition)
+                        RecordingItem(
+                            recording = recording,
+                            number = numbered.getValue(recording.recordingId),
+                            processing = recordings.processing,
+                            recognitionAllowed = recognitionAllowed,
+                            startRecognition = startOfflineRecognition,
+                            pauseRecognition = stopOfflineRecognition,
+                            delete = deleteRecording
+                        )
                     }
                 }
-                item("segment-heading") { Text("识别内容", style = MaterialTheme.typography.titleLarge) }
-                if (segments.isEmpty()) item("empty-segments") { Text("该课堂记录暂无识别内容。") }
+                item("segment-heading") { SectionHeading("文字", if (segments.isEmpty()) null else "${segments.size} 段") }
+                if (segments.isEmpty()) item("empty-segments") {
+                    Text(
+                        if (recordings.recordings.isEmpty()) "还没有文字。用「实时转写」上课，或先「仅录音」再识别。"
+                        else "还没有文字。点上方录音的「开始识别」后，文字会出现在这里。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 items(displayedSegments, key = { "segment-${it.id}" }) { segment ->
                     val selected = segment.id in selectedIds
                     SelectableTranscriptCard(
@@ -287,90 +302,20 @@ fun RecordDetailsScreen(
 }
 
 @Composable
-internal fun CompactListeningStatus(listening: ListeningUiState, active: Boolean) {
-    val status = when {
-        !active -> "未监听"
-        listening.captureMode == CaptureMode.RECORD_ONLY -> "仅录音，不调用 ASR"
-        listening.isSpeechDetected -> "正在收音"
-        listening.isRecognizing -> "正在识别"
-        else -> "等待语音"
-    }
-    Card(Modifier.fillMaxWidth().testTag("compact-listening-status")) {
-        Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text(if (active) "正在监听" else "未监听", style = MaterialTheme.typography.titleMedium)
-                ListeningElapsedText(if (active) listening.listeningStartedAtElapsedRealtimeMs else null)
-            }
-            Text(status, color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
-            Text("检测到语音：${if (active && listening.isSpeechDetected) "是" else "否"}", style = MaterialTheme.typography.bodySmall)
-        }
-    }
-}
-
-@Composable
-private fun RecordingCard(
-    recording: RecordingEntity,
-    state: RecordingUiState,
-    startRecognition: (String) -> Unit,
-    stopRecognition: () -> Unit
-) {
-    val runtime = state.processing
-    val active = runtime.activeRecordingId == recording.recordingId
-    val processed = if (active) runtime.processedFrames else recording.processedFrames
-    val total = recording.totalFrames.coerceAtLeast(1)
-    val progress = (processed.toFloat() / total).coerceIn(0f, 1f)
-    Card(Modifier.fillMaxWidth().testTag("recording-${recording.recordingId}")) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+private fun SectionHeading(title: String, detail: String?) {
+    Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.Bottom) {
+        Text(title, style = MaterialTheme.typography.titleLarge)
+        detail?.let {
             Text(
-                when (recording.recordingState) {
-                    RecordingState.RECORDING -> "正在录音"
-                    RecordingState.RECORDED -> "待识别"
-                    RecordingState.PROCESSING -> "正在识别"
-                    RecordingState.COMPLETED -> "识别完成"
-                    RecordingState.FAILED -> "识别未完成"
-                },
-                style = MaterialTheme.typography.titleMedium
+                it,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 8.dp, bottom = 2.dp)
             )
-            Text("本地录音 ${formatClock(recording.durationMs)}", style = MaterialTheme.typography.bodyMedium)
-            if (recording.recordingState == RecordingState.PROCESSING || recording.recordingState == RecordingState.FAILED) {
-                LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
-                Text("${formatClock(processed * 1_000 / PcmRecorder.SAMPLE_RATE_HZ)} / ${formatClock(recording.durationMs)} (${(progress * 100).toInt()}%)", style = MaterialTheme.typography.bodySmall)
-            }
-            recording.errorMessage?.takeIf { it.isNotBlank() }?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
-            state.processing.error?.takeIf { active }?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
-            when {
-                active -> OutlinedButton(onClick = stopRecognition) { Text("停止识别") }
-                recording.recordingState == RecordingState.RECORDED -> Button(onClick = { startRecognition(recording.recordingId) }) { Text("开始识别") }
-                recording.recordingState == RecordingState.FAILED -> Button(onClick = { startRecognition(recording.recordingId) }) { Text("继续识别") }
-                else -> Unit
-            }
         }
     }
 }
 
-private fun formatClock(milliseconds: Long): String {
-    val seconds = milliseconds.coerceAtLeast(0) / 1_000
-    return if (seconds >= 3600) String.format(Locale.US, "%02d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60)
-    else String.format(Locale.US, "%02d:%02d", seconds / 60, seconds % 60)
-}
-
-@Composable
-private fun ListeningElapsedText(startedAt: Long?) {
-    var elapsed by remember(startedAt) { mutableLongStateOf(0L) }
-    androidx.compose.runtime.LaunchedEffect(startedAt) {
-        while (startedAt != null) {
-            elapsed = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
-            delay(1_000)
-        }
-    }
-    val seconds = elapsed / 1_000
-    Text(
-        String.format(Locale.US, "%02d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60),
-        style = MaterialTheme.typography.labelLarge
-    )
-}
-
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun SelectableTranscriptCard(
     segment: TranscriptEntity,
@@ -427,7 +372,7 @@ internal fun SelectableTranscriptCard(
                     style = MaterialTheme.typography.bodySmall
                 )
                 Text(
-                    "音频：${formatDuration(segment.audioDurationMs)}  ·  ASR：${segment.recognitionDurationMs?.let(::formatDuration) ?: "—"}",
+                    "音频：${formatClockDuration(segment.audioDurationMs)}  ·  ASR：${segment.recognitionDurationMs?.let(::formatDuration) ?: "—"}",
                     style = MaterialTheme.typography.bodySmall
                 )
             }
@@ -532,6 +477,8 @@ internal fun AsrPromptDialog(
 private fun RecordCard(
     record: ClassRecordEntity,
     selected: Boolean,
+    capturing: Boolean,
+    pendingRecordings: Int,
     select: () -> Unit,
     rename: (String) -> Unit,
     delete: () -> Unit
@@ -546,8 +493,12 @@ private fun RecordCard(
         ) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Text(record.name, style = MaterialTheme.typography.titleMedium)
-                Text("开始：${formatDateTime(record.startedAt)}", style = MaterialTheme.typography.bodySmall)
-                if (selected) Text("当前记录", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall)
+                Text(formatDateTime(record.startedAt), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                when {
+                    capturing -> Text("● 正在录制", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelMedium)
+                    pendingRecordings > 0 -> Text("$pendingRecordings 段录音待识别", color = MaterialTheme.colorScheme.tertiary, style = MaterialTheme.typography.labelMedium)
+                    selected -> Text("上次打开", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium)
+                }
             }
             IconButton(onClick = { editing = true }, modifier = Modifier.size(40.dp)) {
                 Icon(Icons.Outlined.Edit, contentDescription = "重命名课堂记录")
@@ -565,9 +516,14 @@ private fun RecordDetailCard(
     record: ClassRecordEntity
 ) {
     Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(course.name, style = MaterialTheme.typography.titleSmall)
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(course.name, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(record.name, style = MaterialTheme.typography.titleLarge)
+            Text(
+                formatRecordSpan(record.startedAt, record.endedAt),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }

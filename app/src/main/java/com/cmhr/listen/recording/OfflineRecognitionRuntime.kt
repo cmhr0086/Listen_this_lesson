@@ -10,6 +10,7 @@ import com.cmhr.listen.data.course.CourseRepository
 import com.cmhr.listen.data.course.ListenDatabase
 import com.cmhr.listen.data.recording.RecordingChunkEntity
 import com.cmhr.listen.data.recording.RecordingChunkState
+import com.cmhr.listen.data.recording.RecordingRecovery
 import com.cmhr.listen.data.recording.RecordingRepository
 import com.cmhr.listen.data.recording.RecordingState
 import com.cmhr.listen.data.settings.VadConfigRepository
@@ -28,6 +29,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -62,6 +64,7 @@ class OfflineRecognitionRuntime private constructor(private val context: Context
             return
         }
         job = scope.launch {
+            RecordingRecovery.ensure(recordings)
             val runId = UUID.randomUUID().toString()
             val now = System.currentTimeMillis()
             if (dao.claimProcessing(recordingId, runId, now) == 0) {
@@ -96,12 +99,13 @@ class OfflineRecognitionRuntime private constructor(private val context: Context
                 dao.complete(recordingId, runId, System.currentTimeMillis())
                 _state.value = OfflineRecognitionState()
             } catch (cancelled: CancellationException) {
-                withContext(NonCancellable) { dao.fail(recordingId, System.currentTimeMillis(), "识别已停止，可稍后继续。") }
+                withContext(NonCancellable) { dao.pause(recordingId, System.currentTimeMillis()) }
                 throw cancelled
             } catch (error: Exception) {
                 dao.fail(recordingId, System.currentTimeMillis(), error.message ?: "补识别失败，可稍后继续。")
                 _state.value = _state.value.copy(activeRecordingId = null, error = error.message ?: "补识别失败，可稍后继续。")
             } finally {
+                _state.update { if (it.activeRecordingId == recordingId) it.copy(activeRecordingId = null) else it }
                 RecognitionForegroundService.stop(context)
                 RecordingOperationGuard.release(operationOwner)
                 job = null

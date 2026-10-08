@@ -56,7 +56,9 @@ data class ListeningUiState(
     val currentRecordName: String? = null,
     val asrHealth: AsrHealthSnapshot? = null,
     val error: String? = null,
-    val captureMode: CaptureMode? = null
+    val captureMode: CaptureMode? = null,
+    /** Record-only: audio already fsynced to disk, i.e. what survives a process kill. */
+    val recordOnlySavedMs: Long = 0
 )
 
 class SttViewModel(application: Application) : AndroidViewModel(application) {
@@ -103,6 +105,7 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
                             currentRecordName = capture.recordName ?: current.currentRecordName,
                             isSpeechDetected = false,
                             captureMode = capture.mode,
+                            recordOnlySavedMs = capture.durationMs,
                             error = capture.error ?: current.error
                         )
                     }
@@ -363,7 +366,7 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun stopListening() {
-        _vadDiagnosticsState.update { it.copy(segmentEndReason = "用户停止监听") }
+        _vadDiagnosticsState.update { it.copy(segmentEndReason = "用户停止录制") }
         if (captureRuntime.state.value.mode == CaptureMode.RECORD_ONLY) captureRuntime.stop()
         else {
             listeningJob?.cancel()

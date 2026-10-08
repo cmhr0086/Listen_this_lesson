@@ -142,6 +142,7 @@ data class SessionSyncProjection(
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertRemote(session: SessionEntity): Long
     @Query("UPDATE records SET name = :name, updatedAt = :updatedAt, syncStatus = 'PENDING' WHERE id = :id AND deleted = 0") suspend fun rename(id: Long, name: String, updatedAt: Long)
     @Query("UPDATE records SET endedAt = :endedAt, updatedAt = :endedAt, syncStatus = 'PENDING' WHERE id = :id AND deleted = 0") suspend fun end(id: Long, endedAt: Long)
+    @Query("UPDATE records SET endedAt = :endedAt, updatedAt = :updatedAt, syncStatus = 'PENDING' WHERE id = :id AND deleted = 0 AND endedAt IS NULL") suspend fun endIfOpen(id: Long, endedAt: Long, updatedAt: Long): Int
     @Query("UPDATE records SET endedAt = NULL, updatedAt = :updatedAt, syncStatus = 'PENDING' WHERE id = :id AND deleted = 0") suspend fun reopen(id: Long, updatedAt: Long)
     @Query("UPDATE records SET deleted = 1, updatedAt = :updatedAt, syncStatus = 'PENDING' WHERE id = :id AND deleted = 0") suspend fun softDelete(id: Long, updatedAt: Long): Int
     @Query("UPDATE records SET deleted = 1, updatedAt = :updatedAt, syncStatus = 'PENDING' WHERE courseId = :courseId AND deleted = 0") suspend fun softDeleteForCourse(courseId: Long, updatedAt: Long): Int

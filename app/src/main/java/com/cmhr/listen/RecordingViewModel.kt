@@ -19,7 +19,9 @@ import kotlinx.coroutines.launch
 data class RecordingUiState(
     val recordId: Long? = null,
     val recordings: List<RecordingEntity> = emptyList(),
-    val processing: OfflineRecognitionState = OfflineRecognitionState()
+    val processing: OfflineRecognitionState = OfflineRecognitionState(),
+    /** Session local id -> recordings that still need recognition. */
+    val pendingCounts: Map<Long, Int> = emptyMap()
 )
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -36,6 +38,11 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
                 .collect { values -> _uiState.update { it.copy(recordings = values) } }
         }
         viewModelScope.launch { runtime.state.collect { processing -> _uiState.update { it.copy(processing = processing) } } }
+        viewModelScope.launch {
+            repository.observePendingCounts().collect { rows ->
+                _uiState.update { it.copy(pendingCounts = rows.associate { row -> row.recordId to row.count }) }
+            }
+        }
     }
 
     fun selectRecord(recordId: Long) {
@@ -44,4 +51,5 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
     }
     fun startRecognition(recordingId: String) = runtime.start(recordingId)
     fun stopRecognition() = runtime.stop()
+    fun deleteRecording(recordingId: String) = viewModelScope.launch { repository.delete(recordingId) }
 }

@@ -6,6 +6,8 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import kotlinx.coroutines.flow.Flow
 
+data class PendingRecordingCount(val recordId: Long, val count: Int)
+
 @Dao
 interface RecordingDao {
     @Insert suspend fun insert(recording: RecordingEntity): Long
@@ -14,8 +16,14 @@ interface RecordingDao {
     @Query("SELECT * FROM recordings WHERE recordId = :recordId ORDER BY startedAt DESC, id DESC")
     fun observeForSession(recordId: Long): Flow<List<RecordingEntity>>
 
+    @Query("SELECT recordId, COUNT(*) AS count FROM recordings WHERE state IN ('RECORDED','INTERRUPTED','PAUSED','FAILED') GROUP BY recordId")
+    fun observePendingCounts(): Flow<List<PendingRecordingCount>>
+
     @Query("SELECT * FROM recordings WHERE recordingId = :recordingId LIMIT 1")
     suspend fun recording(recordingId: String): RecordingEntity?
+
+    @Query("SELECT * FROM recordings")
+    suspend fun all(): List<RecordingEntity>
 
     @Query("SELECT * FROM recordings WHERE state = 'RECORDING'")
     suspend fun interruptedRecordings(): List<RecordingEntity>
@@ -26,17 +34,24 @@ interface RecordingDao {
     @Query("UPDATE recordings SET durationMs = :durationMs, totalFrames = :totalFrames, updatedAt = :updatedAt WHERE recordingId = :recordingId AND state = 'RECORDING'")
     suspend fun updateCaptureProgress(recordingId: String, durationMs: Long, totalFrames: Long, updatedAt: Long): Int
 
-    @Query("UPDATE recordings SET localPath = :localPath, endedAt = :endedAt, durationMs = :durationMs, totalFrames = :totalFrames, state = 'RECORDED', updatedAt = :endedAt, errorMessage = :warning WHERE recordingId = :recordingId AND state = 'RECORDING'")
-    suspend fun finalizeCapture(recordingId: String, localPath: String, endedAt: Long, durationMs: Long, totalFrames: Long, warning: String? = null): Int
+    @Query("UPDATE recordings SET localPath = :localPath, endedAt = :endedAt, durationMs = :durationMs, totalFrames = :totalFrames, state = :state, updatedAt = :endedAt, errorMessage = :note WHERE recordingId = :recordingId AND state = 'RECORDING'")
+    suspend fun finalizeCapture(recordingId: String, localPath: String, endedAt: Long, durationMs: Long, totalFrames: Long, state: String = RecordingState.RECORDED.name, note: String? = null): Int
+
+    /** Points a finished recording at its real audio file again (repairs rows broken by older builds). */
+    @Query("UPDATE recordings SET localPath = :localPath, durationMs = :durationMs, totalFrames = :totalFrames, state = :state, errorMessage = :note, updatedAt = :updatedAt WHERE recordingId = :recordingId AND state != 'RECORDING' AND state != 'PROCESSING'")
+    suspend fun relink(recordingId: String, localPath: String, durationMs: Long, totalFrames: Long, state: String, note: String?, updatedAt: Long): Int
 
     @Query("UPDATE recordings SET state = 'FAILED', processingRunId = NULL, updatedAt = :updatedAt, errorMessage = :message WHERE recordingId = :recordingId")
     suspend fun fail(recordingId: String, updatedAt: Long, message: String): Int
 
-    @Query("UPDATE recordings SET state = 'PROCESSING', processingRunId = :runId, updatedAt = :updatedAt, errorMessage = NULL WHERE recordingId = :recordingId AND state IN ('RECORDED','FAILED') AND processingRunId IS NULL")
+    @Query("UPDATE recordings SET state = 'PAUSED', processingRunId = NULL, updatedAt = :updatedAt, errorMessage = NULL WHERE recordingId = :recordingId AND state = 'PROCESSING'")
+    suspend fun pause(recordingId: String, updatedAt: Long): Int
+
+    @Query("UPDATE recordings SET state = 'PROCESSING', processingRunId = :runId, updatedAt = :updatedAt, errorMessage = NULL WHERE recordingId = :recordingId AND state IN ('RECORDED','INTERRUPTED','PAUSED','FAILED') AND processingRunId IS NULL")
     suspend fun claimProcessing(recordingId: String, runId: String, updatedAt: Long): Int
 
-    @Query("UPDATE recordings SET state = 'FAILED', processingRunId = NULL, updatedAt = :updatedAt, errorMessage = :message WHERE state = 'PROCESSING'")
-    suspend fun recoverInterruptedProcessing(updatedAt: Long, message: String): Int
+    @Query("UPDATE recordings SET state = 'PAUSED', processingRunId = NULL, updatedAt = :updatedAt, errorMessage = NULL WHERE state = 'PROCESSING'")
+    suspend fun recoverInterruptedProcessing(updatedAt: Long): Int
 
     @Query("UPDATE recordings SET activeWindowStartFrame = :startFrame, activeWindowEndFrame = :endFrame, vadConfigSnapshot = COALESCE(vadConfigSnapshot, :vadConfig), updatedAt = :updatedAt WHERE recordingId = :recordingId AND processingRunId = :runId")
     suspend fun setActiveWindow(recordingId: String, runId: String, startFrame: Long, endFrame: Long, vadConfig: String, updatedAt: Long): Int
@@ -52,6 +67,9 @@ interface RecordingDao {
 
     @Query("UPDATE recording_chunks SET state = :state, errorMessage = :error WHERE chunkId = :chunkId")
     suspend fun updateChunkState(chunkId: String, state: String, error: String? = null): Int
+
+    @Query("DELETE FROM recordings WHERE recordingId = :recordingId AND state != 'RECORDING' AND state != 'PROCESSING'")
+    suspend fun deleteIdle(recordingId: String): Int
 
     @Query("DELETE FROM recordings WHERE recordId = :recordId")
     suspend fun deleteForSession(recordId: Long): Int

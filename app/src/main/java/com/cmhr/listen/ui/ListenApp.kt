@@ -25,14 +25,12 @@ import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Delete
-import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.School
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SmartToy
 import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExtendedFloatingActionButton
@@ -124,7 +122,6 @@ private sealed interface FabState {
     data object None : FabState
     data object NewCourse : FabState
     data class NewRecord(val courseId: Long) : FabState
-    data class StartListening(val recordId: Long) : FabState
     data class StopListening(val startedAtElapsedRealtimeMs: Long) : FabState
 }
 
@@ -191,7 +188,6 @@ fun ListenApp(
     var newName by remember { mutableStateOf("") }
     var pendingPermissionRecordId by remember { mutableStateOf<Long?>(null) }
     var pendingCaptureMode by remember { mutableStateOf(CaptureMode.REALTIME_ASR) }
-    var modeSelectionRecordId by remember { mutableStateOf<Long?>(null) }
     var recordMenuExpanded by remember { mutableStateOf(false) }
     var showSelectionAiActions by remember { mutableStateOf(false) }
     var editingRecordCoursePrompt by remember { mutableStateOf(false) }
@@ -285,38 +281,17 @@ fun ListenApp(
         } else stt.reportPermissionDenied()
     }
 
-    modeSelectionRecordId?.let { selectedRecordId ->
-        AlertDialog(
-            onDismissRequest = { modeSelectionRecordId = null },
-            title = { Text("识别模式") },
-            text = { Text("实时识别会边录边识别；仅录音不会调用 ASR，可稍后在详情页补识别。") },
-            confirmButton = {
-                TextButton(onClick = {
-                    pendingCaptureMode = CaptureMode.REALTIME_ASR
-                    pendingPermissionRecordId = selectedRecordId
-                    modeSelectionRecordId = null
-                    val permissions = buildList {
-                        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) add(Manifest.permission.RECORD_AUDIO)
-                        if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) add(Manifest.permission.POST_NOTIFICATIONS)
-                    }
-                    if (permissions.isEmpty()) { pendingPermissionRecordId = null; stt.startListening(selectedRecordId) }
-                    else permissionLauncher.launch(permissions.toTypedArray())
-                }) { Text("实时识别") }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    pendingCaptureMode = CaptureMode.RECORD_ONLY
-                    pendingPermissionRecordId = selectedRecordId
-                    modeSelectionRecordId = null
-                    val permissions = buildList {
-                        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) add(Manifest.permission.RECORD_AUDIO)
-                        if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) add(Manifest.permission.POST_NOTIFICATIONS)
-                    }
-                    if (permissions.isEmpty()) { pendingPermissionRecordId = null; stt.startRecordOnly(selectedRecordId) }
-                    else permissionLauncher.launch(permissions.toTypedArray())
-                }) { Text("仅录音") }
-            }
-        )
+    val startCapture: (Long, CaptureMode) -> Unit = { selectedRecordId, mode ->
+        pendingCaptureMode = mode
+        pendingPermissionRecordId = selectedRecordId
+        val permissions = buildList {
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) add(Manifest.permission.RECORD_AUDIO)
+            if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        if (permissions.isEmpty()) {
+            pendingPermissionRecordId = null
+            if (mode == CaptureMode.RECORD_ONLY) stt.startRecordOnly(selectedRecordId) else stt.startListening(selectedRecordId)
+        } else permissionLauncher.launch(permissions.toTypedArray())
     }
 
     if (creatingCourse) NameDialog(
@@ -331,7 +306,11 @@ fun ListenApp(
             title = "新建课堂记录",
             value = newName,
             update = { newName = it },
-            confirm = { courses.createRecord(courseId, newName); newName = ""; creatingRecordForCourse = null },
+            confirm = {
+                courses.createRecord(courseId, newName) { created -> nav.navigate("record/$created") }
+                newName = ""
+                creatingRecordForCourse = null
+            },
             dismiss = { creatingRecordForCourse = null },
             allowBlank = true
         )
@@ -375,12 +354,13 @@ fun ListenApp(
 
     val nested = route !in setOf("courses", "ai", "settings")
     val bottomChrome = bottomChromeLayout()
+    // On the capturing record's own page the capture panel owns start/stop, so no FAB there.
+    val onCapturingRecordPage = route == "record/{recordId}" && recordId != null && recordId == sttState.activeRecordId
     val fabState: FabState = when {
-        sttState.isListening && sttState.listeningStartedAtElapsedRealtimeMs != null ->
+        sttState.isListening && sttState.listeningStartedAtElapsedRealtimeMs != null && !onCapturingRecordPage ->
             FabState.StopListening(requireNotNull(sttState.listeningStartedAtElapsedRealtimeMs))
         route == "courses" -> FabState.NewCourse
         route == "course/{courseId}" && courseId != null -> FabState.NewRecord(courseId)
-        route == "record/{recordId}" && recordId != null && !selectionMode -> FabState.StartListening(recordId)
         else -> FabState.None
     }
 
@@ -551,9 +531,6 @@ fun ListenApp(
                         FabState.NewCourse -> { newName = ""; creatingCourse = true }
                         is FabState.NewRecord -> { newName = ""; creatingRecordForCourse = action.courseId }
                         is FabState.StopListening -> stt.stopListening()
-                        is FabState.StartListening -> {
-                            modeSelectionRecordId = action.recordId
-                        }
                         FabState.None -> Unit
                     }
                 }
@@ -614,7 +591,7 @@ fun ListenApp(
             }
             composable("course/{courseId}") { entry ->
                 val id = entry.arguments?.getString("courseId")?.toLongOrNull() ?: return@composable
-                CourseRecordsScreen(id, courseState, sttState, courses) { record ->
+                CourseRecordsScreen(id, courseState, sttState, courses, recordingState.pendingCounts) { record ->
                     courses.selectRecord(id, record)
                     nav.navigate("record/$record")
                 }
@@ -636,8 +613,11 @@ fun ListenApp(
                     openResult = { nav.navigate("record/$id/ai-result/$it") },
                     openConversation = { nav.navigate("ai-conversation/$it") },
                     recordings = recordingState,
+                    startCapture = { mode -> startCapture(id, mode) },
+                    stopCapture = stt::stopListening,
                     startOfflineRecognition = recordings::startRecognition,
-                    stopOfflineRecognition = recordings::stopRecognition
+                    stopOfflineRecognition = recordings::stopRecognition,
+                    deleteRecording = recordings::deleteRecording
                 )
             }
             composable("settings") {
@@ -885,7 +865,6 @@ private fun AnimatedAppFab(state: FabState, click: (FabState) -> Unit) {
             FabState.None -> Unit
             FabState.NewCourse -> AnimatedFabContent("新建课程", Icons.Outlined.Add) { click(state) }
             is FabState.NewRecord -> AnimatedFabContent("新建课堂记录", Icons.Outlined.Add) { click(state) }
-            is FabState.StartListening -> AnimatedFabContent("开始监听", Icons.Outlined.Mic) { click(state) }
             is FabState.StopListening -> ListeningStopFab(state.startedAtElapsedRealtimeMs) { click(state) }
         }
     }
@@ -904,8 +883,8 @@ internal fun ListeningStopFab(startedAt: Long, click: () -> Unit) {
     val elapsed = String.format(Locale.US, "%02d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60)
     ExtendedFloatingActionButton(
         modifier = Modifier.testTag("global-stop-listening").height(64.dp),
-        text = { Text("停止监听 $elapsed", style = MaterialTheme.typography.titleMedium) },
-        icon = { Icon(Icons.Outlined.Stop, contentDescription = "停止监听") },
+        text = { Text("停止录制 $elapsed", style = MaterialTheme.typography.titleMedium) },
+        icon = { Icon(Icons.Outlined.Stop, contentDescription = "停止录制") },
         onClick = click,
         containerColor = MaterialTheme.colorScheme.error,
         contentColor = MaterialTheme.colorScheme.onError,

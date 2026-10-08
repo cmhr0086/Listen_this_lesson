@@ -79,10 +79,12 @@ class CourseViewModel(application: Application) : AndroidViewModel(application) 
         if (_uiState.value.selectedCourse?.id == id) settings.selectCourse(null)
     }
     fun enterCourse(id: Long) = viewModelScope.launch { settings.selectCourse(id) }
-    fun createRecord(courseId: Long, name: String?) = viewModelScope.launch {
+    fun createRecord(courseId: Long, name: String?, onCreated: (Long) -> Unit = {}) = viewModelScope.launch {
         val courseName = repository.course(courseId).first()?.name ?: return@launch
         val defaultName = RecordNameGenerator.defaultName(courseName)
-        settings.selectRecord(courseId, repository.createRecord(courseId, name?.takeIf { it.isNotBlank() } ?: defaultName))
+        val recordId = repository.createRecord(courseId, name?.takeIf { it.isNotBlank() } ?: defaultName)
+        settings.selectRecord(courseId, recordId)
+        onCreated(recordId)
     }
     fun renameRecord(id: Long, name: String) = viewModelScope.launch { if (name.isNotBlank()) repository.renameRecord(id, name) }
     fun deleteRecord(id: Long) = viewModelScope.launch {

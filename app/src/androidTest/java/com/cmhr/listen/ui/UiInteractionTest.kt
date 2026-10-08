@@ -26,6 +26,14 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
+import com.cmhr.listen.recording.CaptureMode
+import com.cmhr.listen.recording.OfflineRecognitionState
+import com.cmhr.listen.data.recording.RecordingEntity
+import com.cmhr.listen.data.recording.RecordingState
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.test.performScrollToNode
@@ -95,28 +103,118 @@ class UiInteractionTest {
             ListenTheme { ListeningStopFab(SystemClock.elapsedRealtime(), click = {}) }
         }
         composeRule.onNodeWithTag("global-stop-listening").assertExists()
-        composeRule.onNodeWithContentDescription("停止监听").assertExists()
+        composeRule.onNodeWithContentDescription("停止录制").assertExists()
     }
 
     @Test
-    fun compactListeningStatusShowsCaptureWithoutDiagnostics() {
+    fun idleCapturePanelOffersBothModesAndStartsTheChosenOne() {
+        var started: CaptureMode? = null
         composeRule.setContent {
             ListenTheme {
-                CompactListeningStatus(
+                CapturePanel(recordId = 1, listening = ListeningUiState(), processing = OfflineRecognitionState(), start = { started = it }, stop = {})
+            }
+        }
+        composeRule.onNodeWithText("实时转写").assertExists()
+        composeRule.onNodeWithTag("start-record-only").assertIsEnabled().performClick()
+        composeRule.runOnIdle { assertEquals(CaptureMode.RECORD_ONLY, started) }
+    }
+
+    @Test
+    fun recordOnlyPanelShowsSavedLengthAndStops() {
+        var stopped = false
+        composeRule.setContent {
+            ListenTheme {
+                CapturePanel(
+                    recordId = 1,
                     listening = ListeningUiState(
                         isListening = true,
-                        isSpeechDetected = true,
-                        isRecognizing = true,
-                        pendingQueueCount = 3,
-                        listeningStartedAtElapsedRealtimeMs = SystemClock.elapsedRealtime() - 2_000
+                        activeRecordId = 1,
+                        captureMode = CaptureMode.RECORD_ONLY,
+                        recordOnlySavedMs = 12_000,
+                        listeningStartedAtElapsedRealtimeMs = SystemClock.elapsedRealtime() - 13_000
                     ),
-                    active = true
+                    processing = OfflineRecognitionState(),
+                    start = {},
+                    stop = { stopped = true }
                 )
             }
         }
-        composeRule.onNodeWithTag("compact-listening-status").assertExists()
-        composeRule.onNodeWithText("正在收音").assertExists()
-        composeRule.onNodeWithText("检测到语音：是", substring = true).assertExists()
+        composeRule.onNodeWithText("仅录音中").assertExists()
+        composeRule.onNodeWithText("已安全保存 00:12").assertExists()
+        composeRule.onNodeWithText("检测到语音", substring = true).assertDoesNotExist()
+        composeRule.onNodeWithTag("stop-capture").performClick()
+        composeRule.runOnIdle { assertTrue(stopped) }
+    }
+
+    @Test
+    fun realtimePanelShowsSpeechAndQueue() {
+        composeRule.setContent {
+            ListenTheme {
+                CapturePanel(
+                    recordId = 1,
+                    listening = ListeningUiState(
+                        isListening = true,
+                        isSpeechDetected = true,
+                        pendingQueueCount = 3,
+                        activeRecordId = 1,
+                        captureMode = CaptureMode.REALTIME_ASR,
+                        listeningStartedAtElapsedRealtimeMs = SystemClock.elapsedRealtime() - 2_000
+                    ),
+                    processing = OfflineRecognitionState(),
+                    start = {},
+                    stop = {}
+                )
+            }
+        }
+        composeRule.onNodeWithText("实时转写中").assertExists()
+        composeRule.onNodeWithText("正在收音 · 3 段排队识别").assertExists()
+    }
+
+    @Test
+    fun capturePanelIsBlockedWhileAnotherRecordCaptures() {
+        composeRule.setContent {
+            ListenTheme {
+                CapturePanel(
+                    recordId = 2,
+                    listening = ListeningUiState(isListening = true, activeRecordId = 1, currentRecordName = "高数-10-08", captureMode = CaptureMode.RECORD_ONLY),
+                    processing = OfflineRecognitionState(),
+                    start = {},
+                    stop = {}
+                )
+            }
+        }
+        composeRule.onNodeWithTag("start-realtime").assertIsNotEnabled()
+        composeRule.onNodeWithTag("start-record-only").assertIsNotEnabled()
+        composeRule.onNodeWithText("「高数-10-08」正在录制", substring = true).assertExists()
+    }
+
+    @Test
+    fun interruptedRecordingIsReadyToRecognizeWithNeutralNote() {
+        var started: String? = null
+        val recording = RecordingEntity(recordId = 1, sessionId = "s", localPath = "a.wav", startedAt = 0, durationMs = 5_000, totalFrames = 80_000, state = RecordingState.INTERRUPTED.name)
+        composeRule.setContent {
+            ListenTheme {
+                RecordingItem(recording, 1, OfflineRecognitionState(), recognitionAllowed = true, startRecognition = { started = it }, pauseRecognition = {}, delete = {})
+            }
+        }
+        composeRule.onNodeWithText("待识别").assertExists()
+        composeRule.onNodeWithText("录音意外中断，已保留到 00:05。").assertExists()
+        composeRule.onNodeWithTag("start-recognition").assertTextContains("开始识别").performClick()
+        composeRule.runOnIdle { assertEquals(recording.recordingId, started) }
+    }
+
+    @Test
+    fun pausedRecordingOffersResumeAndDelete() {
+        val recording = RecordingEntity(recordId = 1, sessionId = "s", localPath = "a.wav", startedAt = 0, durationMs = 10_000, totalFrames = 160_000, processedFrames = 80_000, state = RecordingState.PAUSED.name)
+        composeRule.setContent {
+            ListenTheme {
+                RecordingItem(recording, 2, OfflineRecognitionState(), recognitionAllowed = true, startRecognition = {}, pauseRecognition = {}, delete = {})
+            }
+        }
+        composeRule.onNodeWithText("已暂停 50%").assertExists()
+        composeRule.onNodeWithTag("start-recognition").assertTextContains("继续识别")
+        composeRule.onNodeWithContentDescription("录音操作").performClick()
+        composeRule.onNodeWithText("删除录音").assertExists()
     }
 
     @Test
@@ -248,6 +346,8 @@ class UiInteractionTest {
             }
         }
 
+        // LazyColumn only composes visible rows; scroll first so small screens pass too.
+        composeRule.onNodeWithTag("asr-diagnostics-list").performScrollToNode(hasTestTag("asr-diagnostic-preview-16"))
         composeRule.onNodeWithTag("asr-diagnostic-preview-16").assertExists()
         composeRule.onNodeWithTag("asr-diagnostic-preview-1").assertDoesNotExist()
         // record, capture/VAD, summary, fifteen diagnostics, then the more action

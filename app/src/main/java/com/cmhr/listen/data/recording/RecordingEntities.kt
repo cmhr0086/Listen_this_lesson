@@ -8,7 +8,17 @@ import androidx.room.PrimaryKey
 import com.cmhr.listen.data.course.SessionEntity
 import java.util.UUID
 
-enum class RecordingState { RECORDING, RECORDED, PROCESSING, COMPLETED, FAILED }
+/**
+ * Stored as TEXT, so adding values needs no schema migration.
+ * INTERRUPTED: capture ended without a normal stop (process death) but the audio was kept.
+ * PAUSED: recognition was stopped by the user or by process death and can resume.
+ */
+enum class RecordingState {
+    RECORDING, RECORDED, INTERRUPTED, PROCESSING, PAUSED, COMPLETED, FAILED;
+
+    val canStartRecognition: Boolean get() = this in setOf(RECORDED, INTERRUPTED, PAUSED, FAILED)
+    val canDelete: Boolean get() = this != RECORDING && this != PROCESSING
+}
 enum class RecordingChunkState { PLANNED, QUEUED, COMPLETED, FAILED, SUBMISSION_UNKNOWN }
 
 @Entity(

@@ -34,7 +34,7 @@ class ListeningForegroundService : Service() {
         super.onCreate()
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
-            NotificationChannel(CHANNEL_ID, "课堂监听", NotificationManager.IMPORTANCE_LOW).apply {
+            NotificationChannel(CHANNEL_ID, "课堂录制", NotificationManager.IMPORTANCE_LOW).apply {
                 description = "持续录音与课堂语音识别状态"
                 setShowBadge(false)
             }
@@ -113,13 +113,13 @@ class ListeningForegroundService : Service() {
         }
         val stopIntent = Intent(this, ListeningForegroundService::class.java).apply { action = ACTION_STOP }
         val whenWallClock = System.currentTimeMillis() - (SystemClock.elapsedRealtime() - startedElapsed).coerceAtLeast(0L)
-        val status = if (recordOnly) "仅录音" else if (recognizing) "正在识别" else if (queueCount > 0) "等待识别（$queueCount）" else "等待语音"
+        val status = if (recordOnly) "仅录音 · 意外退出也会保留" else if (recognizing) "正在识别" else if (queueCount > 0) "等待识别（$queueCount）" else "等待语音"
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_mic)
-            .setContentTitle(courseName.ifBlank { "课堂监听中" })
+            .setContentTitle(courseName.ifBlank { "课堂录制中" })
             .setContentText("${recordName.ifBlank { "课堂记录" }} · $status")
             .setContentIntent(PendingIntent.getActivity(this, 10, openIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
-            .addAction(0, if (recordOnly) "停止录音" else "停止监听", PendingIntent.getService(this, 11, stopIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
+            .addAction(0, if (recordOnly) "停止录音" else "停止转写", PendingIntent.getService(this, 11, stopIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
             .setWhen(whenWallClock)
             .setUsesChronometer(true)
             .setOngoing(true)

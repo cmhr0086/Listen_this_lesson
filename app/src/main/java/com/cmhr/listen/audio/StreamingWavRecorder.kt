@@ -4,15 +4,24 @@ import java.io.Closeable
 import java.io.File
 import java.io.RandomAccessFile
 
+/**
+ * Streams PCM16 into a WAV file that stays valid on disk: every [checkpoint] rewrites the
+ * header for the bytes written so far and fsyncs, so a killed process leaves a playable file
+ * missing at most the audio after the last checkpoint.
+ */
 class StreamingWavRecorder(private val file: File) : Closeable {
     private val output: RandomAccessFile
     var totalFrames: Long = 0; private set
+
+    /** Frames covered by the last successful [checkpoint]. */
+    var checkpointedFrames: Long = 0; private set
 
     init {
         file.parentFile?.mkdirs()
         output = RandomAccessFile(file, "rw")
         output.setLength(0)
-        output.write(ByteArray(HEADER_BYTES.toInt()))
+        writeHeader(output, 0)
+        output.fd.sync()
     }
 
     fun append(pcm: ByteArray) {
@@ -21,11 +30,16 @@ class StreamingWavRecorder(private val file: File) : Closeable {
         totalFrames += pcm.size / PcmRecorder.BYTES_PER_SAMPLE
     }
 
-    fun sync() = output.fd.sync()
+    fun checkpoint() {
+        val dataBytes = totalFrames * PcmRecorder.BYTES_PER_SAMPLE
+        writeHeader(output, dataBytes)
+        output.seek(HEADER_BYTES + dataBytes)
+        output.fd.sync()
+        checkpointedFrames = totalFrames
+    }
 
     fun finish(): File {
-        writeHeader(output, totalFrames * PcmRecorder.BYTES_PER_SAMPLE)
-        output.fd.sync()
+        checkpoint()
         output.close()
         return file
     }
@@ -35,7 +49,10 @@ class StreamingWavRecorder(private val file: File) : Closeable {
     companion object {
         const val HEADER_BYTES = 44L
         fun framesIn(file: File): Long = ((file.length() - HEADER_BYTES).coerceAtLeast(0) / PcmRecorder.BYTES_PER_SAMPLE)
+
+        /** Truncates a partial trailing sample and rewrites the header to match the file. */
         fun repair(file: File): Boolean {
+            if (!file.isFile) return false
             val dataBytes = (file.length() - HEADER_BYTES).coerceAtLeast(0) / PcmRecorder.BYTES_PER_SAMPLE * PcmRecorder.BYTES_PER_SAMPLE
             if (dataBytes <= 0) return false
             RandomAccessFile(file, "rw").use { raf ->
