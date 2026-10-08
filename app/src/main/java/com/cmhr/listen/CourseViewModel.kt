@@ -145,6 +145,6 @@ class CourseViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private companion object {
-        const val RECENT_LIMIT = 3
+        const val RECENT_LIMIT = 30
     }
 }

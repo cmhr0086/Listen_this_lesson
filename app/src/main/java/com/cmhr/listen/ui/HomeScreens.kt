@@ -62,12 +62,11 @@ import java.util.Locale
 internal val ListWithFabPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 104.dp)
 
 /**
- * Home: start a class first, file it under a course afterwards. The course is only a guess at
+ * 录音 tab: start a class first, file it under a course afterwards. The course is only a guess at
  * start time (the user confirms when recording stops), so starting never requires navigation.
  */
 @Composable
-fun HomeScreen(
-    courses: List<CourseSummary>,
+fun RecordHomeScreen(
     recent: List<SessionSummary>,
     startCourse: CourseSummary?,
     suggestion: CourseSuggestion?,
@@ -78,35 +77,48 @@ fun HomeScreen(
     start: (CaptureMode) -> Unit,
     stop: () -> Unit,
     openRecord: (SessionSummary) -> Unit,
-    openActiveRecord: () -> Unit,
-    openCourse: (Long) -> Unit,
-    courseMenu: @Composable (CourseSummary) -> Unit
+    openActiveRecord: () -> Unit
 ) {
     LazyColumn(
-        Modifier.fillMaxSize().testTag("home-list"),
-        contentPadding = ListWithFabPadding,
+        Modifier.fillMaxSize().testTag("record-home-list"),
+        contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item("quick-start") {
             if (listening.isListening) ActiveClassCard(listening, openActiveRecord, stop)
             else StartClassCard(startCourse, suggestion, listening, processing, pickCourse, start)
         }
-        if (recent.isNotEmpty()) {
-            item("recent-heading") { HomeSectionTitle("最近课堂") }
-            items(recent, key = { "recent-${it.session.id}" }) { summary ->
-                SessionRow(
-                    summary = summary,
-                    showCourse = true,
-                    capturing = listening.isListening && listening.activeRecordId == summary.session.id,
-                    pendingRecordings = pendingRecordingCounts[summary.session.id] ?: 0,
-                    open = { openRecord(summary) },
-                    menu = null
-                )
-            }
+        item("recent-heading") { HomeSectionTitle("最近课堂") }
+        if (recent.isEmpty()) item("empty-recent") {
+            Text("录过的课会按时间显示在这里。", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        item("courses-heading") { HomeSectionTitle("课程", if (courses.isEmpty()) null else "${courses.size} 门") }
+        items(recent, key = { "recent-${it.session.id}" }) { summary ->
+            SessionRow(
+                summary = summary,
+                showCourse = true,
+                capturing = listening.isListening && listening.activeRecordId == summary.session.id,
+                pendingRecordings = pendingRecordingCounts[summary.session.id] ?: 0,
+                open = { openRecord(summary) },
+                menu = null
+            )
+        }
+    }
+}
+
+/** 课程 tab: every course, most recently attended first. */
+@Composable
+fun CoursesTabScreen(
+    courses: List<CourseSummary>,
+    openCourse: (Long) -> Unit,
+    courseMenu: @Composable (CourseSummary) -> Unit
+) {
+    LazyColumn(
+        Modifier.fillMaxSize().testTag("courses-tab-list"),
+        contentPadding = ListWithFabPadding,
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
         if (courses.isEmpty()) item("empty-courses") {
-            Text("还没有课程。点上方「开始上课」，先给第一门课起个名字就能开始录；以后每次都能直接开始，录完再确认归到哪门课。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("还没有课程。在「录音」页开始上课时起个名字，或用右下角按钮新建。", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         items(courses, key = { "course-${it.course.id}" }) { summary ->
             CourseRow(summary, open = { openCourse(summary.course.id) }) { courseMenu(summary) }

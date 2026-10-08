@@ -198,8 +198,7 @@ class UiInteractionTest {
         val course = CourseSummary(CourseEntity(id = 7, name = "毛概", createdAt = 1), recordCount = 3, lastStartedAt = 1_000)
         composeRule.setContent {
             ListenTheme {
-                HomeScreen(
-                    courses = listOf(course),
+                RecordHomeScreen(
                     recent = emptyList(),
                     startCourse = course,
                     suggestion = CourseSuggestion(7, CourseSuggestion.Reason.USUAL_TIME),
@@ -210,21 +209,32 @@ class UiInteractionTest {
                     start = { started = it },
                     stop = {},
                     openRecord = {},
-                    openActiveRecord = {},
-                    openCourse = {},
-                    courseMenu = {}
+                    openActiveRecord = {}
                 )
             }
         }
         composeRule.onNodeWithTag("start-course-chip").assertTextContains("毛概")
         composeRule.onNodeWithText("按你平时的上课时间猜的", substring = true).assertExists()
-        composeRule.onNodeWithText("3 节课", substring = true).assertExists()
         composeRule.onNodeWithTag("home-start-record-only").performClick()
         composeRule.onNodeWithTag("start-course-chip").performClick()
         composeRule.runOnIdle {
             assertEquals(CaptureMode.RECORD_ONLY, started)
             assertTrue(picked)
         }
+    }
+
+    @Test
+    fun coursesTabShowsClassCountAndOpensTheCourse() {
+        var opened: Long? = null
+        val courses = listOf(
+            CourseSummary(CourseEntity(id = 7, name = "毛概", createdAt = 1), recordCount = 7, lastStartedAt = 1_759_890_000_000),
+            CourseSummary(CourseEntity(id = 8, name = "英语", createdAt = 2), recordCount = 0, lastStartedAt = null)
+        )
+        composeRule.setContent { ListenTheme { CoursesTabScreen(courses, openCourse = { opened = it }, courseMenu = {}) } }
+        composeRule.onNodeWithText("7 节课", substring = true).assertExists()
+        composeRule.onNodeWithText("还没有课堂").assertExists()
+        composeRule.onNodeWithTag("course-7").performClick()
+        composeRule.runOnIdle { assertEquals(7L, opened) }
     }
 
     @Test

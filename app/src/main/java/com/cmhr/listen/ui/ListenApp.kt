@@ -26,6 +26,7 @@ import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.MoreVert
+import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.School
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SmartToy
@@ -53,6 +54,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.ui.Alignment
@@ -89,7 +91,8 @@ import kotlinx.coroutines.delay
 import java.util.Locale
 
 private enum class MainDestination(val route: String, val label: String) {
-    COURSES("courses", "上课"),
+    RECORD("record-home", "录音"),
+    COURSES("courses", "课程"),
     AI("ai", "AI 会话"),
     SETTINGS("settings", "设置")
 }
@@ -130,10 +133,16 @@ private fun isSettingsRoute(route: String?): Boolean = route == "settings" || ro
 private fun isAiWorkspaceRoute(route: String?): Boolean =
     route?.contains("ai-results") == true || route?.contains("ai-result/") == true || route?.startsWith("ai-conversation/") == true
 
-private fun mainDestinationForRoute(route: String?): MainDestination = when {
+/**
+ * Tab that owns [route]. Course and record pages can be reached from both 录音 and 课程, so they
+ * stay under whichever tab the user came from ([fallback]) instead of jumping.
+ */
+private fun mainDestinationForRoute(route: String?, fallback: MainDestination = MainDestination.RECORD): MainDestination = when {
     isSettingsRoute(route) -> MainDestination.SETTINGS
     route == "ai" || route?.startsWith("ai/new") == true || route?.startsWith("ai-conversation/") == true || route?.startsWith("ai/result/") == true -> MainDestination.AI
-    else -> MainDestination.COURSES
+    route == MainDestination.RECORD.route -> MainDestination.RECORD
+    route == MainDestination.COURSES.route -> MainDestination.COURSES
+    else -> fallback
 }
 
 /** What to do with a course created from the "新建课程" dialog. */
@@ -145,7 +154,8 @@ private sealed interface CourseCreation {
 }
 
 private fun routeTitle(route: String?): String = when (route) {
-    "courses" -> "上课"
+    "record-home" -> "录音"
+    "courses" -> "课程"
     "ai" -> "AI 会话"
     "ai/new" -> "新对话"
     "ai/new/{recordId}" -> "课堂新对话"
@@ -184,7 +194,12 @@ fun ListenApp(
 ) {
     val nav = rememberNavController()
     val backStackEntry by nav.currentBackStackEntryAsState()
-    val route = backStackEntry?.destination?.route ?: "courses"
+    val route = backStackEntry?.destination?.route ?: MainDestination.RECORD.route
+    var lastMainTab by rememberSaveable { mutableStateOf(MainDestination.RECORD) }
+    LaunchedEffect(route) {
+        if (route == MainDestination.RECORD.route || route == MainDestination.COURSES.route) lastMainTab = mainDestinationForRoute(route)
+    }
+    val currentTab = mainDestinationForRoute(route, lastMainTab)
     val sttState by stt.uiState.collectAsStateWithLifecycle()
     val courseState by courses.uiState.collectAsStateWithLifecycle()
     val settingsState by settings.uiState.collectAsStateWithLifecycle()
@@ -457,7 +472,7 @@ fun ListenApp(
         AiContextBottomSheet(snapshot = aiContextSnapshot, dismiss = { showAiContext = false })
     }
 
-    val nested = route !in setOf("courses", "ai", "settings")
+    val nested = route !in MainDestination.entries.map { it.route }.toSet()
     val bottomChrome = bottomChromeLayout()
     // On the capturing record's own page the capture panel owns start/stop, so no FAB there.
     val onCapturingRecordPage = route == "record/{recordId}" && recordId != null && recordId == sttState.activeRecordId
@@ -600,19 +615,20 @@ fun ListenApp(
                     windowInsets = WindowInsets(0, 0, 0, 0)
                 ) {
                     MainDestination.entries.forEach { destination ->
-                        val selected = destination == mainDestinationForRoute(route)
+                        val selected = destination == currentTab
                         NavigationBarItem(
                             selected = selected,
                             onClick = {
                                 nav.navigate(destination.route) {
                                     launchSingleTop = true
-                                    popUpTo("courses") { saveState = true }
+                                    popUpTo(MainDestination.RECORD.route) { saveState = true }
                                     restoreState = true
                                 }
                             },
                             icon = {
                                 Icon(
                                     when (destination) {
+                                        MainDestination.RECORD -> Icons.Outlined.Mic
                                         MainDestination.COURSES -> Icons.Outlined.School
                                         MainDestination.AI -> Icons.Outlined.SmartToy
                                         MainDestination.SETTINGS -> Icons.Outlined.Settings
@@ -648,25 +664,24 @@ fun ListenApp(
     ) { padding ->
         NavHost(
             navController = nav,
-            startDestination = "courses",
+            startDestination = MainDestination.RECORD.route,
             modifier = Modifier.padding(padding),
             enterTransition = {
-                val direction = if (mainDestinationForRoute(targetState.destination.route).ordinal >= mainDestinationForRoute(initialState.destination.route).ordinal)
+                val direction = if (mainDestinationForRoute(targetState.destination.route, lastMainTab).ordinal >= mainDestinationForRoute(initialState.destination.route, lastMainTab).ordinal)
                     AnimatedContentTransitionScope.SlideDirection.Left else AnimatedContentTransitionScope.SlideDirection.Right
                 slideIntoContainer(direction, tween(220))
             },
             exitTransition = {
-                val direction = if (mainDestinationForRoute(targetState.destination.route).ordinal >= mainDestinationForRoute(initialState.destination.route).ordinal)
+                val direction = if (mainDestinationForRoute(targetState.destination.route, lastMainTab).ordinal >= mainDestinationForRoute(initialState.destination.route, lastMainTab).ordinal)
                     AnimatedContentTransitionScope.SlideDirection.Left else AnimatedContentTransitionScope.SlideDirection.Right
                 slideOutOfContainer(direction, tween(220))
             },
             popEnterTransition = { slideIntoContainer(AnimatedContentTransitionScope.SlideDirection.Right, tween(220)) },
             popExitTransition = { slideOutOfContainer(AnimatedContentTransitionScope.SlideDirection.Right, tween(220)) }
         ) {
-            composable("courses") {
+            composable(MainDestination.RECORD.route) {
                 LaunchedEffect(Unit) { courses.refreshSuggestion() }
-                HomeScreen(
-                    courses = courseState.courseSummaries,
+                RecordHomeScreen(
                     recent = courseState.recentSessions,
                     startCourse = courseState.courseSummaries.firstOrNull { it.course.id == startCourseId },
                     suggestion = courseState.suggestion,
@@ -684,7 +699,12 @@ fun ListenApp(
                         courses.selectRecord(summary.session.courseId, summary.session.id)
                         nav.navigate("record/${summary.session.id}")
                     },
-                    openActiveRecord = { sttState.activeRecordId?.let { nav.navigate("record/$it") } },
+                    openActiveRecord = { sttState.activeRecordId?.let { nav.navigate("record/$it") } }
+                )
+            }
+            composable(MainDestination.COURSES.route) {
+                CoursesTabScreen(
+                    courses = courseState.courseSummaries,
                     openCourse = { id ->
                         courses.enterCourse(id)
                         nav.navigate("course/$id")
