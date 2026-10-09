@@ -301,7 +301,7 @@ internal fun SessionRow(
         status = when {
             capturing -> ({ StatusPill("录制中", StatusTone.PROBLEM) })
             paused -> ({ StatusPill("已暂停", StatusTone.READY) })
-            pendingRecordings > 0 -> ({ StatusPill("$pendingRecordings 段录音待识别", StatusTone.READY) })
+            pendingRecordings > 0 -> ({ StatusPill("$pendingRecordings 段待识别", StatusTone.READY) })
             else -> null
         },
         trailing = menu ?: { ChevronIcon() },
