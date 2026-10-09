@@ -336,7 +336,7 @@ private fun RecordDetailCard(
 }
 
 @Composable
-internal fun ErrorCard(message: String) = Card(Modifier.fillMaxWidth()) {
+internal fun ErrorCard(message: String) = GroupCard(Modifier.fillMaxWidth()) {
     Text("提示：$message", Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error)
 }
 

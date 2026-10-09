@@ -59,6 +59,18 @@ internal fun ListGroup(modifier: Modifier = Modifier, content: @Composable Colum
     }
 }
 
+/** Drop-in for Material's Card in forms and detail pages, so they share the list groups' surface. */
+@Composable
+internal fun GroupCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
+    androidx.compose.material3.Card(
+        modifier = modifier,
+        shape = GroupShape,
+        colors = androidx.compose.material3.CardDefaults.cardColors(containerColor = groupColor()),
+        border = groupBorder(),
+        content = content
+    )
+}
+
 /** Divider between rows of a [ListGroup], inset past the leading badge. */
 @Composable
 internal fun ListDivider(inset: Dp = 64.dp) {

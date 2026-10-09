@@ -620,7 +620,7 @@ fun AiConversationsScreen(recordId: Long, model: AiViewModel, openConversation: 
     ) {
         if (conversations.isEmpty()) item("empty-conversations") { Text("尚无 AI 对话。请先在记录详情选择片段并提出问题。") }
         items(conversations, key = { "conversation-${it.id}" }) { conversation ->
-            Card(Modifier.fillMaxWidth().clickable { openConversation(conversation.id) }) {
+            GroupCard(Modifier.fillMaxWidth().clickable { openConversation(conversation.id) }) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(conversation.title, style = MaterialTheme.typography.titleMedium)
                     Text("更新：${formatDateTime(conversation.updatedAt)}", style = MaterialTheme.typography.bodySmall)
@@ -718,7 +718,7 @@ fun AiConversationScreen(
 }
 
 @Composable
-private fun AiDiagnosticsCard(value: com.cmhr.listen.AiRequestDiagnostics) = Card(Modifier.fillMaxWidth()) {
+private fun AiDiagnosticsCard(value: com.cmhr.listen.AiRequestDiagnostics) = GroupCard(Modifier.fillMaxWidth()) {
     Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
         Text("最近 AI 请求诊断", style = MaterialTheme.typography.titleSmall)
         Text("模型：${value.model}")
@@ -869,7 +869,7 @@ private fun CorrectionReviewCard(
     val hasTextChanges = payload.segments.any { correction ->
         correction.correctedText != originals[correction.segmentId]?.effectiveText
     }
-    Card(Modifier.fillMaxWidth()) {
+    GroupCard(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Text("逐片段纠错", style = MaterialTheme.typography.titleMedium)
             payload.segments.forEach { correction ->
@@ -1161,7 +1161,7 @@ private fun AiChatComposer(
 @Composable
 private fun ConversationContextCard(snapshot: String, expanded: Boolean, toggle: () -> Unit) {
     val preview = snapshot.lineSequence().take(6).joinToString("\n")
-    Card(Modifier.fillMaxWidth().clickable(onClick = toggle)) {
+    GroupCard(Modifier.fillMaxWidth().clickable(onClick = toggle)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text("课堂原文", style = MaterialTheme.typography.titleMedium)
@@ -1190,7 +1190,7 @@ fun AiContextBottomSheet(snapshot: String, dismiss: () -> Unit) {
                 Text("这是创建当前 AI 结果或对话时冻结的课堂原文。", style = MaterialTheme.typography.bodySmall)
             }
             item("context-body") {
-                Card(Modifier.fillMaxWidth()) {
+                GroupCard(Modifier.fillMaxWidth()) {
                     Text(snapshot.ifBlank { "没有可显示的课堂原文。" }, Modifier.padding(16.dp), style = MaterialTheme.typography.bodyLarge)
                 }
             }
