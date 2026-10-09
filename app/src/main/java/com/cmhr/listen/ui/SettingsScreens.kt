@@ -12,71 +12,27 @@ import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.selection.selectable
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.RadioButton
-import androidx.compose.material3.Surface
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.Role
-import com.cmhr.listen.ui.theme.DarkModePreference
-import com.cmhr.listen.ui.theme.ThemePalette
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Visibility
-import androidx.compose.material.icons.outlined.VisibilityOff
-import androidx.compose.material.icons.outlined.ArrowDropDown
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
-import com.cmhr.listen.ConnectionTestState
-import com.cmhr.listen.CloudSyncRunState
+import com.cmhr.listen.ServiceCheck
 import com.cmhr.listen.SettingsUiState
 import com.cmhr.listen.SettingsViewModel
-import com.cmhr.listen.SttViewModel
-import com.cmhr.listen.audio.VadConfig
-import com.cmhr.listen.audio.VadPreset
 import com.cmhr.listen.data.settings.AiProvider
-import com.cmhr.listen.data.settings.AiPromptSettings
-import com.cmhr.listen.data.settings.AiGenerationSettings
-import com.cmhr.listen.data.settings.AiThinkingMode
-import com.cmhr.listen.data.settings.AiReasoningEffort
-import com.cmhr.listen.data.stt.AsrPromptMode
-import com.cmhr.listen.data.stt.AsrPromptAutoConfig
-import kotlin.math.roundToInt
 import java.text.DateFormat
 import java.util.Date
 
@@ -86,22 +42,22 @@ fun SettingsScreen(
     model: SettingsViewModel,
     onSttService: () -> Unit,
     onAiService: () -> Unit,
-    onVadParameters: () -> Unit,
-    onVadPresets: () -> Unit,
+    onVad: () -> Unit,
     onAiPrompts: () -> Unit,
     onAsrPromptPolicy: () -> Unit,
     onAiGeneration: () -> Unit,
     onCloudSync: () -> Unit = {},
     onAsrDiagnostics: () -> Unit = {},
-    onAppearance: () -> Unit = {}
+    onAppearance: () -> Unit = {},
+    vadSummary: String = ""
 ) = SettingsOverview(
     state = state,
     setDeveloperMode = model::setDeveloperMode,
     setAutoNotes = model::setAutoNotes,
     onSttService = onSttService,
     onAiService = onAiService,
-    onVadParameters = onVadParameters,
-    onVadPresets = onVadPresets,
+    onVad = onVad,
+    vadSummary = vadSummary,
     onAiPrompts = onAiPrompts,
     onAsrPromptPolicy = onAsrPromptPolicy,
     onAiGeneration = onAiGeneration,
@@ -116,15 +72,15 @@ internal fun SettingsOverview(
     setDeveloperMode: (Boolean) -> Unit,
     onSttService: () -> Unit,
     onAiService: () -> Unit,
-    onVadParameters: () -> Unit,
-    onVadPresets: () -> Unit,
+    onVad: () -> Unit,
     onAiPrompts: () -> Unit,
     onAsrPromptPolicy: () -> Unit,
     onAiGeneration: () -> Unit,
     onCloudSync: () -> Unit = {},
     onAsrDiagnostics: () -> Unit = {},
     onAppearance: () -> Unit = {},
-    setAutoNotes: (Boolean) -> Unit = {}
+    setAutoNotes: (Boolean) -> Unit = {},
+    vadSummary: String = ""
 ) {
     val sttReady = state.server.hasApiKey && state.server.baseUrl.isNotBlank()
     val aiReady = state.ai.hasApiKey && state.ai.model.isNotBlank()
@@ -139,13 +95,23 @@ internal fun SettingsOverview(
             ListGroup {
                 SettingsRow(
                     "语音识别", state.server.baseUrl.ifBlank { "未设置地址" }, Icons.Outlined.Mic, onSttService,
-                    status = if (sttReady) "已配置" to StatusTone.DONE else "未配置" to StatusTone.READY,
+                    status = when {
+                        !sttReady -> "未配置" to StatusTone.READY
+                        state.sttCheck is ServiceCheck.Failed -> "连接失败" to StatusTone.PROBLEM
+                        state.sttCheck is ServiceCheck.Passed -> "已连接" to StatusTone.DONE
+                        else -> "已配置" to StatusTone.DONE
+                    },
                     modifier = Modifier.testTag("settings-stt")
                 )
                 ListDivider(62.dp)
                 SettingsRow(
                     "AI 服务", "${providerName(state.ai.provider)} · ${state.ai.model.ifBlank { "未设置模型" }}", Icons.Outlined.AutoAwesome, onAiService,
-                    status = if (aiReady) "已配置" to StatusTone.DONE else "可选" to StatusTone.READY,
+                    status = when {
+                        !aiReady -> "可选" to StatusTone.READY
+                        state.aiCheck is ServiceCheck.Failed -> "不可用" to StatusTone.PROBLEM
+                        state.aiCheck is ServiceCheck.Passed -> "可用" to StatusTone.DONE
+                        else -> "已配置" to StatusTone.DONE
+                    },
                     modifier = Modifier.testTag("settings-ai")
                 )
                 ListDivider(62.dp)
@@ -190,9 +156,7 @@ internal fun SettingsOverview(
                     ListDivider(62.dp)
                     SettingsRow("ASR 诊断", "队列、异步任务和网络阶段", Icons.Outlined.MonitorHeart, onAsrDiagnostics)
                     ListDivider(62.dp)
-                    SettingsRow("VAD 参数", "阈值、静音、前后保留和时长限制", Icons.Outlined.Tune, onVadParameters)
-                    ListDivider(62.dp)
-                    SettingsRow("VAD 预设", "默认、远距离、近距离或高噪声", Icons.Outlined.Tune, onVadPresets)
+                    SettingsRow("VAD 预设与参数", vadSummary.ifBlank { "阈值、静音、前后保留和切分" }, Icons.Outlined.Tune, onVad, modifier = Modifier.testTag("settings-vad"))
                     ListDivider(62.dp)
                     SettingsRow("AI 提示词", "笔记、纠错、回答、对话和图片场景", Icons.Outlined.Description, onAiPrompts)
                     ListDivider(62.dp)
@@ -253,566 +217,7 @@ private fun SettingsSwitchRow(
     modifier = modifier
 )
 
-@Composable
-fun CloudSyncSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
-    var baseUrl by remember(state.cloudSync.baseUrl) { mutableStateOf(state.cloudSync.baseUrl) }
-    var apiToken by remember { mutableStateOf("") }
-    var showApiToken by remember { mutableStateOf(false) }
-    val syncing = state.cloudSyncState is CloudSyncRunState.Syncing
-    val statusText = when (val syncState = state.cloudSyncState) {
-        CloudSyncRunState.Idle -> "等待手动同步"
-        CloudSyncRunState.Syncing -> state.cloudSyncProgress?.let { progress ->
-            "正在上传本地变更：Session ${progress.completedSessions} / ${progress.totalSessions}，" +
-                "Segment ${progress.completedSegments} / ${progress.totalSegments}（第 ${progress.batchNumber} 批）"
-        } ?: "正在准备本地变更…"
-        is CloudSyncRunState.Success -> with(syncState.summary) {
-            "同步成功：上传 $uploadedSessions 个 Session、$uploadedSegments 个 Segment；接收 $receivedSessions 个 Session、$receivedSegments 个 Segment。"
-        }
-        is CloudSyncRunState.Error -> "同步失败：${syncState.message}"
-    }
-
-    LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
-        item("cloud-sync-settings") {
-            GroupCard(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    OutlinedTextField(
-                        value = baseUrl,
-                        onValueChange = { baseUrl = it },
-                        label = { Text("同步服务器地址") },
-                        placeholder = { Text("https://sync.example.com") },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        enabled = !syncing
-                    )
-                    Text("同步服务器必须使用 HTTPS。", style = MaterialTheme.typography.bodySmall)
-                    OutlinedTextField(
-                        value = apiToken,
-                        onValueChange = { apiToken = it },
-                        label = {
-                            Text(if (state.cloudSync.hasApiToken) "Token（留空则保留）" else "Token")
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        enabled = !syncing,
-                        visualTransformation = if (showApiToken) VisualTransformation.None else PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                        trailingIcon = {
-                            IconButton(onClick = { showApiToken = !showApiToken }) {
-                                Icon(
-                                    if (showApiToken) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
-                                    contentDescription = if (showApiToken) "隐藏 Token" else "显示 Token"
-                                )
-                            }
-                        }
-                    )
-                    Text(
-                        if (state.cloudSync.hasApiToken) "Token 已安全保存。" else "尚未配置 Token。",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(
-                            onClick = {
-                                model.saveCloudSyncServer(baseUrl, apiToken)
-                                apiToken = ""
-                            },
-                            enabled = !syncing && baseUrl.isNotBlank()
-                        ) { Text("保存设置") }
-                        Button(
-                            onClick = {
-                                model.syncNow(baseUrl, apiToken)
-                                apiToken = ""
-                            },
-                            enabled = !syncing && baseUrl.isNotBlank() &&
-                                (apiToken.isNotBlank() || state.cloudSync.hasApiToken)
-                        ) { Text(if (syncing) "正在同步" else "立即同步") }
-                    }
-                    if (state.cloudSync.hasApiToken) {
-                        OutlinedButton(
-                            onClick = {
-                                apiToken = ""
-                                model.clearCloudSyncApiToken()
-                            },
-                            enabled = !syncing
-                        ) { Text("清除 Token") }
-                    }
-                    Text(
-                        if (state.cloudSync.lastSyncAt > 0) "上次同步：${formatSyncTime(state.cloudSync.lastSyncAt)}"
-                        else "上次同步：从未",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    Text(
-                        statusText,
-                        color = if (state.cloudSyncState is CloudSyncRunState.Error) MaterialTheme.colorScheme.error
-                        else MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-            }
-        }
-    }
-}
-
 internal fun formatSyncTime(timestampMs: Long): String =
     DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.MEDIUM).format(Date(timestampMs))
 
-@Composable
-fun SttServiceSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
-    var serverUrl by remember(state.server.baseUrl) { mutableStateOf(state.server.baseUrl) }
-    var serverKey by remember { mutableStateOf("") }
-    var showServerKey by remember { mutableStateOf(false) }
-    val testing = state.connectionTestState is ConnectionTestState.Testing
-
-    LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
-        item("stt-settings") {
-            GroupCard(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    OutlinedTextField(
-                        serverUrl,
-                        { serverUrl = it },
-                        label = { Text("服务器地址") },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
-                    )
-                    OutlinedTextField(
-                        serverKey,
-                        { serverKey = it },
-                        label = { Text(if (state.server.hasApiKey) "API Key（留空则保留）" else "API Key") },
-                        visualTransformation = if (showServerKey) VisualTransformation.None else PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                        modifier = Modifier.fillMaxWidth(),
-                        trailingIcon = {
-                            IconButton(onClick = { showServerKey = !showServerKey }) {
-                                Icon(
-                                    if (showServerKey) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
-                                    contentDescription = if (showServerKey) "隐藏 API Key" else "显示 API Key"
-                                )
-                            }
-                        },
-                        singleLine = true
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = { model.saveServer(serverUrl, serverKey); serverKey = "" }) {
-                            Text("保存")
-                        }
-                        OutlinedButton(onClick = { model.testConnection(serverUrl) }, enabled = !testing) {
-                            Text(if (testing) "正在测试" else "测试连接")
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun AiServiceSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
-    var provider by remember(state.ai.provider) { mutableStateOf(state.ai.provider) }
-    var baseUrl by remember(state.ai.baseUrl) { mutableStateOf(state.ai.baseUrl) }
-    var aiModel by remember(state.ai.model) { mutableStateOf(state.ai.model) }
-    var apiKey by remember { mutableStateOf("") }
-    var showKey by remember { mutableStateOf(false) }
-    var modelMenuExpanded by remember { mutableStateOf(false) }
-    val testing = state.aiConnectionTestState is ConnectionTestState.Testing
-
-    androidx.compose.runtime.LaunchedEffect(state.availableAiModels, state.isLoadingAiModels) {
-        if (!state.isLoadingAiModels && state.availableAiModels.isNotEmpty()) modelMenuExpanded = true
-    }
-
-    fun chooseProvider(value: AiProvider) {
-        provider = value
-        if (value == AiProvider.DEEPSEEK) {
-            baseUrl = "https://api.deepseek.com"
-            aiModel = "deepseek-v4-flash"
-        } else if (baseUrl == "https://api.deepseek.com") {
-            baseUrl = "https://api.openai.com/v1"
-            aiModel = ""
-        }
-    }
-
-    LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
-        item("provider") {
-            GroupCard(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("接口类型", style = MaterialTheme.typography.titleMedium)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FilterChip(
-                            selected = provider == AiProvider.OPENAI_COMPATIBLE,
-                            onClick = { chooseProvider(AiProvider.OPENAI_COMPATIBLE) },
-                            label = { Text("OpenAI 通用接口") }
-                        )
-                        FilterChip(
-                            selected = provider == AiProvider.DEEPSEEK,
-                            onClick = { chooseProvider(AiProvider.DEEPSEEK) },
-                            label = { Text("DeepSeek") }
-                        )
-                    }
-                    Text("AI 服务地址必须使用 HTTPS。", style = MaterialTheme.typography.bodySmall)
-                }
-            }
-        }
-        item("ai-form") {
-            GroupCard(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    OutlinedTextField(baseUrl, { baseUrl = it }, label = { Text("API Base URL") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                    Box {
-                        OutlinedTextField(
-                            aiModel,
-                            { aiModel = it },
-                            label = { Text("模型名称") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            trailingIcon = {
-                                IconButton(
-                                    onClick = {
-                                        modelMenuExpanded = false
-                                        model.fetchAiModels(baseUrl, apiKey)
-                                    },
-                                    enabled = !state.isLoadingAiModels
-                                ) { Icon(Icons.Outlined.ArrowDropDown, contentDescription = "获取或选择模型") }
-                            }
-                        )
-                        DropdownMenu(
-                            expanded = modelMenuExpanded,
-                            onDismissRequest = { modelMenuExpanded = false }
-                        ) {
-                            state.availableAiModels.forEach { value ->
-                                DropdownMenuItem(
-                                    text = { Text(value) },
-                                    onClick = { aiModel = value; modelMenuExpanded = false }
-                                )
-                            }
-                        }
-                    }
-                    if (provider == AiProvider.DEEPSEEK && aiModel in setOf("deepseek-chat", "deepseek-reasoner")) {
-                        Text("该模型名称按兼容模式保留；建议使用右侧下拉按钮获取当前可用模型。", color = MaterialTheme.colorScheme.tertiary)
-                    }
-                    OutlinedTextField(
-                        apiKey,
-                        { apiKey = it },
-                        label = { Text(if (state.ai.hasApiKey) "API Key（留空则保留）" else "API Key") },
-                        modifier = Modifier.fillMaxWidth(),
-                        visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                        trailingIcon = {
-                            IconButton(onClick = { showKey = !showKey }) {
-                                Icon(
-                                    if (showKey) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
-                                    contentDescription = if (showKey) "隐藏 API Key" else "显示 API Key"
-                                )
-                            }
-                        },
-                        singleLine = true
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = { model.saveAiService(provider, baseUrl, aiModel, apiKey); apiKey = "" }) { Text("保存") }
-                        OutlinedButton(onClick = { model.testAiConnection(baseUrl, apiKey) }, enabled = !testing) {
-                            Text(if (testing) "正在测试" else "测试连接")
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun AiPromptsSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
-    var value by remember(state.aiPrompts) { mutableStateOf(state.aiPrompts) }
-    val valid = listOf(value.organizeNotes, value.correctAsr, value.quickAnswer, value.customConversation, value.generalConversation, value.imageContext)
-        .all { it.isNotBlank() }
-    LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
-    ) {
-        item("prompt-help") {
-            Text("新设置只影响后续 AI 请求；已经生成的结果与现有对话继续使用创建时冻结的提示词。", style = MaterialTheme.typography.bodyMedium)
-        }
-        item("prompt-notes") { PromptField("整理成笔记", value.organizeNotes) { value = value.copy(organizeNotes = it) } }
-        item("prompt-correct") { PromptField("修正明显 ASR 错误", value.correctAsr) { value = value.copy(correctAsr = it) } }
-        item("prompt-quick") { PromptField("快速回答", value.quickAnswer) { value = value.copy(quickAnswer = it) } }
-        item("prompt-chat") { PromptField("自定义对话", value.customConversation) { value = value.copy(customConversation = it) } }
-        item("prompt-general-chat") { PromptField("通用对话", value.generalConversation) { value = value.copy(generalConversation = it) } }
-        item("prompt-image") { PromptField("图片补充", value.imageContext) { value = value.copy(imageContext = it) } }
-        item("prompt-actions") {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { model.saveAiPrompts(value) }, enabled = valid) { Text("保存") }
-                OutlinedButton(onClick = model::restoreDefaultAiPrompts) { Text("恢复默认值") }
-            }
-        }
-        if (!valid) item("prompt-error") { Text("提示词不能为空。", color = MaterialTheme.colorScheme.error) }
-    }
-}
-
-@Composable
-fun AsrPromptPolicySettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
-    var config by remember(state.asrPromptAutoConfig) { mutableStateOf(state.asrPromptAutoConfig) }
-    LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
-    ) {
-        item("asr-mode") {
-            GroupCard(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("全局提示词模式", style = MaterialTheme.typography.titleMedium)
-                    HorizontalChoiceSelector(
-                        options = AsrPromptMode.entries,
-                        selected = state.globalAsrPromptMode,
-                        onSelect = model::saveGlobalAsrPromptMode,
-                        label = AsrPromptMode::displayName,
-                        testTag = "global-asr-prompt-modes",
-                        optionTestTag = { "global-asr-prompt-${it.name.lowercase()}" }
-                    )
-                    Text("课程可以覆盖此设置；自动模式只给正常、较长且清晰的片段附带 Prompt。", style = MaterialTheme.typography.bodySmall)
-                }
-            }
-        }
-        if (state.developerMode) item("auto-thresholds") {
-            GroupCard(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("自动模式质量门槛", style = MaterialTheme.typography.titleMedium)
-                    MsParameter("最短音频", "片段总长度", config.minAudioDurationMs, 500..10000, 100) { config = config.copy(minAudioDurationMs = it) }
-                    MsParameter("最短有效语音", "VAD 判为语音的累计时长", config.minVoicedDurationMs, 200..5000, 100) { config = config.copy(minVoicedDurationMs = it) }
-                    FloatParameter("平均 VAD", "语音帧平均概率", config.minMeanSpeechProbability, 0.1f..0.9f, 0.05f) { config = config.copy(minMeanSpeechProbability = it) }
-                    FloatParameter("语音帧占比", "语音帧占全部帧的比例", config.minSpeechFrameRatio, 0.05f..0.9f, 0.05f) { config = config.copy(minSpeechFrameRatio = it) }
-                    FloatParameter("最低 SNR（dB）", "可估算时使用；噪声样本不足时跳过", config.minSnrDb, 0f..30f, 1f) { config = config.copy(minSnrDb = it) }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = { model.saveAsrPromptAutoConfig(config) }) { Text("保存门槛") }
-                        OutlinedButton(onClick = model::restoreDefaultAsrPromptAutoConfig) { Text("恢复默认值") }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun AiGenerationSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
-    var value by remember(state.aiGeneration) { mutableStateOf(state.aiGeneration) }
-    LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
-    ) {
-        item("generation-settings") {
-            GroupCard(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("仅影响后续 AI 请求。诊断不会记录密钥或思维链。", style = MaterialTheme.typography.bodySmall)
-                    IntParameter("最大输出 Tokens", value.maxTokens, 512..32768, 512) { value = value.copy(maxTokens = it) }
-                    FloatParameter("固定任务温度", "笔记、纠错和快速回答", value.fixedTemperature, 0f..1.5f, 0.1f) { value = value.copy(fixedTemperature = it) }
-                    FloatParameter("对话温度", "课堂问答和追问", value.chatTemperature, 0f..1.5f, 0.1f) { value = value.copy(chatTemperature = it) }
-                    Text("DeepSeek 思考", style = MaterialTheme.typography.titleSmall)
-                    HorizontalChoiceSelector(
-                        options = AiThinkingMode.entries,
-                        selected = value.deepSeekThinkingMode,
-                        onSelect = { value = value.copy(deepSeekThinkingMode = it) },
-                        label = AiThinkingMode::displayName,
-                        testTag = "deepseek-thinking-modes",
-                        optionTestTag = { "deepseek-thinking-${it.name.lowercase()}" }
-                    )
-                    Text("推理强度", style = MaterialTheme.typography.titleSmall)
-                    HorizontalChoiceSelector(
-                        options = AiReasoningEffort.entries,
-                        selected = value.reasoningEffort,
-                        onSelect = { value = value.copy(reasoningEffort = it) },
-                        label = { it.name.lowercase() },
-                        testTag = "ai-reasoning-efforts",
-                        optionTestTag = { "ai-reasoning-${it.name.lowercase()}" }
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = { model.saveAiGeneration(value) }) { Text("保存") }
-                        OutlinedButton(onClick = model::restoreDefaultAiGeneration) { Text("恢复默认值") }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun IntParameter(label: String, value: Int, range: IntRange, step: Int, change: (Int) -> Unit) {
-    var text by remember(value) { mutableStateOf(value.toString()) }
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(label, style = MaterialTheme.typography.titleSmall)
-        Slider(value.toFloat(), { change((it / step).roundToInt() * step) }, valueRange = range.first.toFloat()..range.last.toFloat())
-        OutlinedTextField(
-            value = text,
-            onValueChange = { candidate ->
-                text = candidate.filter(Char::isDigit)
-                text.toIntOrNull()?.takeIf { it in range }?.let(change)
-            },
-            label = { Text("当前数值") },
-            suffix = { Text("tokens") },
-            isError = text.toIntOrNull()?.let { it !in range } ?: true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth()
-        )
-    }
-}
-
-@Composable
-private fun PromptField(label: String, value: String, update: (String) -> Unit) = OutlinedTextField(
-    value = value,
-    onValueChange = update,
-    label = { Text(label) },
-    supportingText = { Text("${value.codePointCount(0, value.length)} 个字符") },
-    minLines = 4,
-    maxLines = 10,
-    isError = value.isBlank(),
-    modifier = Modifier.fillMaxWidth()
-)
-
-@Composable
-fun VadParametersScreen(config: VadConfig, model: SttViewModel) = LazyColumn(
-    Modifier.fillMaxSize(),
-    contentPadding = PaddingValues(16.dp)
-) {
-    item("vad-parameters") { VadParametersCard(config, model::updateVadConfig, model::restoreDefaultVadConfig) }
-}
-
-@Composable
-fun VadPresetsScreen(selectedPreset: VadPreset?, model: SttViewModel) {
-    LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        item("current-preset") { Text("当前预设：${selectedPreset?.displayName ?: "自定义"}", style = MaterialTheme.typography.titleMedium) }
-        items(VadPreset.entries, key = { "preset-${it.id}" }) { preset ->
-            val config = preset.config
-            GroupCard(Modifier.fillMaxWidth().clickable { model.applyVadPreset(preset) }) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(preset.displayName, style = MaterialTheme.typography.titleMedium)
-                    Text("阈值 ${formatFloat(config.threshold)} · 开始 ${config.startConfirmMs} ms · 静音 ${config.endSilenceMs} ms")
-                    if (selectedPreset == preset) Text("当前使用", color = MaterialTheme.colorScheme.primary)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun VadParametersCard(config: VadConfig, change: (VadConfig) -> Unit, restore: () -> Unit) = GroupCard(Modifier.fillMaxWidth()) {
-    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        Text("参数会保存到本机；正在切分的片段从下一段使用新边界参数。", style = MaterialTheme.typography.bodySmall)
-        FloatParameter("VAD 阈值", "判定语音的概率门槛", config.threshold, 0.1f..0.9f, 0.05f) { change(config.copy(threshold = it)) }
-        MsParameter("语音开始确认", "连续疑似语音达到此时长才开始", config.startConfirmMs, 50..500, 50) { change(config.copy(startConfirmMs = it)) }
-        MsParameter("结束静音阈值", "连续静音达到此时长后收段", config.endSilenceMs, 300..2000, 50) { change(config.copy(endSilenceMs = it)) }
-        MsParameter("Pre-roll 前置保留", "保留语音前的环境声", config.preRollMs, 0..3000, 100) { change(config.copy(preRollMs = it)) }
-        MsParameter("Post-roll 后置保留", "保留语音结束后的尾音", config.postRollMs, 0..1500, 100) { change(config.copy(postRollMs = it)) }
-        MsParameter("最短语音片段", "更短的片段将丢弃", config.minSegmentMs, 200..3000, 100) { change(config.copy(minSegmentMs = it)) }
-        MsParameter("Soft limit", "到达后优先等待自然停顿", config.softLimitMs, 5000..30000, 500, { it < config.hardLimitMs }) { change(config.copy(softLimitMs = it)) }
-        MsParameter("Hard limit", "到达后强制切分", config.hardLimitMs, 10000..60000, 1000, { it > config.softLimitMs && config.overlapMs < it }) { change(config.copy(hardLimitMs = it)) }
-        MsParameter("Hard limit overlap", "强制切分时与下一段重叠", config.overlapMs, 0..3000, 100, { it < config.hardLimitMs }) { change(config.copy(overlapMs = it)) }
-        OutlinedButton(onClick = restore) { Text("恢复默认值") }
-    }
-}
-
-@Composable
-private fun FloatParameter(label: String, description: String, value: Float, range: ClosedFloatingPointRange<Float>, step: Float, change: (Float) -> Unit) {
-    var input by remember(value) { mutableStateOf(formatFloat(value)) }
-    val valid = input.toFloatOrNull()?.let { it in range } == true
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(label, style = MaterialTheme.typography.titleSmall)
-        Text(description, style = MaterialTheme.typography.bodySmall)
-        OutlinedTextField(input, { text -> input = text; text.toFloatOrNull()?.takeIf { it in range }?.let(change) }, label = { Text("当前值") }, isError = input.isNotBlank() && !valid, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth())
-        Slider(value, { change(((it / step).roundToInt() * step).coerceIn(range.start, range.endInclusive)) }, valueRange = range, steps = ((range.endInclusive - range.start) / step).roundToInt() - 1)
-    }
-}
-
-@Composable
-private fun MsParameter(label: String, description: String, value: Long, range: IntRange, step: Int, validExtra: (Long) -> Boolean = { true }, change: (Long) -> Unit) {
-    var input by remember(value) { mutableStateOf(value.toString()) }
-    val parsed = input.toLongOrNull()
-    val valid = parsed != null && parsed in range && validExtra(parsed)
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(label, style = MaterialTheme.typography.titleSmall)
-        Text(description, style = MaterialTheme.typography.bodySmall)
-        OutlinedTextField(input, { text -> input = text; text.toLongOrNull()?.takeIf { it in range && validExtra(it) }?.let(change) }, label = { Text("毫秒") }, isError = input.isNotBlank() && !valid, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
-        Slider(value.toFloat(), { change(((it / step).roundToInt() * step).toLong()) }, valueRange = range.first.toFloat()..range.last.toFloat(), steps = (range.last - range.first) / step - 1)
-        if (input.isNotBlank() && !valid) Text("请输入允许范围内且满足关联限制的数值。", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-    }
-}
-
-@Composable private fun SectionTitle(text: String) = Text(text, style = MaterialTheme.typography.titleLarge)
-/** A settings row; [attention] flags something the user still has to set up, [done] confirms it. */
-@Composable
-private fun SettingsLink(title: String, description: String, click: () -> Unit, attention: String? = null, done: Boolean = false) =
-    GroupCard(Modifier.fillMaxWidth().clickable(onClick = click)) {
-        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(title, style = MaterialTheme.typography.titleMedium)
-                Text(description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2)
-            }
-            when {
-                attention != null -> Surface(color = MaterialTheme.colorScheme.tertiaryContainer, contentColor = MaterialTheme.colorScheme.onTertiaryContainer, shape = MaterialTheme.shapes.small) {
-                    Text(attention, style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp))
-                }
-                done -> Text("已配置", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
-            }
-        }
-    }
-
-/** 外观: accent palette and light/dark preference; stored in DataStore, applied app-wide immediately. */
-@Composable
-fun AppearanceSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
-    val palettes = ThemePalette.entries.filter { it != ThemePalette.DYNAMIC || android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S }
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        item("palette") {
-            GroupCard(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("主题色", style = MaterialTheme.typography.titleMedium)
-                    Text("状态颜色（待识别、出错等）在所有主题色下保持一致。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    palettes.forEach { palette ->
-                        Row(
-                            Modifier.fillMaxWidth().heightIn(min = 48.dp)
-                                .selectable(state.appearance.palette == palette, role = Role.RadioButton) { model.setThemePalette(palette) }
-                                .testTag("palette-${palette.name.lowercase()}"),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            RadioButton(selected = state.appearance.palette == palette, onClick = null)
-                            Box(Modifier.padding(start = 12.dp).size(20.dp).background(palette.swatch, CircleShape))
-                            Text(
-                                palette.label + if (palette == ThemePalette.Default) "（默认）" else "",
-                                Modifier.padding(start = 12.dp)
-                            )
-                        }
-                    }
-                }
-            }
-        }
-        item("dark-mode") {
-            GroupCard(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("深色模式", style = MaterialTheme.typography.titleMedium)
-                    DarkModePreference.entries.forEach { mode ->
-                        Row(
-                            Modifier.fillMaxWidth().heightIn(min = 48.dp)
-                                .selectable(state.appearance.darkMode == mode, role = Role.RadioButton) { model.setDarkMode(mode) }
-                                .testTag("dark-mode-${mode.name.lowercase()}"),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            RadioButton(selected = state.appearance.darkMode == mode, onClick = null)
-                            Text(mode.label, Modifier.padding(start = 12.dp))
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-private fun providerName(provider: AiProvider) = if (provider == AiProvider.DEEPSEEK) "DeepSeek" else "OpenAI 通用接口"
+private fun providerName(provider: AiProvider) = if (provider == AiProvider.DEEPSEEK) "DeepSeek" else "其他服务"

@@ -210,6 +210,8 @@ Android 的正式云同步设置要求 HTTPS；本地端到端调试如需让模
 
 ### UI 与入口
 
+> v1.3.1 起：设置子页在 `ui/SettingsPages.kt`（总览仍在 `SettingsScreens.kt`）。规则：开关/单选/滑块改了即生效；文字值用 `TextEditSheet` 底部弹框编辑，确认后 `SettingsViewModel` 的单项保存函数（`saveSttUrl`/`saveSttKey`/`saveAiBaseUrl`/`saveAiModel`/`saveAiKey`/`chooseAiProvider`/`saveCloudSyncUrl`/`saveCloudSyncToken`）立即写入并自动测试。最近一次测试结果在 `SettingsUiState.sttCheck`/`aiCheck`（`ServiceCheck`，仅内存，进页面时若未测过会自动测一次）。识别 Key 校验见 `ServerConnectionTester.verify`（GET `/jobs/listen-key-probe`：404=有效，401/403=无效）。VAD 预设与参数合并为路由 `settings/vad`（`nearestVadPreset` 推断自定义参数的基准预设）；提示词逐个编辑（`AiPromptKind`，路由 `settings/ai-prompts/{kind}`，未保存返回会确认；顶栏返回走 `OnBackPressedDispatcher`，以便页面的 `BackHandler` 拦截）。
+
 > v1.3.0 起：视觉组件在 `ui/Lists.kt`（`ListGroup`/`ListRow`/`StatusPill`/`CourseBadge`，课程颜色 `CourseColors` + DataStore `course_colors` 覆盖，经 `LocalCourseColors` 提供）。课堂页在 `ui/ClassScreens.kt`（`ClassTab` 文字/笔记/问答、`SelectionActionBar`），搜索在 `ui/SearchScreen.kt`。Room v12：`records.topic`、`transcript_segments.marked`、`pending_marks` 表 + `mark_new_segments` 触发器（`ListenDatabase.TRIGGERS_CALLBACK` 在 onOpen 建立），标记入口 `CourseRepository.markMoment`（控制栏、通知 `ACTION_MARK`）。自动笔记 `AiViewModel.autoOrganizeNotes`（归档后、全部识别后触发；`splitTopic` 取首行“主题：”写入 topic）。同步新增 `topic`/`marked`，`@EncodeDefault(NEVER)` 保证旧服务端兼容；sync-server 的 `initialize_database` 启动时补列。
 >
 > v1.2.0 起：课堂可暂停/继续（`SttViewModel.pause/resume/endClass`，状态在 `ListeningUiState.pausedClass`/`resumingRecordId`，续录用 `elapsedOffsetMs` 保持计时连续）；归档确认只在“结束”后出现。课堂页底部控制栏为 `CaptureScreens.kt` 的 `CaptureControlBar`，多段录音汇总为 `RecordingsSummaryCard`，“全部识别”是 `RecordingViewModel.recognizeAll`。底栏高亮由 `mainDestinationForRoute` 按内容判断。排队数只取当前记录的 `AsrRuntimeSummary.inProgressCount`。
@@ -220,7 +222,7 @@ Android 的正式云同步设置要求 HTTPS；本地端到端调试如需让模
 - `app/src/main/java/com/cmhr/listen/ui/ListenApp.kt`：Compose 导航与依赖装配
 - `ui/CourseScreens.kt`：Course、Session、课堂详情、识别模式选择
 - `ui/AiScreens.kt`：AI 对话、图片/文件附件和直接拍照
-- `ui/SettingsScreens.kt`：STT、AI、VAD、云同步设置
+- `ui/SettingsScreens.kt`：设置总览；`ui/SettingsPages.kt`：语音识别、AI 服务、云同步、外观、专业词提示及开发者子页
 - 根包下各 `*ViewModel.kt`
 
 ### 音频与 ASR

@@ -173,6 +173,12 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
 
     suspend fun clearApiKey() = context.appSettingsDataStore.edit { it.remove(API_KEY) }
 
+    /** Saves only the ASR key, so it can be set before the address. */
+    suspend fun saveSttApiKey(apiKey: String) {
+        require(apiKey.isNotBlank()) { "API Key 不能为空。" }
+        context.appSettingsDataStore.edit { it[API_KEY] = sttApiKeyStore.encrypt(apiKey.trim()) }
+    }
+
     suspend fun readApiKey(): String? = context.appSettingsDataStore.data.first()[API_KEY]?.let(sttApiKeyStore::decrypt)
 
     suspend fun saveAiService(provider: AiProvider, baseUrl: String, model: String, apiKey: String?) {
@@ -189,6 +195,28 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
     }
 
     suspend fun clearAiApiKey() = context.appSettingsDataStore.edit { it.remove(AI_API_KEY) }
+
+    /** Provider and address change together; the model may still be empty until one is picked. */
+    suspend fun saveAiEndpoint(provider: AiProvider, baseUrl: String, model: String) {
+        val normalized = baseUrl.trim().trimEnd('/')
+        val parsed = normalized.toHttpUrlOrNull()
+        require(parsed != null && parsed.scheme == "https") { "AI 服务地址必须是有效的 https:// 地址。" }
+        context.appSettingsDataStore.edit { preferences ->
+            preferences[AI_PROVIDER] = provider.name
+            preferences[AI_BASE_URL] = normalized
+            preferences[AI_MODEL] = model.trim()
+        }
+    }
+
+    suspend fun saveAiModel(model: String) {
+        require(model.isNotBlank()) { "请填写 AI 模型名称。" }
+        context.appSettingsDataStore.edit { it[AI_MODEL] = model.trim() }
+    }
+
+    suspend fun saveAiApiKey(apiKey: String) {
+        require(apiKey.isNotBlank()) { "API Key 不能为空。" }
+        context.appSettingsDataStore.edit { it[AI_API_KEY] = aiApiKeyStore.encrypt(apiKey.trim()) }
+    }
     suspend fun readAiApiKey(): String? = context.appSettingsDataStore.data.first()[AI_API_KEY]?.let(aiApiKeyStore::decrypt)
 
     suspend fun saveAiPrompts(value: AiPromptSettings) {
@@ -265,6 +293,11 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
                 preferences[CLOUD_SYNC_API_TOKEN] = syncApiTokenStore.encrypt(apiToken.trim())
             }
         }
+    }
+
+    suspend fun saveCloudSyncToken(apiToken: String) {
+        require(apiToken.isNotBlank()) { "Token 不能为空。" }
+        context.appSettingsDataStore.edit { it[CLOUD_SYNC_API_TOKEN] = syncApiTokenStore.encrypt(apiToken.trim()) }
     }
 
     suspend fun clearCloudSyncApiToken() =
