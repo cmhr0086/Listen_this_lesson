@@ -31,7 +31,6 @@ import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.Stop
 import com.cmhr.listen.PausedClass
-import androidx.compose.material.icons.outlined.ArrowDownward
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material3.Button
@@ -296,8 +295,7 @@ internal fun CaptureControlBar(
     start: (CaptureMode) -> Unit,
     pause: () -> Unit,
     resume: () -> Unit,
-    end: () -> Unit,
-    jumpToLatest: (() -> Unit)?
+    end: () -> Unit
 ) {
     val activeHere = listening.isListening && listening.activeRecordId == recordId
     val paused = listening.pausedClass?.takeIf { !listening.isListening && it.recordId == recordId }
@@ -347,11 +345,6 @@ internal fun CaptureControlBar(
                     TextButton(onClick = { start(CaptureMode.RECORD_ONLY) }, modifier = Modifier.testTag("bar-start-record-only")) {
                         Icon(Icons.Outlined.FiberManualRecord, contentDescription = null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.error); Spacer(Modifier.width(4.dp)); Text("仅录音")
                     }
-                }
-            }
-            if (jumpToLatest != null) {
-                IconButton(onClick = jumpToLatest, modifier = Modifier.testTag("jump-to-latest")) {
-                    Icon(Icons.Outlined.ArrowDownward, contentDescription = "回到最新")
                 }
             }
         }

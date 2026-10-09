@@ -1,6 +1,15 @@
 package com.cmhr.listen.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.material.icons.outlined.ArrowDownward
+import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -22,7 +31,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -206,5 +219,63 @@ private fun LinePosition.shape(): Shape {
         LinePosition.FIRST -> RoundedCornerShape(topStart = r, topEnd = r)
         LinePosition.MIDDLE -> RoundedCornerShape(0.dp)
         LinePosition.LAST -> RoundedCornerShape(bottomStart = r, bottomEnd = r)
+    }
+}
+
+internal class FollowLatestState {
+    var following by mutableStateOf(true)
+        internal set
+    fun resume() { following = true }
+}
+
+/**
+ * Keeps [listState] at the bottom while [enabled], until the user drags the list; reaching the
+ * bottom again (by hand or via [FollowLatestState.resume]) turns following back on. Driven by
+ * layout (canScrollForward) rather than item counts: new lines usually grow the last paragraph
+ * without adding an item, and the decision must see the new layout, not the previous one.
+ */
+@Composable
+internal fun rememberFollowLatest(listState: LazyListState, enabled: Boolean, key: Any? = null): FollowLatestState {
+    val state = remember(key) { FollowLatestState() }
+    val active by rememberUpdatedState(enabled)
+    LaunchedEffect(listState, state) {
+        listState.interactionSource.interactions.collect { if (it is DragInteraction.Start) state.following = false }
+    }
+    LaunchedEffect(listState, state) {
+        snapshotFlow { listState.canScrollForward }.collect { if (!it) state.following = true }
+    }
+    LaunchedEffect(listState, state) {
+        snapshotFlow { active && state.following && listState.canScrollForward && !listState.isScrollInProgress }
+            .collect { if (it) listState.scrollToBottom() }
+    }
+    return state
+}
+
+/**
+ * Scrolls to the real end of the list. Scrolling to the last index only aligns that item's top,
+ * and the last paragraph is often taller than the screen, so finish the remaining distance.
+ */
+internal suspend fun LazyListState.scrollToBottom() {
+    val last = layoutInfo.totalItemsCount - 1
+    if (last < 0) return
+    // Far away: jump instead of animating through the whole class.
+    if (layoutInfo.visibleItemsInfo.none { it.index >= last - 1 }) scrollToItem(last)
+    var steps = 0
+    while (canScrollForward && steps++ < 20) {
+        animateScrollBy(layoutInfo.viewportSize.height.coerceAtLeast(1).toFloat())
+    }
+}
+
+/** Floating "back to latest" button over the transcript, away from the capture controls. */
+@Composable
+internal fun JumpToLatestButton(visible: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    AnimatedVisibility(visible, modifier = modifier, enter = fadeIn() + scaleIn(), exit = fadeOut() + scaleOut()) {
+        SmallFloatingActionButton(
+            onClick = onClick,
+            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+            modifier = Modifier.testTag("jump-to-latest")
+        ) {
+            Icon(Icons.Outlined.ArrowDownward, contentDescription = "回到最新")
+        }
     }
 }
