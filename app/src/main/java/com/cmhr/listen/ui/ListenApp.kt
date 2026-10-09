@@ -715,11 +715,6 @@ fun ListenApp(
                     stop = stt::endClass,
                     pause = stt::pause,
                     resume = stt::resume,
-                    continueRecord = { recordId, mode ->
-                        courseState.recentSessions.firstOrNull { it.session.id == recordId }?.let { courses.selectRecord(it.session.courseId, recordId) }
-                        startCapture(recordId, mode)
-                        nav.navigate("record/$recordId")
-                    },
                     openRecord = { summary ->
                         courses.selectRecord(summary.session.courseId, summary.session.id)
                         nav.navigate("record/${summary.session.id}")

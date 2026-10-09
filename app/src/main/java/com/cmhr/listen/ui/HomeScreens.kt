@@ -80,11 +80,8 @@ fun RecordHomeScreen(
     openRecord: (SessionSummary) -> Unit,
     openActiveRecord: () -> Unit,
     pause: () -> Unit = {},
-    resume: () -> Unit = {},
-    continueRecord: (Long, CaptureMode) -> Unit = { _, _ -> },
-    now: Long = System.currentTimeMillis()
+    resume: () -> Unit = {}
 ) {
-    val continuable = continuableClass(recent, listening, now)
     LazyColumn(
         Modifier.fillMaxSize().testTag("record-home-list"),
         contentPadding = PaddingValues(16.dp),
@@ -98,7 +95,7 @@ fun RecordHomeScreen(
                     PausedCapturePanel(paused, resume, stop, title = "已暂停「${paused.recordName ?: "当前课堂"}」")
                     TextButton(onClick = openActiveRecord, modifier = Modifier.testTag("open-paused-record")) { Text("查看这节课") }
                 }
-                else -> StartClassCard(startCourse, suggestion, listening, processing, pickCourse, start, continuable, continueRecord)
+                else -> StartClassCard(startCourse, suggestion, listening, processing, pickCourse, start)
             }
         }
         item("recent-heading") { HomeSectionTitle("最近课堂") }
@@ -146,9 +143,7 @@ private fun StartClassCard(
     listening: ListeningUiState,
     processing: OfflineRecognitionState,
     pickCourse: () -> Unit,
-    start: (CaptureMode) -> Unit,
-    continuable: SessionSummary? = null,
-    continueRecord: (Long, CaptureMode) -> Unit = { _, _ -> }
+    start: (CaptureMode) -> Unit
 ) {
     val blocked = if (processing.isProcessing) "正在识别录音，暂停或完成后才能开始上课。" else null
     Card(Modifier.fillMaxWidth().testTag("start-class-card")) {
@@ -176,7 +171,6 @@ private fun StartClassCard(
                 StartModeButton(Modifier.weight(1f).fillMaxHeight(), CaptureMode.REALTIME_ASR, blocked == null, start)
                 StartModeButton(Modifier.weight(1f).fillMaxHeight(), CaptureMode.RECORD_ONLY, blocked == null, start)
             }
-            if (continuable != null && blocked == null) ContinueLastRow(continuable, continueRecord)
             (blocked ?: listening.error)?.let {
                 Text(it, style = MaterialTheme.typography.bodySmall, color = if (blocked != null) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error)
             }
@@ -215,37 +209,6 @@ private fun ActiveClassCard(listening: ListeningUiState, open: () -> Unit, pause
         }
     }
 }
-
-/** "继续上一节": resume today's most recent class instead of creating a new record by accident. */
-@Composable
-private fun ContinueLastRow(summary: SessionSummary, continueRecord: (Long, CaptureMode) -> Unit) {
-    val session = summary.session
-    Column(Modifier.fillMaxWidth().testTag("continue-last"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        HorizontalDivider()
-        Text(
-            "或继续「${session.name}」" + (session.endedAt?.let { " · ${SimpleDateFormat("HH:mm", Locale.CHINA).format(Date(it))} 结束" } ?: ""),
-            style = MaterialTheme.typography.bodyMedium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = { continueRecord(session.id, CaptureMode.REALTIME_ASR) }, modifier = Modifier.testTag("continue-realtime")) { Text("继续实时转写") }
-            OutlinedButton(onClick = { continueRecord(session.id, CaptureMode.RECORD_ONLY) }, modifier = Modifier.testTag("continue-record-only")) { Text("继续仅录音") }
-        }
-    }
-}
-
-/** Today's latest class, ended within [CONTINUE_WINDOW_MS], that is not capturing or paused. */
-internal fun continuableClass(recent: List<SessionSummary>, listening: ListeningUiState, now: Long): SessionSummary? {
-    if (listening.isListening || listening.pausedClass != null) return null
-    val last = recent.firstOrNull() ?: return null
-    val ended = last.session.endedAt ?: return null
-    val day = SimpleDateFormat("yyyyMMdd", Locale.CHINA)
-    if (day.format(Date(last.session.startedAt)) != day.format(Date(now))) return null
-    return last.takeIf { now - ended in 0..CONTINUE_WINDOW_MS }
-}
-
-internal const val CONTINUE_WINDOW_MS = 3 * 60 * 60 * 1000L
 
 @Composable
 private fun HomeSectionTitle(title: String, detail: String? = null) {

@@ -434,12 +434,12 @@ class UiInteractionTest {
 
         composeRule.waitForIdle()
         composeRule.runOnIdle { assertEquals(0, healthRefreshes) }
-        composeRule.onNodeWithText("客户端队列：1 / 持久化").assertExists()
-        composeRule.onNodeWithText("待提交：1").assertExists()
-        composeRule.onNodeWithText("提交中：1").assertExists()
-        composeRule.onNodeWithText("服务端在途：2").assertExists()
-        composeRule.onNodeWithText("全局并发槽：3 / 3").assertExists()
-        composeRule.onNodeWithText("正在轮询：1").assertExists()
+        composeRule.onNodeWithText("本记录未完成 1").assertExists()
+        composeRule.onNodeWithTag("asr-metric-queued").assertTextContains("1", substring = true)
+        composeRule.onNodeWithTag("asr-metric-submitting").assertTextContains("1", substring = true)
+        composeRule.onNodeWithTag("asr-metric-server").assertTextContains("2", substring = true)
+        composeRule.onNodeWithTag("asr-metric-polling").assertTextContains("1", substring = true)
+        composeRule.onNodeWithText("并发槽 3 / 3").assertExists()
         composeRule.onNodeWithTag("asr-capture-vad").assertExists()
         composeRule.onNodeWithText("全部记录").assertDoesNotExist()
         composeRule.onNodeWithTag("asr-diagnostics-list")
@@ -484,8 +484,8 @@ class UiInteractionTest {
             }
         }
 
-        composeRule.onNodeWithTag("asr-diagnostics-list").performScrollToIndex(3)
-        composeRule.onNodeWithText("服务端等待：—（估算中）").assertExists()
+        composeRule.onNodeWithTag("asr-diagnostics-list").performScrollToNode(hasTestTag("asr-diagnostic-processing-anchor-test"))
+        composeRule.onNodeWithText("服务端等待 —（估算中）").assertExists()
         composeRule.onNodeWithText("81188.9s", substring = true).assertDoesNotExist()
     }
 
@@ -524,8 +524,7 @@ class UiInteractionTest {
         composeRule.onNodeWithTag("asr-diagnostics-list").performScrollToNode(hasTestTag("asr-diagnostic-preview-16"))
         composeRule.onNodeWithTag("asr-diagnostic-preview-16").assertExists()
         composeRule.onNodeWithTag("asr-diagnostic-preview-1").assertDoesNotExist()
-        // record, capture/VAD, summary, fifteen diagnostics, then the more action
-        composeRule.onNodeWithTag("asr-diagnostics-list").performScrollToIndex(18)
+        composeRule.onNodeWithTag("asr-diagnostics-list").performScrollToNode(hasTestTag("asr-more-button"))
         composeRule.onNodeWithTag("asr-more-button").assertExists().performClick()
         composeRule.runOnIdle { assertEquals(8L, openedRecordId) }
     }
