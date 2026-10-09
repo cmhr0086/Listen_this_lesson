@@ -27,6 +27,9 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import com.cmhr.listen.recording.CaptureMode
+import com.cmhr.listen.data.course.CourseEntity
+import com.cmhr.listen.data.course.CourseSuggestion
+import com.cmhr.listen.data.course.CourseSummary
 import com.cmhr.listen.recording.OfflineRecognitionState
 import com.cmhr.listen.data.recording.RecordingEntity
 import com.cmhr.listen.data.recording.RecordingState
@@ -95,15 +98,6 @@ class UiInteractionTest {
         composeRule.onNodeWithText("新建课程", useUnmergedTree = true).assertTextContains("新建课程")
         composeRule.onNodeWithTag("global-fab").performClick()
         assertTrue(clicked)
-    }
-
-    @Test
-    fun listeningStopUsesGlobalRedFab() {
-        composeRule.setContent {
-            ListenTheme { ListeningStopFab(SystemClock.elapsedRealtime(), click = {}) }
-        }
-        composeRule.onNodeWithTag("global-stop-listening").assertExists()
-        composeRule.onNodeWithContentDescription("停止录制").assertExists()
     }
 
     @Test
@@ -186,6 +180,75 @@ class UiInteractionTest {
         composeRule.onNodeWithTag("start-realtime").assertIsNotEnabled()
         composeRule.onNodeWithTag("start-record-only").assertIsNotEnabled()
         composeRule.onNodeWithText("「高数-10-08」正在录制", substring = true).assertExists()
+    }
+
+    @Test
+    fun homeStartsAClassWithTheSuggestedCourseWithoutNavigating() {
+        var started: CaptureMode? = null
+        var picked = false
+        val course = CourseSummary(CourseEntity(id = 7, name = "毛概", createdAt = 1), recordCount = 3, lastStartedAt = 1_000)
+        composeRule.setContent {
+            ListenTheme {
+                RecordHomeScreen(
+                    recent = emptyList(),
+                    startCourse = course,
+                    suggestion = CourseSuggestion(7, CourseSuggestion.Reason.USUAL_TIME),
+                    listening = ListeningUiState(),
+                    processing = OfflineRecognitionState(),
+                    pendingRecordingCounts = emptyMap(),
+                    pickCourse = { picked = true },
+                    start = { started = it },
+                    stop = {},
+                    openRecord = {},
+                    openActiveRecord = {}
+                )
+            }
+        }
+        composeRule.onNodeWithTag("start-course-chip").assertTextContains("毛概")
+        composeRule.onNodeWithText("按你平时的上课时间猜的", substring = true).assertExists()
+        composeRule.onNodeWithTag("home-start-record-only").performClick()
+        composeRule.onNodeWithTag("start-course-chip").performClick()
+        composeRule.runOnIdle {
+            assertEquals(CaptureMode.RECORD_ONLY, started)
+            assertTrue(picked)
+        }
+    }
+
+    @Test
+    fun coursesTabShowsClassCountAndOpensTheCourse() {
+        var opened: Long? = null
+        val courses = listOf(
+            CourseSummary(CourseEntity(id = 7, name = "毛概", createdAt = 1), recordCount = 7, lastStartedAt = 1_759_890_000_000),
+            CourseSummary(CourseEntity(id = 8, name = "英语", createdAt = 2), recordCount = 0, lastStartedAt = null)
+        )
+        composeRule.setContent { ListenTheme { CoursesTabScreen(courses, openCourse = { opened = it }, courseMenu = {}) } }
+        composeRule.onNodeWithText("7 节课", substring = true).assertExists()
+        composeRule.onNodeWithText("还没有课堂").assertExists()
+        composeRule.onNodeWithTag("course-7").performClick()
+        composeRule.runOnIdle { assertEquals(7L, opened) }
+    }
+
+    @Test
+    fun coursePickerConfirmsTheChosenCourse() {
+        var confirmed: Long? = null
+        val courses = listOf(1L to "英语", 2L to "毛概").map { (id, name) -> CourseSummary(CourseEntity(id = id, name = name, createdAt = id), 1, id) }
+        composeRule.setContent {
+            ListenTheme {
+                CoursePickerDialog(
+                    title = "这节课保存到哪门课？",
+                    message = null,
+                    courses = courses,
+                    initialCourseId = 1,
+                    confirmLabel = "保存",
+                    confirm = { confirmed = it },
+                    createNew = {},
+                    dismiss = {}
+                )
+            }
+        }
+        composeRule.onNodeWithTag("pick-course-2").performClick()
+        composeRule.onNodeWithTag("course-picker-confirm").performClick()
+        composeRule.runOnIdle { assertEquals(2L, confirmed) }
     }
 
     @Test
@@ -453,6 +516,51 @@ class UiInteractionTest {
     }
 
     @Test
+    fun longPressInDragSelectionListKeepsTheLineSelectedAfterRelease() {
+        val segments = (1L..3L).map { id ->
+            TranscriptEntity(id = id, recordId = 1, sessionId = "s", startTime = id * 1_000, endTime = id * 1_000 + 900, audioDurationMs = 900, recognitionDurationMs = null, text = "第 $id 句")
+        }
+        var selected by mutableStateOf(emptySet<Long>())
+        composeRule.setContent {
+            ListenTheme {
+                val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+                val controller = rememberDragSelectionController(listState, segments.map { it.id }, selected) { selected = it }
+                androidx.compose.foundation.lazy.LazyColumn(Modifier.fillMaxSize().dragSelectionViewport(controller), state = listState) {
+                    items(segments.size) { index ->
+                        val segment = segments[index]
+                        TranscriptLine(
+                            segment = segment,
+                            position = linePosition(index, segments.size),
+                            selected = segment.id in selected,
+                            selectionMode = selected.isNotEmpty(),
+                            dragSelectionEnabled = true,
+                            modifier = Modifier.dragSelectableItem(segment.id, controller)
+                        ) { selected = if (segment.id in selected) selected - segment.id else selected + segment.id }
+                    }
+                }
+            }
+        }
+
+        composeRule.onNodeWithTag("segment-2").performTouchInput { longClick() }
+
+        composeRule.runOnIdle { assertEquals(setOf(2L), selected) }
+        composeRule.onNodeWithTag("segment-2").assertIsSelected()
+        // A plain tap in selection mode still toggles another line.
+        composeRule.onNodeWithTag("segment-3").performClick()
+        composeRule.runOnIdle { assertEquals(setOf(2L, 3L), selected) }
+    }
+
+    @Test
+    fun selectionTopBarCopiesSelectedText() {
+        var copied = false
+        composeRule.setContent {
+            ListenTheme { RecordSelectionTopBar(2, aiEnabled = true, close = {}, process = {}, delete = {}, copy = { copied = true }) }
+        }
+        composeRule.onNodeWithContentDescription("复制").assertIsEnabled().performClick()
+        composeRule.runOnIdle { assertTrue(copied) }
+    }
+
+    @Test
     fun longPressSelectsTranscriptWithoutChangingText() {
         val segment = TranscriptEntity(
             id = 7,
@@ -467,7 +575,13 @@ class UiInteractionTest {
         var selected by mutableStateOf(false)
         composeRule.setContent {
             ListenTheme {
-                SelectableTranscriptCard(segment, selected, selectionMode = selected) { selected = !selected }
+                TranscriptLine(
+                    segment = segment,
+                    position = LinePosition.ONLY,
+                    selected = selected,
+                    selectionMode = selected,
+                    dragSelectionEnabled = false
+                ) { selected = !selected }
             }
         }
 
@@ -501,7 +615,7 @@ class UiInteractionTest {
 
         composeRule.onNodeWithText("记录详情").assertTextContains("记录详情")
         composeRule.onNodeWithContentDescription("更多操作").performClick()
-        listOf("整理成笔记", "导出 TXT", "AI 结果", "选择", "ASR 提示词").forEach {
+        listOf("整理成笔记", "导出 TXT", "AI 结果", "选择片段", "ASR 提示词").forEach {
             composeRule.onNodeWithText(it).assertExists()
         }
         composeRule.onNodeWithText("总结").assertDoesNotExist()

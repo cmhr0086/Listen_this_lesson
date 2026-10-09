@@ -23,6 +23,7 @@ import com.cmhr.listen.data.settings.AppSettingsRepository
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.flow.first
 import org.junit.Assert.assertEquals
+import org.junit.Assume.assumeFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -45,6 +46,13 @@ class SyncRepositoryTest {
     @Test
     fun cloudSyncTokenIsStoredWithKeystoreAndNotExposedInSettingsState() = runBlocking {
         val repository = AppSettingsRepository(context)
+        // This test writes the app's real settings store. Never run it over a device that has a
+        // real sync configuration: it would overwrite the server URL and clear the token.
+        val existing = repository.settings.first().cloudSync
+        assumeFalse(
+            "Skipped: device has a real cloud sync configuration",
+            existing.baseUrl.isNotBlank() || existing.hasApiToken || repository.readSyncApiToken() != null
+        )
         repository.clearCloudSyncApiToken()
         try {
             repository.saveCloudSyncServer("https://sync.example.com", "secret-token")

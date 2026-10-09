@@ -54,56 +54,12 @@ import com.cmhr.listen.CourseViewModel
 import com.cmhr.listen.ListeningUiState
 import com.cmhr.listen.RecordingUiState
 import com.cmhr.listen.recording.CaptureMode
+import com.cmhr.listen.data.recording.RecordingState
 import com.cmhr.listen.data.ai.AiActionType
 import com.cmhr.listen.data.course.ClassRecordEntity
 import com.cmhr.listen.data.course.CourseEntity
 import com.cmhr.listen.data.course.TranscriptEntity
 import com.cmhr.listen.data.stt.AsrPromptMode
-
-@Composable
-fun CoursesScreen(
-    state: CourseUiState,
-    listening: ListeningUiState,
-    model: CourseViewModel,
-    openCourse: (Long) -> Unit
-) {
-    var warning by remember { mutableStateOf<String?>(null) }
-    var deleteTarget by remember { mutableStateOf<CourseEntity?>(null) }
-    LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        warning?.let { message ->
-            item("course-warning") { ErrorCard(message) }
-        }
-        if (state.courses.isEmpty()) item("empty-courses") { Text("尚未创建课程，请使用右下角按钮新建。") }
-        items(state.courses, key = { "course-${it.id}" }) { course ->
-            CourseCard(
-                course = course,
-                selected = state.selectedCourse?.id == course.id,
-                enter = { openCourse(course.id) },
-                rename = { model.renameCourse(course.id, it) },
-                editAsrPrompt = { prompt, mode ->
-                    model.updateCourseAsrPrompt(course.id, prompt)
-                    model.updateCourseAsrPromptMode(course.id, mode)
-                },
-                delete = {
-                    if (listening.activeRecordId != null) warning = "监听期间不能删除课程，请先停止监听。"
-                    else deleteTarget = course
-                }
-            )
-        }
-    }
-    deleteTarget?.let { course ->
-        TimedDeleteDialog(
-            title = "删除课程",
-            message = "将删除“${course.name}”及其所有课堂记录、识别内容和 AI 内容。",
-            confirm = { model.deleteCourse(course.id); deleteTarget = null },
-            dismiss = { deleteTarget = null }
-        )
-    }
-}
 
 @Composable
 fun CourseRecordsScreen(
@@ -116,41 +72,72 @@ fun CourseRecordsScreen(
 ) {
     var switchMessage by remember { mutableStateOf<String?>(null) }
     var deleteTarget by remember { mutableStateOf<ClassRecordEntity?>(null) }
+    var renameTarget by remember { mutableStateOf<ClassRecordEntity?>(null) }
+    var renameDraft by remember { mutableStateOf("") }
+    var moveTarget by remember { mutableStateOf<ClassRecordEntity?>(null) }
     androidx.compose.runtime.LaunchedEffect(courseId) {
         if (state.selectedCourse?.id != courseId) model.enterCourse(courseId)
     }
-    val course = state.courses.firstOrNull { it.id == courseId }
-        ?: state.selectedCourse?.takeIf { it.id == courseId }
-    val records = state.records.filter { it.courseId == courseId }
+    val records = state.recordSummaries.filter { it.session.courseId == courseId }
     LazyColumn(
         Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
+        contentPadding = ListWithFabPadding,
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        item("course-name") { Text(course?.name ?: "课程", style = MaterialTheme.typography.titleLarge) }
         if (listening.isListening && listening.activeRecordId != null) item("active-listening-hint") {
             Text("「${listening.currentRecordName ?: "当前课堂"}」正在录制，停止后才能打开其他课堂记录。", color = MaterialTheme.colorScheme.primary)
         }
         switchMessage?.let { item("switch-warning") { ErrorCard(it) } }
-        if (records.isEmpty()) item("empty-records") { Text("尚无课堂记录，请使用右下角按钮新建。") }
-        items(records, key = { "record-${it.id}" }) { record ->
-            RecordCard(
-                record = record,
-                selected = state.selectedRecord?.id == record.id,
-                capturing = listening.isListening && listening.activeRecordId == record.id,
+        if (records.isEmpty()) item("empty-records") {
+            Text("还没有课堂记录。可以在首页直接「开始上课」，或用右下角按钮新建。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        items(records, key = { "record-${it.session.id}" }) { summary ->
+            val record = summary.session
+            val capturing = listening.isListening && listening.activeRecordId == record.id
+            SessionRow(
+                summary = summary,
+                showCourse = false,
+                capturing = capturing,
                 pendingRecordings = pendingRecordingCounts[record.id] ?: 0,
-                select = {
+                open = {
                     val activeId = listening.activeRecordId
                     if (activeId == null || activeId == record.id) openRecord(record.id)
                     else switchMessage = "「${listening.currentRecordName ?: "另一条课堂记录"}」正在录制，请先停止。"
                 },
-                rename = { model.renameRecord(record.id, it) },
-                delete = {
-                    if (listening.activeRecordId == record.id) switchMessage = "这条课堂记录正在录制，停止后才能删除。"
-                    else deleteTarget = record
+                menu = {
+                    RowMenu(
+                        description = "${record.name} 的操作",
+                        actions = listOf(
+                            "重命名" to { renameDraft = record.name; renameTarget = record },
+                            "移到其他课程" to {
+                                if (capturing) switchMessage = "这条课堂记录正在录制，停止后才能移动。" else moveTarget = record
+                            },
+                            "删除" to {
+                                if (capturing) switchMessage = "这条课堂记录正在录制，停止后才能删除。" else deleteTarget = record
+                            }
+                        )
+                    )
                 }
             )
         }
+    }
+    renameTarget?.let { record ->
+        NameDialog("重命名课堂记录", renameDraft, { renameDraft = it }, { model.renameRecord(record.id, renameDraft); renameTarget = null }, { renameTarget = null })
+    }
+    moveTarget?.let { record ->
+        CoursePickerDialog(
+            title = "移到哪门课？",
+            message = "文字、录音和 AI 内容会一起移动。",
+            courses = state.courseSummaries,
+            initialCourseId = record.courseId,
+            confirmLabel = "移动",
+            confirm = { model.moveRecord(record.id, it); moveTarget = null },
+            createNew = {
+                moveTarget = null
+                switchMessage = "请先在首页新建课程，再回来移动。"
+            },
+            dismiss = { moveTarget = null }
+        )
     }
     deleteTarget?.let { record ->
         TimedDeleteDialog(
@@ -189,11 +176,23 @@ fun RecordDetailsScreen(
     val segments = state.detailSegments.filter { it.recordId == recordId }
     val selectedIds = aiState.takeIf { it.selectionRecordId == recordId }?.selectedSegmentIds.orEmpty()
     val selectionMode = aiState.selectionRecordId == recordId
-    val displayedSegments = segments.asReversed()
+    // Reading order: oldest first, merged into paragraphs; the newest text appears at the bottom.
+    val orderedSegments = remember(segments) { AiViewModel.orderTranscriptSegments(segments) }
+    val groups = remember(orderedSegments) { groupTranscript(orderedSegments) }
+    val capturingHere = listening.isListening && listening.activeRecordId == recordId
+    val realtimeHere = capturingHere && listening.captureMode == CaptureMode.REALTIME_ASR
+    var recordingsExpanded by remember(recordId) { mutableStateOf(false) }
     val listState = rememberLazyListState()
+    // Follow new text during realtime transcription, unless the user scrolled up to read.
+    androidx.compose.runtime.LaunchedEffect(orderedSegments.size, realtimeHere) {
+        if (!realtimeHere || orderedSegments.isEmpty()) return@LaunchedEffect
+        val info = listState.layoutInfo
+        val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: return@LaunchedEffect
+        if (lastVisible >= info.totalItemsCount - 3) listState.animateScrollToItem((info.totalItemsCount - 1).coerceAtLeast(0))
+    }
     val dragSelection = rememberDragSelectionController(
         listState = listState,
-        orderedKeys = displayedSegments.map { it.id },
+        orderedKeys = orderedSegments.map { it.id },
         selectedKeys = selectedIds,
         onSelectionChanged = { aiModel.replaceSelection(recordId, it) }
     )
@@ -253,10 +252,17 @@ fun RecordDetailsScreen(
                     RecordDetailCard(course, record)
                 }
                 item("capture-panel") {
-                    CapturePanel(recordId, listening, recordings.processing, startCapture, stopCapture)
+                    // A finished class with content only needs a small "继续录制" entry.
+                    val compact = !capturingHere && record.endedAt != null && (segments.isNotEmpty() || recordings.recordings.isNotEmpty())
+                    CapturePanel(recordId, listening, recordings.processing, startCapture, stopCapture, compact = compact)
                 }
                 aiState.error?.let { item("ai-error") { ErrorCard(it) } }
-                if (recordings.recordings.isNotEmpty()) {
+                val allRecognized = recordings.recordings.isNotEmpty() && recordings.recordings.all { it.recordingState == RecordingState.COMPLETED }
+                if (allRecognized && !recordingsExpanded) {
+                    item("recordings-collapsed") {
+                        RecordingsCollapsedRow(recordings.recordings.size, recordings.recordings.totalDurationMs()) { recordingsExpanded = true }
+                    }
+                } else if (recordings.recordings.isNotEmpty()) {
                     item("recordings-heading") {
                         SectionHeading("录音", "${recordings.recordings.size} 段 · 共 ${formatClockDuration(recordings.recordings.totalDurationMs())}")
                     }
@@ -274,7 +280,9 @@ fun RecordDetailsScreen(
                         )
                     }
                 }
-                item("segment-heading") { SectionHeading("文字", if (segments.isEmpty()) null else "${segments.size} 段") }
+                item("segment-heading") {
+                    SectionHeading("文字", if (segments.isEmpty()) null else "${segments.size} 段 · ${groups.size} 个段落")
+                }
                 if (segments.isEmpty()) item("empty-segments") {
                     Text(
                         if (recordings.recordings.isEmpty()) "还没有文字。用「实时转写」上课，或先「仅录音」再识别。"
@@ -283,21 +291,40 @@ fun RecordDetailsScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                items(displayedSegments, key = { "segment-${it.id}" }) { segment ->
-                    val selected = segment.id in selectedIds
-                    SelectableTranscriptCard(
-                        segment = segment,
-                        selected = selected,
-                        selectionMode = selectionMode,
-                        developerMode = false,
-                        dragSelectionEnabled = true,
-                        modifier = Modifier.dragSelectableItem(segment.id, dragSelection),
-                        toggle = { aiModel.toggleSelection(recordId, segment.id) },
-                        restoreOriginal = { aiModel.restoreOriginal(segment.id) }
-                    )
+                items(groups, key = { "group-${it.segments.first().id}" }) { group ->
+                    // No gaps between lines: a paragraph reads as one block, lines stay individually selectable.
+                    Column {
+                        TranscriptGroupHeader(group)
+                        group.segments.forEachIndexed { index, segment ->
+                            TranscriptLine(
+                                segment = segment,
+                                position = linePosition(index, group.segments.size),
+                                selected = segment.id in selectedIds,
+                                selectionMode = selectionMode,
+                                dragSelectionEnabled = true,
+                                modifier = Modifier.dragSelectableItem(segment.id, dragSelection),
+                                toggle = { aiModel.toggleSelection(recordId, segment.id) },
+                                restoreOriginal = { aiModel.restoreOriginal(segment.id) }
+                            )
+                        }
+                    }
+                }
+                if (realtimeHere && (listening.pendingQueueCount > 0 || listening.isRecognizing)) {
+                    item("recognizing-tail") { RecognizingTail(listening.pendingQueueCount) }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun RecordingsCollapsedRow(count: Int, totalMs: Long, expand: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = expand).padding(vertical = 8.dp).testTag("recordings-collapsed"),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("录音 $count 段 · 共 ${formatClockDuration(totalMs)} · 已全部识别", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+        Text("展开", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
     }
 }
 
@@ -316,121 +343,51 @@ private fun SectionHeading(title: String, detail: String?) {
     }
 }
 
+/** "⋮" for a course: ASR 提示词 / 重命名 / 删除, each with its dialog. */
 @Composable
-internal fun SelectableTranscriptCard(
-    segment: TranscriptEntity,
-    selected: Boolean,
-    selectionMode: Boolean,
-    developerMode: Boolean = false,
-    dragSelectionEnabled: Boolean = false,
-    modifier: Modifier = Modifier,
-    restoreOriginal: () -> Unit = {},
-    toggle: () -> Unit
-) {
-    var showCorrection by remember(segment.id) { mutableStateOf(false) }
-    if (showCorrection && segment.correctedText != null) {
-        AlertDialog(
-            onDismissRequest = { showCorrection = false },
-            title = { Text("AI 纠错对照") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("原始 ASR", style = MaterialTheme.typography.labelLarge)
-                    Text(segment.text)
-                    Text("当前纠正文", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                    Text(segment.correctedText)
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { restoreOriginal(); showCorrection = false }) { Text("恢复原文") }
-            },
-            dismissButton = { TextButton(onClick = { showCorrection = false }) { Text("关闭") } }
-        )
-    }
-    Card(
-        modifier = modifier
-            .fillMaxWidth()
-            .testTag("segment-${segment.id}")
-            .semantics { this.selected = selected }
-            .semantics { onLongClick("选择片段") { toggle(); true } }
-            .then(
-                if (dragSelectionEnabled) Modifier.clickable(enabled = selectionMode) { toggle() }
-                else Modifier.combinedClickable(
-                    onClick = { if (selectionMode) toggle() },
-                    onLongClick = toggle
-                )
-            ),
-        colors = CardDefaults.cardColors(
-            containerColor = if (selected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceVariant
-        ),
-        border = if (selected) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null
-    ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(formatDateTime(segment.startTime), style = MaterialTheme.typography.titleSmall)
-            if (developerMode) {
-                Text(
-                    "开始：${formatDateTime(segment.startTime)}  ·  结束：${formatDateTime(segment.endTime)}",
-                    style = MaterialTheme.typography.bodySmall
-                )
-                Text(
-                    "音频：${formatClockDuration(segment.audioDurationMs)}  ·  ASR：${segment.recognitionDurationMs?.let(::formatDuration) ?: "—"}",
-                    style = MaterialTheme.typography.bodySmall
-                )
-            }
-            Text(segment.effectiveText, style = MaterialTheme.typography.bodyLarge)
-            if (segment.correctedText != null) {
-                TextButton(
-                    onClick = { showCorrection = true },
-                    enabled = !selectionMode,
-                    modifier = Modifier.align(Alignment.End)
-                ) { Text("AI 已纠错") }
-            }
-        }
-    }
-}
-
-@Composable
-private fun CourseCard(
-    course: CourseEntity,
-    selected: Boolean,
-    enter: () -> Unit,
-    rename: (String) -> Unit,
-    editAsrPrompt: (String, String?) -> Unit,
-    delete: () -> Unit
-) {
+internal fun CourseMenu(course: CourseEntity, listening: ListeningUiState, model: CourseViewModel) {
     var renaming by remember { mutableStateOf(false) }
     var editingPrompt by remember { mutableStateOf(false) }
+    var deleting by remember { mutableStateOf(false) }
+    var warning by remember { mutableStateOf<String?>(null) }
     var name by remember(course.id, course.name) { mutableStateOf(course.name) }
     var prompt by remember(course.id, course.asrPrompt) { mutableStateOf(course.asrPrompt) }
     var promptMode by remember(course.id, course.asrPromptModeOverride) { mutableStateOf(course.asrPromptModeOverride) }
-    if (renaming) NameDialog("重命名课程", name, { name = it }, { rename(name); renaming = false }, { renaming = false })
+    RowMenu(
+        description = "${course.name} 的操作",
+        actions = listOf(
+            "重命名" to { renaming = true },
+            "ASR 提示词" to { editingPrompt = true },
+            "删除课程" to {
+                if (listening.isListening) warning = "正在录制时不能删除课程，请先停止。" else deleting = true
+            }
+        )
+    )
+    if (renaming) NameDialog("重命名课程", name, { name = it }, { model.renameCourse(course.id, name); renaming = false }, { renaming = false })
     if (editingPrompt) AsrPromptDialog(
         prompt = prompt,
         update = { prompt = it },
         modeOverride = promptMode,
         updateMode = { promptMode = it },
-        save = { editAsrPrompt(prompt, promptMode); editingPrompt = false },
+        save = {
+            model.updateCourseAsrPrompt(course.id, prompt)
+            model.updateCourseAsrPromptMode(course.id, promptMode)
+            editingPrompt = false
+        },
         dismiss = { editingPrompt = false }
     )
-    Card(Modifier.fillMaxWidth().clickable(onClick = enter)) {
-        Row(
-            Modifier.fillMaxWidth().padding(start = 16.dp, top = 12.dp, end = 8.dp, bottom = 12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text(course.name, style = MaterialTheme.typography.titleMedium)
-                if (selected) Text("当前课程", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall)
-                if (course.asrPrompt.isNotBlank()) Text("已配置 ASR 提示词", style = MaterialTheme.typography.bodySmall)
-            }
-            IconButton(onClick = { editingPrompt = true }, modifier = Modifier.size(40.dp)) {
-                Icon(Icons.Outlined.Description, contentDescription = "编辑 ASR 提示词")
-            }
-            IconButton(onClick = { renaming = true }, modifier = Modifier.size(40.dp)) {
-                Icon(Icons.Outlined.Edit, contentDescription = "重命名课程")
-            }
-            IconButton(onClick = delete, modifier = Modifier.size(40.dp)) {
-                Icon(Icons.Outlined.Delete, contentDescription = "删除课程", tint = MaterialTheme.colorScheme.error)
-            }
-        }
+    if (deleting) TimedDeleteDialog(
+        title = "删除课程",
+        message = "将删除“${course.name}”及其所有课堂记录、识别内容和 AI 内容。",
+        confirm = { model.deleteCourse(course.id); deleting = false },
+        dismiss = { deleting = false }
+    )
+    warning?.let { message ->
+        AlertDialog(
+            onDismissRequest = { warning = null },
+            text = { Text(message) },
+            confirmButton = { TextButton(onClick = { warning = null }) { Text("知道了") } }
+        )
     }
 }
 
@@ -473,59 +430,18 @@ internal fun AsrPromptDialog(
     dismissButton = { TextButton(onClick = dismiss) { Text("取消") } }
 )
 
-@Composable
-private fun RecordCard(
-    record: ClassRecordEntity,
-    selected: Boolean,
-    capturing: Boolean,
-    pendingRecordings: Int,
-    select: () -> Unit,
-    rename: (String) -> Unit,
-    delete: () -> Unit
-) {
-    var editing by remember { mutableStateOf(false) }
-    var name by remember(record.id, record.name) { mutableStateOf(record.name) }
-    if (editing) NameDialog("重命名课堂记录", name, { name = it }, { rename(name); editing = false }, { editing = false })
-    Card(Modifier.fillMaxWidth().clickable(onClick = select)) {
-        Row(
-            Modifier.fillMaxWidth().padding(start = 16.dp, top = 12.dp, end = 8.dp, bottom = 12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text(record.name, style = MaterialTheme.typography.titleMedium)
-                Text(formatDateTime(record.startedAt), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                when {
-                    capturing -> Text("● 正在录制", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelMedium)
-                    pendingRecordings > 0 -> Text("$pendingRecordings 段录音待识别", color = MaterialTheme.colorScheme.tertiary, style = MaterialTheme.typography.labelMedium)
-                    selected -> Text("上次打开", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium)
-                }
-            }
-            IconButton(onClick = { editing = true }, modifier = Modifier.size(40.dp)) {
-                Icon(Icons.Outlined.Edit, contentDescription = "重命名课堂记录")
-            }
-            IconButton(onClick = delete, modifier = Modifier.size(40.dp)) {
-                Icon(Icons.Outlined.Delete, contentDescription = "删除课堂记录", tint = MaterialTheme.colorScheme.error)
-            }
-        }
-    }
-}
-
+/** The record name is in the top bar; this line only adds course and time. */
 @Composable
 private fun RecordDetailCard(
     course: CourseEntity,
     record: ClassRecordEntity
 ) {
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(course.name, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(record.name, style = MaterialTheme.typography.titleLarge)
-            Text(
-                formatRecordSpan(record.startedAt, record.endedAt),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-    }
+    Text(
+        "${course.name} · ${formatRecordSpan(record.startedAt, record.endedAt)}",
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp).testTag("record-summary-line")
+    )
 }
 
 @Composable

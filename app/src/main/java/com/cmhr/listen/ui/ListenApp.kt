@@ -26,6 +26,7 @@ import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.MoreVert
+import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.School
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SmartToy
@@ -34,6 +35,10 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material3.BadgedBox
+import androidx.compose.material3.Badge
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -53,6 +58,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.ui.Alignment
@@ -63,6 +70,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.core.content.ContextCompat
@@ -85,9 +93,11 @@ import com.cmhr.listen.data.stt.AsrRuntimeSummary
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.util.Locale
 
 private enum class MainDestination(val route: String, val label: String) {
+    RECORD("record-home", "录音"),
     COURSES("courses", "课程"),
     AI("ai", "AI 会话"),
     SETTINGS("settings", "设置")
@@ -122,20 +132,34 @@ private sealed interface FabState {
     data object None : FabState
     data object NewCourse : FabState
     data class NewRecord(val courseId: Long) : FabState
-    data class StopListening(val startedAtElapsedRealtimeMs: Long) : FabState
 }
 
 private fun isSettingsRoute(route: String?): Boolean = route == "settings" || route?.startsWith("settings/") == true
 private fun isAiWorkspaceRoute(route: String?): Boolean =
     route?.contains("ai-results") == true || route?.contains("ai-result/") == true || route?.startsWith("ai-conversation/") == true
 
-private fun mainDestinationForRoute(route: String?): MainDestination = when {
+/**
+ * Tab that owns [route]. Course and record pages can be reached from both 录音 and 课程, so they
+ * stay under whichever tab the user came from ([fallback]) instead of jumping.
+ */
+private fun mainDestinationForRoute(route: String?, fallback: MainDestination = MainDestination.RECORD): MainDestination = when {
     isSettingsRoute(route) -> MainDestination.SETTINGS
     route == "ai" || route?.startsWith("ai/new") == true || route?.startsWith("ai-conversation/") == true || route?.startsWith("ai/result/") == true -> MainDestination.AI
-    else -> MainDestination.COURSES
+    route == MainDestination.RECORD.route -> MainDestination.RECORD
+    route == MainDestination.COURSES.route -> MainDestination.COURSES
+    else -> fallback
+}
+
+/** What to do with a course created from the "新建课程" dialog. */
+private sealed interface CourseCreation {
+    data object Plain : CourseCreation
+    data class ThenStart(val mode: CaptureMode) : CourseCreation
+    data object ThenPickForStart : CourseCreation
+    data class ThenFile(val recordId: Long) : CourseCreation
 }
 
 private fun routeTitle(route: String?): String = when (route) {
+    "record-home" -> "录音"
     "courses" -> "课程"
     "ai" -> "AI 会话"
     "ai/new" -> "新对话"
@@ -149,6 +173,7 @@ private fun routeTitle(route: String?): String = when (route) {
     "settings/vad-presets" -> "VAD 预设"
     "settings/ai-service" -> "AI 配置"
     "settings/cloud-sync" -> "云同步"
+    "settings/appearance" -> "外观"
     "settings/ai-prompts" -> "AI 提示词"
     "settings/asr-prompt-policy" -> "ASR 提示词模式"
     "settings/ai-generation" -> "AI 生成参数"
@@ -175,7 +200,12 @@ fun ListenApp(
 ) {
     val nav = rememberNavController()
     val backStackEntry by nav.currentBackStackEntryAsState()
-    val route = backStackEntry?.destination?.route ?: "courses"
+    val route = backStackEntry?.destination?.route ?: MainDestination.RECORD.route
+    var lastMainTab by rememberSaveable { mutableStateOf(MainDestination.RECORD) }
+    LaunchedEffect(route) {
+        if (route == MainDestination.RECORD.route || route == MainDestination.COURSES.route) lastMainTab = mainDestinationForRoute(route)
+    }
+    val currentTab = mainDestinationForRoute(route, lastMainTab)
     val sttState by stt.uiState.collectAsStateWithLifecycle()
     val courseState by courses.uiState.collectAsStateWithLifecycle()
     val settingsState by settings.uiState.collectAsStateWithLifecycle()
@@ -183,7 +213,17 @@ fun ListenApp(
     val recordingState by recordings.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
-    var creatingCourse by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    // Why the "新建课程" dialog is open decides what happens with the new course.
+    var courseCreation by remember { mutableStateOf<CourseCreation?>(null) }
+    // Record-first flow: the course chosen on home before starting (null = use the suggestion),
+    // and the record that must be filed under a course once its capture stops.
+    var startCourseOverride by remember { mutableStateOf<Long?>(null) }
+    var pickingStartCourse by remember { mutableStateOf(false) }
+    var pendingQuickStartCourseId by remember { mutableStateOf<Long?>(null) }
+    var awaitingFilingRecordId by remember { mutableStateOf<Long?>(null) }
+    var filingCaptureSeen by remember { mutableStateOf(false) }
+    var filingRecordId by remember { mutableStateOf<Long?>(null) }
     var creatingRecordForCourse by remember { mutableStateOf<Long?>(null) }
     var newName by remember { mutableStateOf("") }
     var pendingPermissionRecordId by remember { mutableStateOf<Long?>(null) }
@@ -267,18 +307,64 @@ fun ListenApp(
         exportContent = null
     }
 
+    // Creates the record only after permissions are granted, so a denial leaves no empty record.
+    val beginQuickStart: (Long, CaptureMode) -> Unit = { courseId, mode ->
+        courses.createRecord(courseId, null) { recordId ->
+            awaitingFilingRecordId = recordId
+            filingCaptureSeen = false
+            if (mode == CaptureMode.RECORD_ONLY) stt.startRecordOnly(recordId) else stt.startListening(recordId)
+            nav.navigate("record/$recordId")
+        }
+    }
+
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
         val recordId = pendingPermissionRecordId
+        val quickStartCourseId = pendingQuickStartCourseId
         val captureMode = pendingCaptureMode
         pendingPermissionRecordId = null
+        pendingQuickStartCourseId = null
         val microphoneGranted = grants[Manifest.permission.RECORD_AUDIO]
             ?: (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
         val notificationGranted = Build.VERSION.SDK_INT < 33 || grants[Manifest.permission.POST_NOTIFICATIONS]
             ?: (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED)
-        if (microphoneGranted && recordId != null) {
+        if (microphoneGranted && quickStartCourseId != null) {
+            beginQuickStart(quickStartCourseId, captureMode)
+            if (!notificationGranted) stt.reportNotificationPermissionDenied()
+        } else if (microphoneGranted && recordId != null) {
             if (captureMode == CaptureMode.RECORD_ONLY) stt.startRecordOnly(recordId) else stt.startListening(recordId)
             if (!notificationGranted) stt.reportNotificationPermissionDenied()
         } else stt.reportPermissionDenied()
+    }
+
+    val missingCapturePermissions: () -> List<String> = {
+        buildList {
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) add(Manifest.permission.RECORD_AUDIO)
+            if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    val startCourseId = startCourseOverride?.takeIf { id -> courseState.courseSummaries.any { it.course.id == id } }
+        ?: courseState.suggestion?.courseId
+    val quickStart: (Long, CaptureMode) -> Unit = { courseId, mode ->
+        val permissions = missingCapturePermissions()
+        if (permissions.isEmpty()) beginQuickStart(courseId, mode)
+        else {
+            pendingCaptureMode = mode
+            pendingQuickStartCourseId = courseId
+            permissionLauncher.launch(permissions.toTypedArray())
+        }
+    }
+
+    // Once a quick-started capture has actually run and then stopped (panel, FAB or notification),
+    // ask where to file it. Waiting for "seen active" avoids firing before capture starts.
+    LaunchedEffect(sttState.isListening, sttState.activeRecordId, awaitingFilingRecordId) {
+        val awaiting = awaitingFilingRecordId ?: return@LaunchedEffect
+        if (sttState.isListening && sttState.activeRecordId == awaiting) filingCaptureSeen = true
+        else if (filingCaptureSeen && !sttState.isListening) {
+            filingRecordId = awaiting
+            awaitingFilingRecordId = null
+            filingCaptureSeen = false
+        }
     }
 
     val startCapture: (Long, CaptureMode) -> Unit = { selectedRecordId, mode ->
@@ -294,13 +380,54 @@ fun ListenApp(
         } else permissionLauncher.launch(permissions.toTypedArray())
     }
 
-    if (creatingCourse) NameDialog(
-        title = "新建课程",
-        value = newName,
-        update = { newName = it },
-        confirm = { courses.createCourse(newName); newName = ""; creatingCourse = false },
-        dismiss = { creatingCourse = false }
+    courseCreation?.let { purpose ->
+        NameDialog(
+            title = "新建课程",
+            value = newName,
+            update = { newName = it },
+            confirm = {
+                courses.createCourse(newName) { created ->
+                    when (purpose) {
+                        CourseCreation.Plain -> Unit
+                        is CourseCreation.ThenStart -> quickStart(created, purpose.mode)
+                        CourseCreation.ThenPickForStart -> startCourseOverride = created
+                        is CourseCreation.ThenFile -> courses.moveRecord(purpose.recordId, created)
+                    }
+                }
+                newName = ""
+                courseCreation = null
+            },
+            dismiss = { courseCreation = null }
+        )
+    }
+    if (pickingStartCourse) CoursePickerDialog(
+        title = "这节课是哪门课？",
+        message = "只是先选一个，录完还可以改。",
+        courses = courseState.courseSummaries,
+        initialCourseId = startCourseId,
+        confirmLabel = "确定",
+        confirm = { startCourseOverride = it; pickingStartCourse = false },
+        createNew = { pickingStartCourse = false; newName = ""; courseCreation = CourseCreation.ThenPickForStart },
+        dismiss = { pickingStartCourse = false }
     )
+    filingRecordId?.let { filing ->
+        val summary = courseState.recentSessions.firstOrNull { it.session.id == filing }
+        CoursePickerDialog(
+            title = "这节课保存到哪门课？",
+            message = summary?.let { "「${it.session.name}」· ${formatSessionWhen(it.session.startedAt, it.session.endedAt)}" },
+            courses = courseState.courseSummaries,
+            initialCourseId = summary?.session?.courseId,
+            confirmLabel = "保存",
+            confirm = { courseId ->
+                courses.moveRecord(filing, courseId)
+                startCourseOverride = null
+                filingRecordId = null
+            },
+            createNew = { filingRecordId = null; newName = ""; courseCreation = CourseCreation.ThenFile(filing) },
+            dismiss = { filingRecordId = null },
+            dismissLabel = "保持不变"
+        )
+    }
     creatingRecordForCourse?.let { courseId ->
         NameDialog(
             title = "新建课堂记录",
@@ -352,13 +479,11 @@ fun ListenApp(
         AiContextBottomSheet(snapshot = aiContextSnapshot, dismiss = { showAiContext = false })
     }
 
-    val nested = route !in setOf("courses", "ai", "settings")
+    val nested = route !in MainDestination.entries.map { it.route }.toSet()
     val bottomChrome = bottomChromeLayout()
-    // On the capturing record's own page the capture panel owns start/stop, so no FAB there.
-    val onCapturingRecordPage = route == "record/{recordId}" && recordId != null && recordId == sttState.activeRecordId
+    // Recording is controlled from the 录音 tab, the class page and the notification; the bottom
+    // bar's 录音 icon carries a red dot while capturing, so no floating stop button is needed.
     val fabState: FabState = when {
-        sttState.isListening && sttState.listeningStartedAtElapsedRealtimeMs != null && !onCapturingRecordPage ->
-            FabState.StopListening(requireNotNull(sttState.listeningStartedAtElapsedRealtimeMs))
         route == "courses" -> FabState.NewCourse
         route == "course/{courseId}" && courseId != null -> FabState.NewRecord(courseId)
         else -> FabState.None
@@ -403,9 +528,18 @@ fun ListenApp(
                     aiEnabled = aiState.selectedSegmentIds.isNotEmpty() && !aiState.isBusy,
                     close = ai::clearSelection,
                     process = { showSelectionAiActions = true },
-                    delete = { confirmDeleteTranscripts = true }
+                    delete = { confirmDeleteTranscripts = true },
+                    copy = {
+                        val selected = aiState.selectedSegmentIds
+                        val text = com.cmhr.listen.AiViewModel.orderTranscriptSegments(currentSegments.filter { it.id in selected })
+                            .joinToString("\n") { it.effectiveText }
+                        context.getSystemService(android.content.ClipboardManager::class.java)
+                            ?.setPrimaryClip(android.content.ClipData.newPlainText("课堂文字", text))
+                        scope.launch { snackbarHostState.showSnackbar("已复制 ${selected.size} 段文字", duration = SnackbarDuration.Short) }
+                    }
                 )
                 route == "record/{recordId}" && recordId != null -> RecordNormalTopBar(
+                    title = currentRecord?.name ?: "记录详情",
                     menuExpanded = recordMenuExpanded,
                     setMenuExpanded = { recordMenuExpanded = it },
                     back = { nav.popBackStack() },
@@ -468,7 +602,11 @@ fun ListenApp(
                     }
                 )
                 else -> TopAppBar(
-                    title = { Text(routeTitle(route)) },
+                    title = {
+                        val courseName = courseId?.takeIf { route == "course/{courseId}" }
+                            ?.let { id -> courseState.courseSummaries.firstOrNull { it.course.id == id }?.course?.name }
+                        Text(courseName ?: routeTitle(route), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    },
                     navigationIcon = {
                         if (nested) IconButton(onClick = { nav.popBackStack() }) {
                             Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
@@ -491,25 +629,29 @@ fun ListenApp(
                     windowInsets = WindowInsets(0, 0, 0, 0)
                 ) {
                     MainDestination.entries.forEach { destination ->
-                        val selected = destination == mainDestinationForRoute(route)
+                        val selected = destination == currentTab
                         NavigationBarItem(
                             selected = selected,
                             onClick = {
+                                // Restored tab stacks may land on a nested page; remember the tab explicitly.
+                                lastMainTab = destination
                                 nav.navigate(destination.route) {
                                     launchSingleTop = true
-                                    popUpTo("courses") { saveState = true }
+                                    popUpTo(MainDestination.RECORD.route) { saveState = true }
                                     restoreState = true
                                 }
                             },
                             icon = {
-                                Icon(
-                                    when (destination) {
-                                        MainDestination.COURSES -> Icons.Outlined.School
-                                        MainDestination.AI -> Icons.Outlined.SmartToy
-                                        MainDestination.SETTINGS -> Icons.Outlined.Settings
-                                    },
-                                    contentDescription = destination.label
-                                )
+                                val capturing = destination == MainDestination.RECORD && sttState.isListening
+                                val glyph = when (destination) {
+                                    MainDestination.RECORD -> if (capturing) Icons.Filled.Mic else Icons.Outlined.Mic
+                                    MainDestination.COURSES -> Icons.Outlined.School
+                                    MainDestination.AI -> Icons.Outlined.SmartToy
+                                    MainDestination.SETTINGS -> Icons.Outlined.Settings
+                                }
+                                if (capturing) BadgedBox(badge = { Badge(containerColor = MaterialTheme.colorScheme.error, modifier = Modifier.testTag("capturing-badge")) }) {
+                                    Icon(glyph, contentDescription = "${destination.label}（正在录制）")
+                                } else Icon(glyph, contentDescription = destination.label)
                             },
                             label = { Text(destination.label) }
                         )
@@ -528,9 +670,8 @@ fun ListenApp(
             Box(Modifier.padding(bottom = composerFabClearance)) {
                 AnimatedAppFab(state = fabState) { action ->
                     when (action) {
-                        FabState.NewCourse -> { newName = ""; creatingCourse = true }
+                        FabState.NewCourse -> { newName = ""; courseCreation = CourseCreation.Plain }
                         is FabState.NewRecord -> { newName = ""; creatingRecordForCourse = action.courseId }
-                        is FabState.StopListening -> stt.stopListening()
                         FabState.None -> Unit
                     }
                 }
@@ -539,29 +680,56 @@ fun ListenApp(
     ) { padding ->
         NavHost(
             navController = nav,
-            startDestination = "courses",
+            startDestination = MainDestination.RECORD.route,
             modifier = Modifier.padding(padding),
             enterTransition = {
-                val direction = if (mainDestinationForRoute(targetState.destination.route).ordinal >= mainDestinationForRoute(initialState.destination.route).ordinal)
+                val direction = if (mainDestinationForRoute(targetState.destination.route, lastMainTab).ordinal >= mainDestinationForRoute(initialState.destination.route, lastMainTab).ordinal)
                     AnimatedContentTransitionScope.SlideDirection.Left else AnimatedContentTransitionScope.SlideDirection.Right
                 slideIntoContainer(direction, tween(220))
             },
             exitTransition = {
-                val direction = if (mainDestinationForRoute(targetState.destination.route).ordinal >= mainDestinationForRoute(initialState.destination.route).ordinal)
+                val direction = if (mainDestinationForRoute(targetState.destination.route, lastMainTab).ordinal >= mainDestinationForRoute(initialState.destination.route, lastMainTab).ordinal)
                     AnimatedContentTransitionScope.SlideDirection.Left else AnimatedContentTransitionScope.SlideDirection.Right
                 slideOutOfContainer(direction, tween(220))
             },
             popEnterTransition = { slideIntoContainer(AnimatedContentTransitionScope.SlideDirection.Right, tween(220)) },
             popExitTransition = { slideOutOfContainer(AnimatedContentTransitionScope.SlideDirection.Right, tween(220)) }
         ) {
-            composable("courses") {
-                CoursesScreen(courseState, sttState, courses) { id ->
-                    courses.enterCourse(id)
-                    nav.navigate("course/$id")
-                }
+            composable(MainDestination.RECORD.route) {
+                LaunchedEffect(Unit) { courses.refreshSuggestion() }
+                RecordHomeScreen(
+                    recent = courseState.recentSessions,
+                    startCourse = courseState.courseSummaries.firstOrNull { it.course.id == startCourseId },
+                    suggestion = courseState.suggestion,
+                    listening = sttState,
+                    processing = recordingState.processing,
+                    pendingRecordingCounts = recordingState.pendingCounts,
+                    pickCourse = { pickingStartCourse = true },
+                    start = { mode ->
+                        val courseId = startCourseId
+                        if (courseId == null) { newName = ""; courseCreation = CourseCreation.ThenStart(mode) }
+                        else quickStart(courseId, mode)
+                    },
+                    stop = stt::stopListening,
+                    openRecord = { summary ->
+                        courses.selectRecord(summary.session.courseId, summary.session.id)
+                        nav.navigate("record/${summary.session.id}")
+                    },
+                    openActiveRecord = { sttState.activeRecordId?.let { nav.navigate("record/$it") } }
+                )
+            }
+            composable(MainDestination.COURSES.route) {
+                CoursesTabScreen(
+                    courses = courseState.courseSummaries,
+                    openCourse = { id ->
+                        courses.enterCourse(id)
+                        nav.navigate("course/$id")
+                    },
+                    courseMenu = { summary -> CourseMenu(summary.course, sttState, courses) }
+                )
             }
             composable("ai") {
-                GlobalAiScreen(ai) { key, ownerRecordId ->
+                GlobalAiScreen(ai, newConversation = openNewConversation) { key, ownerRecordId ->
                     when (key.kind) {
                         com.cmhr.listen.AiContentKind.RESULT -> ownerRecordId?.let {
                             nav.navigate("ai/result/$it/${key.id}")
@@ -630,12 +798,14 @@ fun ListenApp(
                     onAsrPromptPolicy = { nav.navigate("settings/asr-prompt-policy") },
                     onAiGeneration = { nav.navigate("settings/ai-generation") },
                     onCloudSync = { nav.navigate("settings/cloud-sync") },
-                    onAsrDiagnostics = { nav.navigate("settings/asr-diagnostics") }
+                    onAsrDiagnostics = { nav.navigate("settings/asr-diagnostics") },
+                    onAppearance = { nav.navigate("settings/appearance") }
                 )
             }
             composable("settings/stt-service") { SttServiceSettingsScreen(settingsState, settings) }
             composable("settings/ai-service") { AiServiceSettingsScreen(settingsState, settings) }
             composable("settings/cloud-sync") { CloudSyncSettingsScreen(settingsState, settings) }
+            composable("settings/appearance") { AppearanceSettingsScreen(settingsState, settings) }
             composable("settings/ai-prompts") { AiPromptsSettingsScreen(settingsState, settings) }
             composable("settings/asr-prompt-policy") { AsrPromptPolicySettingsScreen(settingsState, settings) }
             composable("settings/ai-generation") { AiGenerationSettingsScreen(settingsState, settings) }
@@ -765,21 +935,23 @@ internal fun RecordSelectionTopBar(
     aiEnabled: Boolean,
     close: () -> Unit,
     process: () -> Unit,
-    delete: () -> Unit
+    delete: () -> Unit,
+    copy: () -> Unit = {}
 ) = TopAppBar(
     navigationIcon = {
         IconButton(onClick = close) { Icon(Icons.Outlined.Close, contentDescription = "退出选择") }
     },
     title = { Text("已选择 $selectedCount 条") },
     actions = {
+        IconButton(onClick = copy, enabled = selectedCount > 0) { Icon(Icons.Outlined.ContentCopy, contentDescription = "复制") }
         IconButton(onClick = delete, enabled = selectedCount > 0) { Icon(Icons.Outlined.Delete, contentDescription = "删除") }
         TextButton(onClick = process, enabled = aiEnabled) { Text("AI 处理") }
     },
     colors = TopAppBarDefaults.topAppBarColors(
-        containerColor = MaterialTheme.colorScheme.tertiaryContainer,
-        titleContentColor = MaterialTheme.colorScheme.onTertiaryContainer,
-        actionIconContentColor = MaterialTheme.colorScheme.onTertiaryContainer,
-        navigationIconContentColor = MaterialTheme.colorScheme.onTertiaryContainer
+        containerColor = MaterialTheme.colorScheme.primaryContainer,
+        titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        actionIconContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        navigationIconContentColor = MaterialTheme.colorScheme.onPrimaryContainer
     )
 )
 
@@ -815,9 +987,10 @@ internal fun RecordNormalTopBar(
     exportTxt: () -> Unit,
     openResults: () -> Unit,
     select: () -> Unit,
-    editAsrPrompt: () -> Unit
+    editAsrPrompt: () -> Unit,
+    title: String = "记录详情"
 ) = TopAppBar(
-    title = { Text("记录详情") },
+    title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
     navigationIcon = {
         IconButton(onClick = back) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回") }
     },
@@ -831,12 +1004,13 @@ internal fun RecordNormalTopBar(
             modifier = Modifier.widthIn(min = 240.dp),
             shape = RoundedCornerShape(20.dp)
         ) {
+            // AI · 导出与选择 · 课程设置
             DropdownMenuItem(text = { Text("整理成笔记") }, onClick = organizeNotes)
-            HorizontalDivider()
-            DropdownMenuItem(text = { Text("导出 TXT") }, onClick = exportTxt)
             DropdownMenuItem(text = { Text("AI 结果") }, onClick = openResults)
             HorizontalDivider()
-            DropdownMenuItem(text = { Text("选择") }, onClick = select)
+            DropdownMenuItem(text = { Text("选择片段") }, onClick = select)
+            DropdownMenuItem(text = { Text("导出 TXT") }, onClick = exportTxt)
+            HorizontalDivider()
             DropdownMenuItem(text = { Text("ASR 提示词") }, onClick = editAsrPrompt)
         }
     }
@@ -865,31 +1039,8 @@ private fun AnimatedAppFab(state: FabState, click: (FabState) -> Unit) {
             FabState.None -> Unit
             FabState.NewCourse -> AnimatedFabContent("新建课程", Icons.Outlined.Add) { click(state) }
             is FabState.NewRecord -> AnimatedFabContent("新建课堂记录", Icons.Outlined.Add) { click(state) }
-            is FabState.StopListening -> ListeningStopFab(state.startedAtElapsedRealtimeMs) { click(state) }
         }
     }
-}
-
-@Composable
-internal fun ListeningStopFab(startedAt: Long, click: () -> Unit) {
-    var elapsedMs by remember(startedAt) { mutableLongStateOf(0L) }
-    LaunchedEffect(startedAt) {
-        while (true) {
-            elapsedMs = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
-            delay(1_000)
-        }
-    }
-    val seconds = elapsedMs / 1_000
-    val elapsed = String.format(Locale.US, "%02d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60)
-    ExtendedFloatingActionButton(
-        modifier = Modifier.testTag("global-stop-listening").height(64.dp),
-        text = { Text("停止录制 $elapsed", style = MaterialTheme.typography.titleMedium) },
-        icon = { Icon(Icons.Outlined.Stop, contentDescription = "停止录制") },
-        onClick = click,
-        containerColor = MaterialTheme.colorScheme.error,
-        contentColor = MaterialTheme.colorScheme.onError,
-        shape = RoundedCornerShape(22.dp)
-    )
 }
 
 @Composable

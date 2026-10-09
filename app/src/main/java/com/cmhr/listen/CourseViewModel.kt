@@ -6,6 +6,10 @@ import androidx.lifecycle.viewModelScope
 import com.cmhr.listen.data.course.ClassRecordEntity
 import com.cmhr.listen.data.course.CourseEntity
 import com.cmhr.listen.data.course.CourseRepository
+import com.cmhr.listen.data.course.CourseSuggester
+import com.cmhr.listen.data.course.CourseSuggestion
+import com.cmhr.listen.data.course.CourseSummary
+import com.cmhr.listen.data.course.SessionSummary
 import com.cmhr.listen.data.course.ListenDatabase
 import com.cmhr.listen.data.course.RecordNameGenerator
 import com.cmhr.listen.data.course.TranscriptEntity
@@ -29,7 +33,13 @@ data class CourseUiState(
     val selectedCourse: CourseEntity? = null,
     val records: List<ClassRecordEntity> = emptyList(),
     val selectedRecord: ClassRecordEntity? = null,
-    val detailSegments: List<TranscriptEntity> = emptyList()
+    val detailSegments: List<TranscriptEntity> = emptyList(),
+    /** All courses, most recently attended first. */
+    val courseSummaries: List<CourseSummary> = emptyList(),
+    val recentSessions: List<SessionSummary> = emptyList(),
+    /** Records of [selectedCourse] with transcript counts. */
+    val recordSummaries: List<SessionSummary> = emptyList(),
+    val suggestion: CourseSuggestion? = null
 )
 
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
@@ -43,6 +53,20 @@ class CourseViewModel(application: Application) : AndroidViewModel(application) 
 
     init {
         viewModelScope.launch { repository.courses.collect { _uiState.update { state -> state.copy(courses = it) } } }
+        viewModelScope.launch {
+            repository.courseSummaries.collect { summaries ->
+                _uiState.update { it.copy(courseSummaries = summaries) }
+                refreshSuggestion()
+            }
+        }
+        viewModelScope.launch {
+            repository.recentSummaries(RECENT_LIMIT).collect { recent -> _uiState.update { it.copy(recentSessions = recent) } }
+        }
+        viewModelScope.launch {
+            settings.settings.map { it.selectedCourseId }.distinctUntilChanged()
+                .flatMapLatest { id -> id?.let(repository::summariesForCourse) ?: flowOf(emptyList()) }
+                .collect { rows -> _uiState.update { it.copy(recordSummaries = rows) } }
+        }
         viewModelScope.launch {
             settings.settings.map { it.selectedCourseId }.distinctUntilChanged()
                 .flatMapLatest { id -> id?.let(repository::course) ?: flowOf(null) }
@@ -93,9 +117,34 @@ class CourseViewModel(application: Application) : AndroidViewModel(application) 
         repository.deleteRecord(id)
         if (_uiState.value.selectedRecord?.id == id) settings.selectCourse(_uiState.value.selectedCourse?.id)
     }
+    /** Re-evaluates the suggested course; call when the start screen becomes visible (time moves on). */
+    fun refreshSuggestion() = viewModelScope.launch {
+        val now = System.currentTimeMillis()
+        val history = repository.courseStartsSince(now - CourseSuggester.LOOKBACK_MS)
+        val suggestion = CourseSuggester.suggest(now, history, _uiState.value.courseSummaries)
+        _uiState.update { it.copy(suggestion = suggestion) }
+    }
+
+    /** Creates a course and reports its id, e.g. to start recording into it right away. */
+    fun createCourse(name: String, onCreated: (Long) -> Unit) = viewModelScope.launch {
+        if (name.isBlank()) return@launch
+        val id = repository.createCourse(name)
+        settings.selectCourse(id)
+        onCreated(id)
+    }
+
+    /** Files a just-recorded class under the course the user confirmed. */
+    fun moveRecord(recordId: Long, courseId: Long) = viewModelScope.launch {
+        if (repository.moveRecord(recordId, courseId)) settings.selectRecord(courseId, recordId)
+    }
+
     fun selectRecord(courseId: Long, recordId: Long) = viewModelScope.launch { settings.selectRecord(courseId, recordId) }
     fun deleteSegments(recordId: Long, ids: Set<Long>, onComplete: () -> Unit = {}) = viewModelScope.launch {
         repository.deleteSegments(recordId, ids.toList())
         onComplete()
+    }
+
+    private companion object {
+        const val RECENT_LIMIT = 30
     }
 }

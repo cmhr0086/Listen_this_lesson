@@ -1,5 +1,11 @@
 package com.cmhr.listen.ui
 
+import androidx.compose.runtime.getValue
+
+import androidx.compose.runtime.rememberUpdatedState
+
+import androidx.compose.foundation.gestures.detectTapGestures
+
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.lazy.LazyListState
@@ -194,4 +200,14 @@ internal fun <K> Modifier.dragSelectableItem(key: K, controller: DragSelectionCo
     DisposableEffect(key, controller) { onDispose { controller.unregister(key) } }
     this
         .onGloballyPositioned { controller.register(key, it.boundsInRoot()) }
+}
+
+/**
+ * Tap handling for items inside a long-press/drag selection list. Restarting the detector whenever
+ * [selectionMode] flips cancels the press that just entered selection mode, so lifting the finger
+ * after a long press does not count as a tap that would immediately undo the selection.
+ */
+internal fun Modifier.selectionAwareTap(selectionMode: Boolean, onTap: () -> Unit): Modifier = composed {
+    val latest by rememberUpdatedState(onTap)
+    pointerInput(selectionMode) { detectTapGestures(onTap = { latest() }) }
 }

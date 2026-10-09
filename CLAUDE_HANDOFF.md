@@ -210,6 +210,8 @@ Android 的正式云同步设置要求 HTTPS；本地端到端调试如需让模
 
 ### UI 与入口
 
+> v1.1.0 起：底栏为“录音 / 课程 / AI 会话 / 设置”。“录音”页（`HomeScreens.kt` 的 `RecordHomeScreen`）先开始录制，课程由 `CourseSuggester` 按星期几和时间预选，停止后 `ListenApp` 弹出归档确认并调用 `CourseRepository.moveRecord`（只改 `records.courseId`/自动名称，标记 PENDING）。课堂文字阅读模式在 `TranscriptReading.kt`（仅显示层分段，不改片段数据）；长按/拖动多选内的点按需用 `selectionAwareTap`。主题在 `ui/theme/Palettes.kt`，外观偏好存 DataStore（`theme_palette`、`dark_mode`）。
+
 - `app/src/main/java/com/cmhr/listen/MainActivity.kt`
 - `app/src/main/java/com/cmhr/listen/ui/ListenApp.kt`：Compose 导航与依赖装配
 - `ui/CourseScreens.kt`：Course、Session、课堂详情、识别模式选择
