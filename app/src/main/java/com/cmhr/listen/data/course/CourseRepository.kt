@@ -80,6 +80,33 @@ class CourseRepository(
             )
         )
     }
+    fun recordSummary(id: Long) = database.recordDao().summary(id)
+    fun pendingMarks(recordId: Long) = database.transcriptDao().pendingMarks(recordId)
+    fun searchSegments(query: String, onlyMarked: Boolean) =
+        database.recordDao().searchSegments(escapeLike(query.trim()), onlyMarked, SEARCH_LIMIT)
+    fun searchNotes(query: String) = database.recordDao().searchNotes(escapeLike(query.trim()), SEARCH_LIMIT)
+
+    /**
+     * "重点" at [at]: marks speech already recognized around that moment, and leaves a pending mark
+     * so speech recognized later (realtime queue, or record-only recognition days later) is marked too.
+     */
+    suspend fun markMoment(recordId: Long, at: Long = System.currentTimeMillis()) = database.withTransaction {
+        database.transcriptDao().insertPendingMark(PendingMarkEntity(recordId = recordId, at = at))
+        database.transcriptDao().markAround(recordId, at, System.currentTimeMillis())
+    }
+    suspend fun setMarked(recordId: Long, ids: Set<Long>, marked: Boolean): Int =
+        if (ids.isEmpty()) 0 else database.transcriptDao().setMarked(recordId, ids, marked, System.currentTimeMillis())
+    suspend fun updateTopic(recordId: Long, topic: String?) =
+        database.recordDao().updateTopic(recordId, topic?.trim()?.takeIf { it.isNotEmpty() }, System.currentTimeMillis())
+
     suspend fun deleteSegments(recordId: Long, ids: List<Long>): Int =
         if (ids.isEmpty()) 0 else database.transcriptDao().softDeleteByIds(recordId, ids, System.currentTimeMillis())
+
+    private companion object {
+        const val SEARCH_LIMIT = 200
+    }
 }
+
+/** Escapes LIKE wildcards so a search for "50%" finds the text literally; the queries escape with a backslash. */
+internal fun escapeLike(value: String): String =
+    value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

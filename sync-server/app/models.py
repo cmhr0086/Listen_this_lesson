@@ -20,6 +20,7 @@ class SessionRecord(Base):
     updatedAt: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     serverChangedAt: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    topic: Mapped[str | None] = mapped_column(Text)
 
 
 class SegmentRecord(Base):
@@ -50,6 +51,7 @@ class SegmentRecord(Base):
     updatedAt: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     serverChangedAt: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    marked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
 
     __table_args__ = (Index("ix_segments_sessionId", "sessionId"),)
 

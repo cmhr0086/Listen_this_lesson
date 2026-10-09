@@ -78,7 +78,11 @@ data class AppSettings(
     val asrPromptAutoConfig: AsrPromptAutoConfig = AsrPromptAutoConfig(),
     val cloudSync: CloudSyncSettings = CloudSyncSettings(),
     val selectedCourseId: Long? = null,
-    val selectedRecordId: Long? = null
+    val selectedRecordId: Long? = null,
+    /** Generate whole-class notes after a class is filed, when an AI service is configured. */
+    val autoNotes: Boolean = true,
+    /** Course id → index into the course color palette, for courses whose color the user changed. */
+    val courseColors: Map<Long, Int> = emptyMap()
 )
 
 /** DataStore owns ordinary settings; API keys and tokens are AES-GCM encrypted with Android Keystore keys. */
@@ -142,13 +146,21 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
                 lastSyncAt = preferences[CLOUD_SYNC_LAST_SYNC_AT] ?: 0
             ),
             selectedCourseId = preferences[SELECTED_COURSE],
-            selectedRecordId = preferences[SELECTED_RECORD]
+            selectedRecordId = preferences[SELECTED_RECORD],
+            autoNotes = preferences[AUTO_NOTES] ?: true,
+            courseColors = decodeCourseColors(preferences[COURSE_COLORS])
         )
     }
 
     suspend fun setDeveloperMode(enabled: Boolean) = context.appSettingsDataStore.edit { it[DEVELOPER_MODE] = enabled }
     suspend fun setThemePalette(palette: ThemePalette) = context.appSettingsDataStore.edit { it[THEME_PALETTE] = palette.name }
     suspend fun setDarkMode(mode: DarkModePreference) = context.appSettingsDataStore.edit { it[DARK_MODE] = mode.name }
+    suspend fun setAutoNotes(enabled: Boolean) = context.appSettingsDataStore.edit { it[AUTO_NOTES] = enabled }
+    suspend fun setCourseColor(courseId: Long, colorIndex: Int?) = context.appSettingsDataStore.edit { preferences ->
+        val colors = decodeCourseColors(preferences[COURSE_COLORS]).toMutableMap()
+        if (colorIndex == null) colors.remove(courseId) else colors[courseId] = colorIndex
+        preferences[COURSE_COLORS] = encodeCourseColors(colors)
+    }
 
     suspend fun saveServer(baseUrl: String, apiKey: String?) {
         val normalized = baseUrl.trim().trimEnd('/')
@@ -292,6 +304,8 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
         val DEVELOPER_MODE = booleanPreferencesKey("developer_mode")
         val THEME_PALETTE = stringPreferencesKey("theme_palette")
         val DARK_MODE = stringPreferencesKey("dark_mode")
+        val AUTO_NOTES = booleanPreferencesKey("auto_notes")
+        val COURSE_COLORS = stringPreferencesKey("course_colors")
         val BASE_URL = stringPreferencesKey("server_base_url")
         val API_KEY = stringPreferencesKey("encrypted_api_key")
         val AI_PROVIDER = stringPreferencesKey("ai_provider")
@@ -327,3 +341,11 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
         const val SYNC_TOKEN_KEY_ALIAS = "listen_sync_api_token"
     }
 }
+
+/** "12:3,15:0": compact and tolerant of junk, since it is only a preference. */
+internal fun decodeCourseColors(raw: String?): Map<Long, Int> = raw.orEmpty().split(',').mapNotNull { pair ->
+    val (id, index) = pair.split(':').takeIf { it.size == 2 } ?: return@mapNotNull null
+    (id.toLongOrNull() ?: return@mapNotNull null) to (index.toIntOrNull() ?: return@mapNotNull null)
+}.toMap()
+
+internal fun encodeCourseColors(colors: Map<Long, Int>): String = colors.entries.joinToString(",") { "${it.key}:${it.value}" }

@@ -64,7 +64,9 @@ data class SessionEntity(
     @ColumnInfo(defaultValue = "0") val createdAt: Long = startedAt,
     @ColumnInfo(defaultValue = "0") val updatedAt: Long = createdAt,
     @ColumnInfo(defaultValue = "0") val deleted: Boolean = false,
-    @ColumnInfo(defaultValue = "'PENDING'") val syncStatus: String = SyncStatus.PENDING.name
+    @ColumnInfo(defaultValue = "'PENDING'") val syncStatus: String = SyncStatus.PENDING.name,
+    /** Short subject of the class ("函数的极限"), extracted when notes are generated. */
+    val topic: String? = null
 )
 
 typealias ClassRecordEntity = SessionEntity
@@ -106,12 +108,42 @@ data class SegmentEntity(
     @ColumnInfo(defaultValue = "0") val createdAt: Long = endTime,
     @ColumnInfo(defaultValue = "0") val updatedAt: Long = createdAt,
     @ColumnInfo(defaultValue = "0") val deleted: Boolean = false,
-    @ColumnInfo(defaultValue = "'PENDING'") val syncStatus: String = SyncStatus.PENDING.name
+    @ColumnInfo(defaultValue = "'PENDING'") val syncStatus: String = SyncStatus.PENDING.name,
+    /** "重点": set by the mark button during class or by hand afterwards. */
+    @ColumnInfo(defaultValue = "0") val marked: Boolean = false
 ) {
     val effectiveText: String get() = correctedText?.takeIf { it.isNotBlank() } ?: text
 }
 
 typealias TranscriptEntity = SegmentEntity
+
+/**
+ * A "重点" press whose speech may not be recognized yet. The `mark_new_segments` trigger marks
+ * segments that arrive later around [at], so realtime and record-only classes behave the same.
+ */
+@Entity(
+    tableName = "pending_marks",
+    foreignKeys = [ForeignKey(entity = SessionEntity::class, parentColumns = ["id"], childColumns = ["recordId"], onDelete = ForeignKey.CASCADE)],
+    indices = [Index("recordId")]
+)
+data class PendingMarkEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val recordId: Long,
+    val at: Long
+)
+
+/** A mark at time t covers speech starting up to 10 s after it and speech that ended up to 3 s before. */
+internal const val MARK_LOOKAHEAD_MS = 10_000L
+internal const val MARK_LOOKBEHIND_MS = 3_000L
+
+internal const val MARK_NEW_SEGMENTS_TRIGGER = """
+    CREATE TRIGGER IF NOT EXISTS mark_new_segments AFTER INSERT ON transcript_segments
+    WHEN NEW.marked = 0 AND EXISTS (
+        SELECT 1 FROM pending_marks p WHERE p.recordId = NEW.recordId
+            AND p.at BETWEEN NEW.startTime - $MARK_LOOKAHEAD_MS AND NEW.endTime + $MARK_LOOKBEHIND_MS
+    )
+    BEGIN UPDATE transcript_segments SET marked = 1 WHERE id = NEW.id; END
+"""
 
 /** A course with how often and how recently it was used, for home and course lists. */
 data class CourseSummary(
@@ -124,7 +156,37 @@ data class CourseSummary(
 data class SessionSummary(
     @Embedded val session: SessionEntity,
     val courseName: String,
-    val segmentCount: Int
+    val segmentCount: Int,
+    /** 1-based position of this class within its course, oldest first ("第 N 节"). */
+    val classNumber: Int = 0,
+    val noteCount: Int = 0,
+    val markCount: Int = 0
+)
+
+/** A transcript line matching a search, with where it came from. */
+data class SegmentSearchHit(
+    val segmentId: Long,
+    val recordId: Long,
+    val courseId: Long,
+    val courseName: String,
+    val recordName: String,
+    val recordStartedAt: Long,
+    val topic: String?,
+    val startTime: Long,
+    val text: String,
+    val marked: Boolean
+)
+
+/** An AI note whose output matches a search. */
+data class NoteSearchHit(
+    val resultId: Long,
+    val recordId: Long,
+    val courseId: Long,
+    val courseName: String,
+    val recordName: String,
+    val recordStartedAt: Long,
+    val topic: String?,
+    val output: String
 )
 
 /** Minimal history used to guess which course is being attended right now. */
@@ -159,7 +221,11 @@ data class SessionSyncProjection(
     @Query("SELECT * FROM records WHERE id = :id AND deleted = 0") fun record(id: Long): Flow<SessionEntity?>
     @Query("""
         SELECT r.*, c.name AS courseName,
-            (SELECT COUNT(*) FROM transcript_segments t WHERE t.recordId = r.id AND t.deleted = 0) AS segmentCount
+            (SELECT COUNT(*) FROM transcript_segments t WHERE t.recordId = r.id AND t.deleted = 0) AS segmentCount,
+            (SELECT COUNT(*) FROM records r2 WHERE r2.courseId = r.courseId AND r2.deleted = 0
+                AND (r2.startedAt < r.startedAt OR (r2.startedAt = r.startedAt AND r2.id <= r.id))) AS classNumber,
+            (SELECT COUNT(*) FROM ai_results a WHERE a.recordId = r.id AND a.actionType = 'ORGANIZE_NOTES' AND a.status = 'SUCCESS') AS noteCount,
+            (SELECT COUNT(*) FROM transcript_segments m WHERE m.recordId = r.id AND m.deleted = 0 AND m.marked = 1) AS markCount
         FROM records r INNER JOIN courses c ON c.id = r.courseId
         WHERE r.deleted = 0 AND c.deleted = 0
         ORDER BY r.startedAt DESC, r.id DESC LIMIT :limit
@@ -167,12 +233,54 @@ data class SessionSyncProjection(
     fun recentSummaries(limit: Int): Flow<List<SessionSummary>>
     @Query("""
         SELECT r.*, c.name AS courseName,
-            (SELECT COUNT(*) FROM transcript_segments t WHERE t.recordId = r.id AND t.deleted = 0) AS segmentCount
+            (SELECT COUNT(*) FROM transcript_segments t WHERE t.recordId = r.id AND t.deleted = 0) AS segmentCount,
+            (SELECT COUNT(*) FROM records r2 WHERE r2.courseId = r.courseId AND r2.deleted = 0
+                AND (r2.startedAt < r.startedAt OR (r2.startedAt = r.startedAt AND r2.id <= r.id))) AS classNumber,
+            (SELECT COUNT(*) FROM ai_results a WHERE a.recordId = r.id AND a.actionType = 'ORGANIZE_NOTES' AND a.status = 'SUCCESS') AS noteCount,
+            (SELECT COUNT(*) FROM transcript_segments m WHERE m.recordId = r.id AND m.deleted = 0 AND m.marked = 1) AS markCount
         FROM records r INNER JOIN courses c ON c.id = r.courseId
         WHERE r.courseId = :courseId AND r.deleted = 0
         ORDER BY r.startedAt DESC, r.id DESC
     """)
     fun summariesForCourse(courseId: Long): Flow<List<SessionSummary>>
+    @Query("""
+        SELECT r.*, c.name AS courseName,
+            (SELECT COUNT(*) FROM transcript_segments t WHERE t.recordId = r.id AND t.deleted = 0) AS segmentCount,
+            (SELECT COUNT(*) FROM records r2 WHERE r2.courseId = r.courseId AND r2.deleted = 0
+                AND (r2.startedAt < r.startedAt OR (r2.startedAt = r.startedAt AND r2.id <= r.id))) AS classNumber,
+            (SELECT COUNT(*) FROM ai_results a WHERE a.recordId = r.id AND a.actionType = 'ORGANIZE_NOTES' AND a.status = 'SUCCESS') AS noteCount,
+            (SELECT COUNT(*) FROM transcript_segments m WHERE m.recordId = r.id AND m.deleted = 0 AND m.marked = 1) AS markCount
+        FROM records r INNER JOIN courses c ON c.id = r.courseId
+        WHERE r.id = :id
+    """)
+    fun summary(id: Long): Flow<SessionSummary?>
+    @Query("UPDATE records SET topic = :topic, updatedAt = :updatedAt, syncStatus = 'PENDING' WHERE id = :id AND deleted = 0")
+    suspend fun updateTopic(id: Long, topic: String?, updatedAt: Long): Int
+    @Query("""
+        SELECT t.id AS segmentId, t.recordId, c.id AS courseId, c.name AS courseName, r.name AS recordName,
+            r.startedAt AS recordStartedAt, r.topic, t.startTime, COALESCE(NULLIF(t.correctedText, ''), t.text) AS text, t.marked
+        FROM transcript_segments t
+            INNER JOIN records r ON r.id = t.recordId
+            INNER JOIN courses c ON c.id = r.courseId
+        WHERE t.deleted = 0 AND r.deleted = 0 AND c.deleted = 0
+            AND (:onlyMarked = 0 OR t.marked = 1)
+            AND (:query = '' OR COALESCE(NULLIF(t.correctedText, ''), t.text) LIKE '%' || :query || '%' ESCAPE '\')
+        ORDER BY r.startedAt DESC, t.startTime ASC
+        LIMIT :limit
+    """)
+    fun searchSegments(query: String, onlyMarked: Boolean, limit: Int): Flow<List<SegmentSearchHit>>
+    @Query("""
+        SELECT a.id AS resultId, a.recordId, c.id AS courseId, c.name AS courseName, r.name AS recordName,
+            r.startedAt AS recordStartedAt, r.topic, a.output
+        FROM ai_results a
+            INNER JOIN records r ON r.id = a.recordId
+            INNER JOIN courses c ON c.id = r.courseId
+        WHERE r.deleted = 0 AND c.deleted = 0 AND a.status = 'SUCCESS' AND a.actionType = 'ORGANIZE_NOTES'
+            AND a.output LIKE '%' || :query || '%' ESCAPE '\'
+        ORDER BY r.startedAt DESC
+        LIMIT :limit
+    """)
+    fun searchNotes(query: String, limit: Int): Flow<List<NoteSearchHit>>
     @Query("SELECT r.courseId, r.startedAt FROM records r INNER JOIN courses c ON c.id = r.courseId WHERE r.deleted = 0 AND c.deleted = 0 AND r.startedAt >= :since")
     suspend fun courseStartsSince(since: Long): List<CourseStart>
     @Query("SELECT * FROM records WHERE id = :id AND deleted = 0") suspend fun recordNow(id: Long): SessionEntity?
@@ -194,7 +302,7 @@ data class SessionSyncProjection(
     @Query("UPDATE records SET deleted = 1, updatedAt = :updatedAt, syncStatus = 'PENDING' WHERE id = :id AND deleted = 0") suspend fun softDelete(id: Long, updatedAt: Long): Int
     @Query("UPDATE records SET deleted = 1, updatedAt = :updatedAt, syncStatus = 'PENDING' WHERE courseId = :courseId AND deleted = 0") suspend fun softDeleteForCourse(courseId: Long, updatedAt: Long): Int
     @Query("SELECT id FROM records WHERE courseId = :courseId AND deleted = 0") suspend fun idsForCourse(courseId: Long): List<Long>
-    @Query("UPDATE records SET courseId = :courseId, name = :name, startedAt = :startedAt, endedAt = :endedAt, createdAt = :createdAt, updatedAt = :updatedAt, deleted = :deleted, syncStatus = 'SYNCED' WHERE sessionId = :sessionId AND updatedAt < :updatedAt")
+    @Query("UPDATE records SET courseId = :courseId, name = :name, startedAt = :startedAt, endedAt = :endedAt, createdAt = :createdAt, updatedAt = :updatedAt, deleted = :deleted, topic = :topic, syncStatus = 'SYNCED' WHERE sessionId = :sessionId AND updatedAt < :updatedAt")
     suspend fun applyRemote(
         sessionId: String,
         courseId: Long,
@@ -203,7 +311,8 @@ data class SessionSyncProjection(
         endedAt: Long?,
         createdAt: Long,
         updatedAt: Long,
-        deleted: Boolean
+        deleted: Boolean,
+        topic: String?
     ): Int
     @Query("UPDATE records SET syncStatus = 'SYNCED' WHERE sessionId = :sessionId AND updatedAt = :uploadedUpdatedAt AND syncStatus = 'PENDING'")
     suspend fun markSyncedIfUnchanged(sessionId: String, uploadedUpdatedAt: Long): Int
@@ -256,6 +365,7 @@ data class SessionSyncProjection(
             createdAt = :createdAt,
             updatedAt = :updatedAt,
             deleted = :deleted,
+            marked = :marked,
             syncStatus = 'SYNCED'
         WHERE segmentId = :segmentId AND updatedAt < :updatedAt
     """)
@@ -280,8 +390,16 @@ data class SessionSyncProjection(
         serverModel: String?,
         createdAt: Long,
         updatedAt: Long,
-        deleted: Boolean
+        deleted: Boolean,
+        marked: Boolean
     ): Int
+    @Query("UPDATE transcript_segments SET marked = :marked, updatedAt = :updatedAt, syncStatus = 'PENDING' WHERE recordId = :recordId AND id IN (:ids) AND deleted = 0 AND marked != :marked")
+    suspend fun setMarked(recordId: Long, ids: Set<Long>, marked: Boolean, updatedAt: Long): Int
+    /** Marks speech already recognized around [at]; later speech is caught by the trigger. */
+    @Query("UPDATE transcript_segments SET marked = 1, updatedAt = :updatedAt, syncStatus = 'PENDING' WHERE recordId = :recordId AND deleted = 0 AND marked = 0 AND :at BETWEEN startTime - $MARK_LOOKAHEAD_MS AND endTime + $MARK_LOOKBEHIND_MS")
+    suspend fun markAround(recordId: Long, at: Long, updatedAt: Long): Int
+    @Insert suspend fun insertPendingMark(mark: PendingMarkEntity): Long
+    @Query("SELECT * FROM pending_marks WHERE recordId = :recordId ORDER BY at") fun pendingMarks(recordId: Long): Flow<List<PendingMarkEntity>>
     @Query("UPDATE transcript_segments SET syncStatus = 'SYNCED' WHERE segmentId = :segmentId AND updatedAt = :uploadedUpdatedAt AND syncStatus = 'PENDING'")
     suspend fun markSyncedIfUnchanged(segmentId: String, uploadedUpdatedAt: Long): Int
 }
@@ -300,9 +418,10 @@ data class SessionSyncProjection(
         AsrSegmentDiagnosticEntity::class,
         AsrNetworkEventEntity::class,
         RecordingEntity::class,
-        RecordingChunkEntity::class
+        RecordingChunkEntity::class,
+        PendingMarkEntity::class
     ],
-    version = 11,
+    version = 12,
     exportSchema = false
 )
 abstract class ListenDatabase : RoomDatabase() {
@@ -497,10 +616,28 @@ abstract class ListenDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE records ADD COLUMN topic TEXT")
+                db.execSQL("ALTER TABLE transcript_segments ADD COLUMN marked INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("CREATE TABLE IF NOT EXISTS pending_marks (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, recordId INTEGER NOT NULL, at INTEGER NOT NULL, FOREIGN KEY(recordId) REFERENCES records(id) ON UPDATE NO ACTION ON DELETE CASCADE)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_pending_marks_recordId ON pending_marks(recordId)")
+                db.execSQL(MARK_NEW_SEGMENTS_TRIGGER)
+            }
+        }
+
+        /** Room does not create triggers from entities; make sure fresh installs have it too. */
+        val TRIGGERS_CALLBACK = object : Callback() {
+            override fun onOpen(db: SupportSQLiteDatabase) {
+                db.execSQL(MARK_NEW_SEGMENTS_TRIGGER)
+            }
+        }
+
         @Volatile private var instance: ListenDatabase? = null
         fun get(context: Context): ListenDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, ListenDatabase::class.java, "listen.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12)
+                .addCallback(TRIGGERS_CALLBACK)
                 .build()
                 .also { instance = it }
         }

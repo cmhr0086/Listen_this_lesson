@@ -157,7 +157,8 @@ class SyncRepository(
                     endedAt = remoteSession.endedAt,
                     createdAt = remoteSession.createdAt,
                     updatedAt = remoteSession.updatedAt,
-                    deleted = remoteSession.deleted
+                    deleted = remoteSession.deleted,
+                    topic = remoteSession.topic
                 )
             }
         }
@@ -196,7 +197,8 @@ class SyncRepository(
                     serverModel = remoteSegment.serverModel,
                     createdAt = remoteSegment.createdAt,
                     updatedAt = remoteSegment.updatedAt,
-                    deleted = remoteSegment.deleted
+                    deleted = remoteSegment.deleted,
+                    marked = remoteSegment.marked
                 )
             }
         }
@@ -262,7 +264,8 @@ private fun SessionEntity.toPayload(courseName: String) = SyncSessionPayload(
     endedAt = endedAt,
     createdAt = createdAt,
     updatedAt = updatedAt,
-    deleted = deleted
+    deleted = deleted,
+    topic = topic
 )
 
 private fun SegmentEntity.toPayload() = SyncSegmentPayload(
@@ -285,7 +288,8 @@ private fun SegmentEntity.toPayload() = SyncSegmentPayload(
     serverModel = serverModel,
     createdAt = createdAt,
     updatedAt = updatedAt,
-    deleted = deleted
+    deleted = deleted,
+    marked = marked
 )
 
 private fun SyncSessionPayload.toEntity(courseId: Long) = SessionEntity(
@@ -297,7 +301,8 @@ private fun SyncSessionPayload.toEntity(courseId: Long) = SessionEntity(
     createdAt = createdAt,
     updatedAt = updatedAt,
     deleted = deleted,
-    syncStatus = SyncStatus.SYNCED.name
+    syncStatus = SyncStatus.SYNCED.name,
+    topic = topic
 )
 
 private fun SyncSegmentPayload.toEntity(recordId: Long) = SegmentEntity(
@@ -322,5 +327,6 @@ private fun SyncSegmentPayload.toEntity(recordId: Long) = SegmentEntity(
     createdAt = createdAt,
     updatedAt = updatedAt,
     deleted = deleted,
-    syncStatus = SyncStatus.SYNCED.name
+    syncStatus = SyncStatus.SYNCED.name,
+    marked = marked
 )

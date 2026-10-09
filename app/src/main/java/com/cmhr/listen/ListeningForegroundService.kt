@@ -1,5 +1,14 @@
 package com.cmhr.listen
 
+import android.widget.Toast
+import com.cmhr.listen.data.course.CourseRepository
+import com.cmhr.listen.data.course.ListenDatabase
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -29,6 +38,7 @@ object ListeningControlBus {
 class ListeningForegroundService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var recordOnlyActive = false
+    private val markScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onCreate() {
         super.onCreate()
@@ -52,6 +62,14 @@ class ListeningForegroundService : Service() {
         }
         val recordId = request.getLongExtra(EXTRA_RECORD_ID, -1L)
         if (recordId <= 0L) return START_NOT_STICKY
+        if (request.action == ACTION_MARK) {
+            // Locked-screen "重点": no need to open the app mid-lecture.
+            markScope.launch {
+                CourseRepository(ListenDatabase.get(applicationContext)).markMoment(recordId)
+                withContext(Dispatchers.Main) { Toast.makeText(applicationContext, "已标记重点", Toast.LENGTH_SHORT).show() }
+            }
+            return START_NOT_STICKY
+        }
         val notification = buildNotification(
             recordId = recordId,
             courseName = request.getStringExtra(EXTRA_COURSE_NAME).orEmpty(),
@@ -81,6 +99,7 @@ class ListeningForegroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        markScope.cancel()
         wakeLock?.let { lock -> if (lock.isHeld) lock.release() }
         wakeLock = null
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -112,6 +131,10 @@ class ListeningForegroundService : Service() {
             putExtra(EXTRA_RECORD_ID, recordId)
         }
         val stopIntent = Intent(this, ListeningForegroundService::class.java).apply { action = ACTION_STOP }
+        val markIntent = Intent(this, ListeningForegroundService::class.java).apply {
+            action = ACTION_MARK
+            putExtra(EXTRA_RECORD_ID, recordId)
+        }
         val whenWallClock = System.currentTimeMillis() - (SystemClock.elapsedRealtime() - startedElapsed).coerceAtLeast(0L)
         val status = if (recordOnly) "仅录音 · 意外退出也会保留" else if (recognizing) "正在识别" else if (queueCount > 0) "等待识别（$queueCount）" else "等待语音"
         return NotificationCompat.Builder(this, CHANNEL_ID)
@@ -119,6 +142,7 @@ class ListeningForegroundService : Service() {
             .setContentTitle(courseName.ifBlank { "课堂录制中" })
             .setContentText("${recordName.ifBlank { "课堂记录" }} · $status")
             .setContentIntent(PendingIntent.getActivity(this, 10, openIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
+            .addAction(0, "标记重点", PendingIntent.getService(this, 12, markIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
             .addAction(0, "结束", PendingIntent.getService(this, 11, stopIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
             .setWhen(whenWallClock)
             .setUsesChronometer(true)
@@ -139,6 +163,7 @@ class ListeningForegroundService : Service() {
         private const val ACTION_START = "com.cmhr.listen.START_LISTENING_NOTIFICATION"
         private const val ACTION_UPDATE = "com.cmhr.listen.UPDATE_LISTENING_NOTIFICATION"
         private const val ACTION_STOP = "com.cmhr.listen.STOP_LISTENING"
+        private const val ACTION_MARK = "com.cmhr.listen.MARK_MOMENT"
         private const val CHANNEL_ID = "listening"
         private const val NOTIFICATION_ID = 1001
 

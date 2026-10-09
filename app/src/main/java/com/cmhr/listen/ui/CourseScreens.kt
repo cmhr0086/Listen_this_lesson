@@ -1,5 +1,10 @@
 package com.cmhr.listen.ui
 
+import androidx.compose.material.icons.outlined.Mic
+import androidx.compose.material.icons.outlined.FiberManualRecord
+import androidx.compose.material.icons.outlined.Translate
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
@@ -70,6 +75,8 @@ fun CourseRecordsScreen(
     listening: ListeningUiState,
     model: CourseViewModel,
     pendingRecordingCounts: Map<Long, Int> = emptyMap(),
+    startClass: (CaptureMode) -> Unit = {},
+    now: Long = System.currentTimeMillis(),
     openRecord: (Long) -> Unit
 ) {
     var switchMessage by remember { mutableStateOf<String?>(null) }
@@ -77,52 +84,113 @@ fun CourseRecordsScreen(
     var renameTarget by remember { mutableStateOf<ClassRecordEntity?>(null) }
     var renameDraft by remember { mutableStateOf("") }
     var moveTarget by remember { mutableStateOf<ClassRecordEntity?>(null) }
+    var editingPrompt by remember { mutableStateOf(false) }
     androidx.compose.runtime.LaunchedEffect(courseId) {
         if (state.selectedCourse?.id != courseId) model.enterCourse(courseId)
     }
+    val course = state.courseSummaries.firstOrNull { it.course.id == courseId }?.course ?: state.selectedCourse?.takeIf { it.id == courseId }
     val records = state.recordSummaries.filter { it.session.courseId == courseId }
+    val totalMs = records.sumOf { r -> r.session.endedAt?.let { it - r.session.startedAt } ?: 0L }
+    val groups = remember(records, now) { records.groupBy { weekGroupLabel(it.session.startedAt, now) } }
+    var prompt by remember(course?.id, course?.asrPrompt) { mutableStateOf(course?.asrPrompt.orEmpty()) }
+    var promptMode by remember(course?.id, course?.asrPromptModeOverride) { mutableStateOf(course?.asrPromptModeOverride) }
     LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = ListWithFabPadding,
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        Modifier.fillMaxSize().testTag("course-records-list"),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
+        if (course != null) item("course-header") {
+            Column(Modifier.padding(horizontal = 4.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    CourseBadge(course.id, course.name, 56.dp)
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(course.name, style = MaterialTheme.typography.headlineSmall)
+                        Text(
+                            listOfNotNull("${records.size} 节课", formatSpanMinutes(totalMs)?.let { "共 $it" }).joinToString(" · "),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                val canStart = !listening.isListening && listening.pausedClass == null
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(onClick = { startClass(CaptureMode.REALTIME_ASR) }, enabled = canStart, modifier = Modifier.weight(1f).testTag("course-start-realtime")) {
+                        Icon(Icons.Outlined.Mic, contentDescription = null, modifier = Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("实时转写")
+                    }
+                    OutlinedButton(onClick = { startClass(CaptureMode.RECORD_ONLY) }, enabled = canStart, modifier = Modifier.weight(1f).testTag("course-start-record-only")) {
+                        Icon(Icons.Outlined.FiberManualRecord, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.error); Spacer(Modifier.width(6.dp)); Text("仅录音")
+                    }
+                }
+                ListGroup {
+                    val terms = course.asrPrompt.split(Regex("[，,、；;\\s]+")).count { it.isNotBlank() }
+                    ListRow(
+                        title = "专业词提示",
+                        subtitle = if (terms == 0) "还没有专业词；填上人名和术语，识别会更准" else "$terms 个专业词",
+                        leading = { Icon(Icons.Outlined.Translate, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                        onClick = { editingPrompt = true },
+                        modifier = Modifier.testTag("course-asr-prompt")
+                    )
+                }
+            }
+        }
         if (listening.isListening && listening.activeRecordId != null) item("active-listening-hint") {
-            Text("「${listening.currentRecordName ?: "当前课堂"}」正在录制，停止后才能打开其他课堂记录。", color = MaterialTheme.colorScheme.primary)
+            Text("「${listening.currentRecordName ?: "当前课堂"}」正在录制，停止后才能打开其他课堂记录。", color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(horizontal = 4.dp))
         }
         switchMessage?.let { item("switch-warning") { ErrorCard(it) } }
         if (records.isEmpty()) item("empty-records") {
-            Text("还没有课堂记录。可以在首页直接「开始上课」，或用右下角按钮新建。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("还没有课堂。点上方按钮开始第一节课。", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(4.dp))
         }
-        items(records, key = { "record-${it.session.id}" }) { summary ->
-            val record = summary.session
-            val capturing = listening.isListening && listening.activeRecordId == record.id
-            SessionRow(
-                summary = summary,
-                showCourse = false,
-                capturing = capturing,
-                pendingRecordings = pendingRecordingCounts[record.id] ?: 0,
-                open = {
-                    val activeId = listening.activeRecordId
-                    if (activeId == null || activeId == record.id) openRecord(record.id)
-                    else switchMessage = "「${listening.currentRecordName ?: "另一条课堂记录"}」正在录制，请先停止。"
-                },
-                menu = {
-                    RowMenu(
-                        description = "${record.name} 的操作",
-                        actions = listOf(
-                            "重命名" to { renameDraft = record.name; renameTarget = record },
-                            "移到其他课程" to {
-                                if (capturing) switchMessage = "这条课堂记录正在录制，停止后才能移动。" else moveTarget = record
+        groups.forEach { (label, rows) ->
+            item("week-$label") { SectionHeader(label, Modifier.padding(top = 6.dp)) }
+            item("week-group-$label") {
+                ListGroup {
+                    rows.forEachIndexed { index, summary ->
+                        if (index > 0) ListDivider(68.dp)
+                        val record = summary.session
+                        val capturing = listening.isListening && listening.activeRecordId == record.id
+                        SessionRow(
+                            summary = summary,
+                            showCourse = false,
+                            capturing = capturing,
+                            paused = !listening.isListening && listening.pausedClass?.recordId == record.id,
+                            pendingRecordings = pendingRecordingCounts[record.id] ?: 0,
+                            open = {
+                                val activeId = listening.activeRecordId
+                                if (activeId == null || activeId == record.id) openRecord(record.id)
+                                else switchMessage = "「${listening.currentRecordName ?: "另一条课堂记录"}」正在录制，请先停止。"
                             },
-                            "删除" to {
-                                if (capturing) switchMessage = "这条课堂记录正在录制，停止后才能删除。" else deleteTarget = record
+                            menu = {
+                                RowMenu(
+                                    description = "${record.name} 的操作",
+                                    actions = listOf(
+                                        "重命名" to { renameDraft = record.name; renameTarget = record },
+                                        "移到其他课程" to {
+                                            if (capturing) switchMessage = "这条课堂记录正在录制，停止后才能移动。" else moveTarget = record
+                                        },
+                                        "删除" to {
+                                            if (capturing) switchMessage = "这条课堂记录正在录制，停止后才能删除。" else deleteTarget = record
+                                        }
+                                    )
+                                )
                             }
                         )
-                    )
+                    }
                 }
-            )
+            }
         }
     }
+    if (editingPrompt && course != null) AsrPromptDialog(
+        prompt = prompt,
+        update = { prompt = it },
+        modeOverride = promptMode,
+        updateMode = { promptMode = it },
+        save = {
+            model.updateCourseAsrPrompt(course.id, prompt)
+            model.updateCourseAsrPromptMode(course.id, promptMode)
+            editingPrompt = false
+        },
+        dismiss = { editingPrompt = false }
+    )
     renameTarget?.let { record ->
         NameDialog("重命名课堂记录", renameDraft, { renameDraft = it }, { model.renameRecord(record.id, renameDraft); renameTarget = null }, { renameTarget = null })
     }
@@ -151,193 +219,8 @@ fun CourseRecordsScreen(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-fun RecordDetailsScreen(
-    recordId: Long,
-    state: CourseUiState,
-    listening: ListeningUiState,
-    developerMode: Boolean,
-    aiState: AiUiState,
-    aiModel: AiViewModel,
-    showAiActions: Boolean,
-    dismissAiActions: () -> Unit,
-    requestedFullAction: AiActionType?,
-    consumeFullAction: () -> Unit,
-    openResult: (Long) -> Unit,
-    openConversation: (Long) -> Unit,
-    recordings: RecordingUiState,
-    startCapture: (CaptureMode) -> Unit,
-    stopCapture: () -> Unit,
-    pauseCapture: () -> Unit = {},
-    resumeCapture: () -> Unit = {},
-    recognizeAll: () -> Unit = {},
-    startOfflineRecognition: (String) -> Unit,
-    stopOfflineRecognition: () -> Unit,
-    deleteRecording: (String) -> Unit
-) {
-    val record = state.selectedRecord?.takeIf { it.id == recordId }
-    val course = record?.let { selected -> state.courses.firstOrNull { it.id == selected.courseId } }
-    val segments = state.detailSegments.filter { it.recordId == recordId }
-    val selectedIds = aiState.takeIf { it.selectionRecordId == recordId }?.selectedSegmentIds.orEmpty()
-    val selectionMode = aiState.selectionRecordId == recordId
-    // Reading order: oldest first, merged into paragraphs; the newest text appears at the bottom.
-    val orderedSegments = remember(segments) { AiViewModel.orderTranscriptSegments(segments) }
-    val groups = remember(orderedSegments) { groupTranscript(orderedSegments) }
-    val capturingHere = listening.isListening && listening.activeRecordId == recordId
-    val realtimeHere = capturingHere && listening.captureMode == CaptureMode.REALTIME_ASR
-    var recordingsExpanded by remember(recordId) { mutableStateOf(false) }
-    val pausedHere = !listening.isListening && listening.pausedClass?.recordId == recordId
-    val useControlBar = capturingHere || pausedHere || segments.isNotEmpty() || recordings.recordings.isNotEmpty()
-    val listState = rememberLazyListState()
-    val atEnd by remember { androidx.compose.runtime.derivedStateOf { !listState.canScrollForward } }
-    val scope = androidx.compose.runtime.rememberCoroutineScope()
-    val follow = rememberFollowLatest(listState, enabled = realtimeHere && !selectionMode, key = recordId)
-    val dragSelection = rememberDragSelectionController(
-        listState = listState,
-        orderedKeys = orderedSegments.map { it.id },
-        selectedKeys = selectedIds,
-        onSelectionChanged = { aiModel.replaceSelection(recordId, it) }
-    )
-
-    DisposableEffect(recordId) {
-        onDispose {
-            if (aiModel.uiState.value.selectionRecordId == recordId) aiModel.clearSelection()
-        }
-    }
-
-    androidx.compose.runtime.LaunchedEffect(requestedFullAction) {
-        requestedFullAction?.let {
-            aiModel.runFullRecordAction(recordId, it, segments, onCreated = openResult)
-            consumeFullAction()
-        }
-    }
-
-    if (showAiActions) {
-        ModalBottomSheet(onDismissRequest = dismissAiActions) {
-            Column(
-                Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 24.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Text("AI 处理", style = MaterialTheme.typography.titleLarge)
-                listOf(AiActionType.CORRECT_ASR, AiActionType.QUICK_ANSWER).forEach { action ->
-                    OutlinedButton(
-                        onClick = {
-                            dismissAiActions()
-                            aiModel.runFixedAction(recordId, action, segments, onCreated = openResult)
-                        },
-                        enabled = !aiState.isBusy,
-                        modifier = Modifier.fillMaxWidth()
-                    ) { Text(action.displayName) }
-                }
-                Button(
-                    onClick = {
-                        dismissAiActions()
-                        aiModel.createConversationDraft(recordId, segments, openConversation)
-                    },
-                    enabled = !aiState.isBusy,
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("自定义提问 / 与 AI 对话") }
-            }
-        }
-    }
-
-    Column(Modifier.fillMaxSize()) {
-      Box(Modifier.weight(1f).fillMaxWidth()) {
-        LazyColumn(
-            Modifier.fillMaxSize().dragSelectionViewport(dragSelection),
-            state = listState,
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            if (record == null || course == null) item("loading-record") { Text("正在加载课堂记录……") }
-            else {
-                item("record-summary") {
-                    RecordDetailCard(course, record)
-                }
-                // Only a brand-new, empty class shows the big start cards; every other state uses the
-                // bottom control bar so pause/continue/end never require scrolling to the top.
-                if (!useControlBar) item("capture-panel") {
-                    CapturePanel(recordId, listening, recordings.processing, startCapture, stopCapture, pause = pauseCapture, resume = resumeCapture)
-                }
-                aiState.error?.let { item("ai-error") { ErrorCard(it) } }
-                if (recordings.recordings.isNotEmpty()) item("recordings-summary") {
-                    RecordingsSummaryCard(
-                        recordings = recordings.recordings,
-                        processing = recordings.processing,
-                        recognizingAll = recordings.recognizingAllRecordId == recordId,
-                        recognitionAllowed = !listening.isListening && !recordings.processing.isProcessing,
-                        expanded = recordingsExpanded,
-                        toggleExpanded = { recordingsExpanded = !recordingsExpanded },
-                        recognizeAll = recognizeAll,
-                        startRecognition = startOfflineRecognition,
-                        pauseRecognition = stopOfflineRecognition,
-                        delete = deleteRecording
-                    )
-                }
-                item("segment-heading") {
-                    SectionHeading("文字", if (segments.isEmpty()) null else "${segments.size} 段 · ${groups.size} 个段落")
-                }
-                if (segments.isEmpty()) item("empty-segments") {
-                    Text(
-                        when {
-                            capturingHere && listening.captureMode == CaptureMode.RECORD_ONLY -> "正在仅录音。结束后点上方「全部识别」，文字会出现在这里。"
-                            capturingHere -> "正在听，识别出的文字会出现在这里。"
-                            recordings.recordings.isEmpty() -> "还没有文字。用「实时转写」上课，或先「仅录音」再识别。"
-                            else -> "还没有文字。点上方录音文件的「全部识别」后，文字会出现在这里。"
-                        },
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                items(groups, key = { "group-${it.segments.first().id}" }) { group ->
-                    // No gaps between lines: a paragraph reads as one block, lines stay individually selectable.
-                    Column {
-                        TranscriptGroupHeader(group)
-                        group.segments.forEachIndexed { index, segment ->
-                            TranscriptLine(
-                                segment = segment,
-                                position = linePosition(index, group.segments.size),
-                                selected = segment.id in selectedIds,
-                                selectionMode = selectionMode,
-                                dragSelectionEnabled = true,
-                                modifier = Modifier.dragSelectableItem(segment.id, dragSelection),
-                                toggle = { aiModel.toggleSelection(recordId, segment.id) },
-                                restoreOriginal = { aiModel.restoreOriginal(segment.id) }
-                            )
-                        }
-                    }
-                }
-                if (realtimeHere && (listening.pendingQueueCount > 0 || listening.isRecognizing)) {
-                    item("recognizing-tail") { RecognizingTail(listening.pendingQueueCount) }
-                }
-            }
-        }
-        JumpToLatestButton(
-            visible = !atEnd && orderedSegments.isNotEmpty() && !(realtimeHere && follow.following),
-            modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp)
-        ) {
-            follow.resume()
-            scope.launch { listState.scrollToBottom() }
-        }
-      }
-        // While selecting text the bar only stays for a live or paused class.
-        if (record != null && useControlBar && (!selectionMode || capturingHere || pausedHere)) {
-            CaptureControlBar(
-                recordId = recordId,
-                listening = listening,
-                processing = recordings.processing,
-                start = startCapture,
-                pause = pauseCapture,
-                resume = resumeCapture,
-                end = stopCapture
-            )
-        }
-    }
-}
-
-@Composable
-private fun SectionHeading(title: String, detail: String?) {
+internal fun SectionHeading(title: String, detail: String?) {
     Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.Bottom) {
         Text(title, style = MaterialTheme.typography.titleLarge)
         detail?.let {
@@ -453,7 +336,7 @@ private fun RecordDetailCard(
 }
 
 @Composable
-private fun ErrorCard(message: String) = Card(Modifier.fillMaxWidth()) {
+internal fun ErrorCard(message: String) = Card(Modifier.fillMaxWidth()) {
     Text("提示：$message", Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error)
 }
 
@@ -467,5 +350,17 @@ internal fun buildTxt(course: CourseEntity, record: ClassRecordEntity, segments:
         appendLine(formatDateTime(it.startTime))
         appendLine(it.effectiveText)
         appendLine()
+    }
+}
+
+/** 本周 / 上周 / 「10月」: weekly classes read best grouped by week, older ones by month. */
+internal fun weekGroupLabel(startedAt: Long, now: Long): String {
+    val zone = java.time.ZoneId.systemDefault()
+    val day = java.time.Instant.ofEpochMilli(startedAt).atZone(zone).toLocalDate()
+    val weekStart = java.time.Instant.ofEpochMilli(now).atZone(zone).toLocalDate().with(java.time.DayOfWeek.MONDAY)
+    return when {
+        !day.isBefore(weekStart) -> "本周"
+        !day.isBefore(weekStart.minusWeeks(1)) -> "上周"
+        else -> "${day.monthValue}月"
     }
 }

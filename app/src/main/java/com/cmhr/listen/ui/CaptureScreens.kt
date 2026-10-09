@@ -1,5 +1,7 @@
 package com.cmhr.listen.ui
 
+import androidx.compose.material.icons.outlined.BookmarkAdd
+import androidx.compose.material3.OutlinedIconButton
 import android.os.SystemClock
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -295,7 +297,8 @@ internal fun CaptureControlBar(
     start: (CaptureMode) -> Unit,
     pause: () -> Unit,
     resume: () -> Unit,
-    end: () -> Unit
+    end: () -> Unit,
+    mark: () -> Unit = {}
 ) {
     val activeHere = listening.isListening && listening.activeRecordId == recordId
     val paused = listening.pausedClass?.takeIf { !listening.isListening && it.recordId == recordId }
@@ -319,6 +322,10 @@ internal fun CaptureControlBar(
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                    }
+                    // "重点": marks what is being said now; also on the notification for a locked screen.
+                    OutlinedIconButton(onClick = mark, modifier = Modifier.testTag("bar-mark")) {
+                        Icon(Icons.Outlined.BookmarkAdd, contentDescription = "标记重点", tint = MaterialTheme.colorScheme.tertiary)
                     }
                     FilledTonalButton(onClick = pause, modifier = Modifier.testTag("bar-pause")) { Icon(Icons.Outlined.Pause, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("暂停") }
                     Button(

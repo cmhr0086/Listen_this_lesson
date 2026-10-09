@@ -1,5 +1,9 @@
 package com.cmhr.listen.ui
 
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.background
+import androidx.compose.material3.FilterChip
+import androidx.compose.material.icons.outlined.AutoAwesome
 import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.BitmapFactory
@@ -187,11 +191,19 @@ fun AiResultsScreen(recordId: Long, model: AiViewModel, openItem: (AiContentKey)
     }
 }
 
+internal enum class AiListFilter(val label: String) { ALL("全部"), CLASS("课堂"), GENERAL("自由提问") }
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun GlobalAiScreen(model: AiViewModel, newConversation: () -> Unit = {}, openItem: (AiContentKey, Long?) -> Unit) {
-    val contents by model.globalContents().collectAsStateWithLifecycle(initialValue = emptyList())
+    val all by model.globalContents().collectAsStateWithLifecycle(initialValue = emptyList())
     val state by model.uiState.collectAsStateWithLifecycle()
+    var filter by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(AiListFilter.ALL) }
+    val contents = when (filter) {
+        AiListFilter.ALL -> all
+        AiListFilter.CLASS -> all.filter { it.recordId != null }
+        AiListFilter.GENERAL -> all.filter { it.recordId == null }
+    }
     val scope = AiContentSelectionScope(null)
     val selectionMode = state.contentSelectionScope == scope
     val listState = rememberLazyListState()
@@ -208,72 +220,110 @@ fun GlobalAiScreen(model: AiViewModel, newConversation: () -> Unit = {}, openIte
     LazyColumn(
         Modifier.fillMaxSize().dragSelectionViewport(dragSelection),
         state = listState,
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 104.dp),
+        verticalArrangement = Arrangement.spacedBy(0.dp)
     ) {
-        state.error?.let { message -> item("global-ai-error") { Text(message, color = MaterialTheme.colorScheme.error) } }
+        item("ai-filters") {
+            Row(Modifier.padding(bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                AiListFilter.entries.forEach { option ->
+                    FilterChip(
+                        selected = filter == option,
+                        onClick = { filter = option },
+                        label = { Text(option.label) },
+                        modifier = Modifier.testTag("ai-filter-${option.name.lowercase()}")
+                    )
+                }
+            }
+        }
+        state.error?.let { message -> item("global-ai-error") { Text(message, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(bottom = 8.dp)) } }
         if (contents.isEmpty()) {
             item("global-ai-empty") {
-                Column(Modifier.fillMaxWidth().padding(top = 24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("还没有 AI 内容", style = MaterialTheme.typography.titleMedium)
+                Column(Modifier.fillMaxWidth().padding(top = 32.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(if (all.isEmpty()) "还没有 AI 对话" else "这里还没有内容", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        "可以直接提问，也可以在课堂详情里长按选择文字，让 AI 纠错、回答或整理成笔记。",
+                        "可以直接提问；也可以在课堂的「文字」里选中几句，点「问 AI」。",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center
                     )
-                    Button(onClick = newConversation, modifier = Modifier.testTag("ai-empty-new-conversation")) { Text("新建对话") }
+                    Button(onClick = newConversation, modifier = Modifier.testTag("ai-empty-new-conversation")) { Text("新对话") }
                 }
             }
         }
         grouped.forEach { (label, itemsForDay) ->
-            item("day-$label") { Text(label, style = MaterialTheme.typography.titleMedium) }
-            items(itemsForDay, key = { "global-${it.key.kind}-${it.key.id}" }) { item ->
+            item("day-$label") { SectionHeader(label, Modifier.padding(top = 8.dp, bottom = 8.dp)) }
+            itemsIndexed(itemsForDay, key = { _, it -> "global-${it.key.kind}-${it.key.id}" }) { index, item ->
                 val selected = item.key in state.selectedContentKeys
-                Card(
+                val position = linePosition(index, itemsForDay.size)
+                Column(
                     Modifier
                         .fillMaxWidth()
+                        .clip(position.groupShape())
+                        .background(if (selected) MaterialTheme.colorScheme.secondaryContainer else groupColor())
                         .dragSelectableItem(item.key, dragSelection)
                         .semantics {
                             this.selected = selected
                             onLongClick("选择 AI 内容") { model.toggleContentSelection(null, item.key); true }
                         }
-                        .selectionAwareTap(selectionMode) { if (selectionMode) model.toggleContentSelection(null, item.key) else openItem(item.key, item.recordId) },
-                    colors = CardDefaults.cardColors(
-                        containerColor = if (selected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceVariant
-                    ),
-                    border = if (selected) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null
+                        .selectionAwareTap(selectionMode) { if (selectionMode) model.toggleContentSelection(null, item.key) else openItem(item.key, item.recordId) }
+                        .testTag("ai-item-${item.key.kind.name.lowercase()}-${item.key.id}")
                 ) {
-                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(item.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f, fill = false))
+                    if (index > 0) ListDivider(64.dp)
+                    Row(Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        val courseId = item.courseId
+                        if (courseId != null) CourseBadge(courseId, item.courseName, 36.dp)
+                        else Box(Modifier.size(36.dp).clip(RoundedCornerShape(11.dp)).background(MaterialTheme.colorScheme.surfaceContainerHigh), contentAlignment = Alignment.Center) {
+                            Icon(
+                                if (item.key.kind == AiContentKind.RESULT) Icons.Outlined.Description else Icons.Outlined.AutoAwesome,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(item.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                                Text(
+                                    java.text.SimpleDateFormat("HH:mm", java.util.Locale.CHINA).format(java.util.Date(item.updatedAt)),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            aiPreviewLine(item.preview)?.let { line ->
+                                Text(
+                                    if (item.status == AiRequestStatus.ERROR.name) "请求失败，点开可重试" else line,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = if (item.status == AiRequestStatus.ERROR.name) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                             Text(
-                                " · " + java.text.SimpleDateFormat("HH:mm", java.util.Locale.CHINA).format(java.util.Date(item.updatedAt)),
+                                listOfNotNull(
+                                    if (item.recordId == null) "自由提问" else item.courseName,
+                                    // Auto names repeat the course ("高等数学-10-09"); keep just the date part.
+                                    item.recordName?.removePrefix("${item.courseName}-")?.takeIf { it.isNotBlank() && it != item.courseName },
+                                    "AI 结果".takeIf { item.key.kind == AiContentKind.RESULT }
+                                ).joinToString(" · "),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                                 style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        aiPreviewLine(item.preview)?.let { line ->
-                            Text(
-                                line,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = if (item.status == AiRequestStatus.ERROR.name) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
-                            )
-                        }
-                        Text(
-                            listOfNotNull(item.courseName, item.recordName?.takeIf { it.isNotBlank() && it != item.courseName }).joinToString(" · "),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
                     }
                 }
             }
         }
     }
+}
+
+/** Joined rows of one group: rounded only at the group's outer corners. */
+internal fun LinePosition.groupShape(): androidx.compose.ui.graphics.Shape = when (this) {
+    LinePosition.ONLY -> RoundedCornerShape(20.dp)
+    LinePosition.FIRST -> RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)
+    LinePosition.MIDDLE -> RoundedCornerShape(0.dp)
+    LinePosition.LAST -> RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp)
 }
 
 @Composable
@@ -848,7 +898,7 @@ private fun CorrectionReviewCard(
 }
 
 @Composable
-internal fun MarkdownText(markdown: String, modifier: Modifier = Modifier) {
+internal fun MarkdownText(markdown: String, modifier: Modifier = Modifier, maxLines: Int = Int.MAX_VALUE) {
     val context = LocalContext.current
     val borderColor = MaterialTheme.colorScheme.outlineVariant.toArgb()
     val headerColor = MaterialTheme.colorScheme.secondaryContainer.toArgb()
@@ -873,6 +923,8 @@ internal fun MarkdownText(markdown: String, modifier: Modifier = Modifier) {
             view.setTextColor(color)
             view.setLinkTextColor(linkColor)
             view.textSize = fontSize
+            view.maxLines = maxLines
+            view.ellipsize = if (maxLines == Int.MAX_VALUE) null else android.text.TextUtils.TruncateAt.END
             markwon.setMarkdown(view, markdown)
         }
     )
@@ -903,6 +955,13 @@ private object MarkdownRenderer {
                 .usePlugin(StrikethroughPlugin.create())
                 .usePlugin(TaskListPlugin.create(context.applicationContext))
                 .usePlugin(HtmlPlugin.create())
+                .usePlugin(object : io.noties.markwon.AbstractMarkwonPlugin() {
+                    // Markwon's 2x/1.5x headings dwarf phone-width notes; keep them a step above body text.
+                    override fun configureTheme(builder: io.noties.markwon.core.MarkwonTheme.Builder) {
+                        builder.headingTextSizeMultipliers(floatArrayOf(1.25f, 1.15f, 1.08f, 1f, 1f, 1f))
+                            .headingBreakHeight(0)
+                    }
+                })
                 .build()
         }
     }

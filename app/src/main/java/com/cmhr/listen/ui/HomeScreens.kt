@@ -1,5 +1,13 @@
 package com.cmhr.listen.ui
 
+import androidx.compose.material3.Surface
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.Button
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.foundation.background
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -60,7 +68,7 @@ import java.util.Date
 import java.util.Locale
 
 /** Content padding that keeps the last list row clear of the extended FAB. */
-internal val ListWithFabPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 104.dp)
+internal val ListWithFabPadding = PaddingValues(start = 16.dp, top = 8.dp, end = 16.dp, bottom = 104.dp)
 
 /**
  * 录音 tab: start a class first, file it under a course afterwards. The course is only a guess at
@@ -80,12 +88,14 @@ fun RecordHomeScreen(
     openRecord: (SessionSummary) -> Unit,
     openActiveRecord: () -> Unit,
     pause: () -> Unit = {},
-    resume: () -> Unit = {}
+    resume: () -> Unit = {},
+    now: Long = System.currentTimeMillis()
 ) {
+    val groups = remember(recent, now) { recent.groupBy { recentGroupLabel(it.session.startedAt, now) } }
     LazyColumn(
         Modifier.fillMaxSize().testTag("record-home-list"),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         item("quick-start") {
             val paused = listening.pausedClass
@@ -98,20 +108,45 @@ fun RecordHomeScreen(
                 else -> StartClassCard(startCourse, suggestion, listening, processing, pickCourse, start)
             }
         }
-        item("recent-heading") { HomeSectionTitle("最近课堂") }
         if (recent.isEmpty()) item("empty-recent") {
-            Text("录过的课会按时间显示在这里。", color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        items(recent, key = { "recent-${it.session.id}" }) { summary ->
-            SessionRow(
-                summary = summary,
-                showCourse = true,
-                capturing = listening.isListening && listening.activeRecordId == summary.session.id,
-                pendingRecordings = pendingRecordingCounts[summary.session.id] ?: 0,
-                open = { openRecord(summary) },
-                menu = null
+            Text(
+                "录过的课会按时间显示在这里。",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp)
             )
         }
+        groups.forEach { (label, sessions) ->
+            item("recent-heading-$label") { SectionHeader(label, Modifier.padding(top = 6.dp)) }
+            item("recent-group-$label") {
+                ListGroup {
+                    sessions.forEachIndexed { index, summary ->
+                        if (index > 0) ListDivider()
+                        SessionRow(
+                            summary = summary,
+                            showCourse = true,
+                            capturing = listening.isListening && listening.activeRecordId == summary.session.id,
+                            paused = !listening.isListening && listening.pausedClass?.recordId == summary.session.id,
+                            pendingRecordings = pendingRecordingCounts[summary.session.id] ?: 0,
+                            open = { openRecord(summary) },
+                            menu = null
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** 今天 / 本周 / 更早, so a long history still opens on this week's classes. */
+internal fun recentGroupLabel(startedAt: Long, now: Long): String {
+    val zone = java.time.ZoneId.systemDefault()
+    val day = java.time.Instant.ofEpochMilli(startedAt).atZone(zone).toLocalDate()
+    val today = java.time.Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
+    val weekStart = today.with(java.time.DayOfWeek.MONDAY)
+    return when {
+        day == today -> "今天"
+        !day.isBefore(weekStart) && day.isBefore(today) -> "本周"
+        else -> "更早"
     }
 }
 
@@ -120,18 +155,30 @@ fun RecordHomeScreen(
 fun CoursesTabScreen(
     courses: List<CourseSummary>,
     openCourse: (Long) -> Unit,
-    courseMenu: @Composable (CourseSummary) -> Unit
+    courseMenu: @Composable (CourseSummary) -> Unit,
+    pendingByCourse: Map<Long, Int> = emptyMap()
 ) {
     LazyColumn(
         Modifier.fillMaxSize().testTag("courses-tab-list"),
         contentPadding = ListWithFabPadding,
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         if (courses.isEmpty()) item("empty-courses") {
-            Text("还没有课程。在「录音」页开始上课时起个名字，或用右下角按钮新建。", color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        items(courses, key = { "course-${it.course.id}" }) { summary ->
-            CourseRow(summary, open = { openCourse(summary.course.id) }) { courseMenu(summary) }
+            Text(
+                "还没有课程。在「录音」页开始上课时起个名字，或用右下角按钮新建。",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(4.dp)
+            )
+        } else {
+            item("courses-heading") { SectionHeader("按最近上课排序") }
+            item("courses-group") {
+                ListGroup {
+                    courses.forEachIndexed { index, summary ->
+                        if (index > 0) ListDivider(72.dp)
+                        CourseRow(summary, pendingByCourse[summary.course.id] ?: 0, open = { openCourse(summary.course.id) }) { courseMenu(summary) }
+                    }
+                }
+            }
         }
     }
 }
@@ -146,34 +193,49 @@ private fun StartClassCard(
     start: (CaptureMode) -> Unit
 ) {
     val blocked = if (processing.isProcessing) "正在识别录音，暂停或完成后才能开始上课。" else null
-    Card(Modifier.fillMaxWidth().testTag("start-class-card")) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("开始上课", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
-                AssistChip(
-                    onClick = pickCourse,
-                    label = { Text(course?.course?.name ?: "选择课程", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                    trailingIcon = { Icon(Icons.Outlined.ExpandMore, contentDescription = null) },
-                    modifier = Modifier.testTag("start-course-chip")
-                )
+    Surface(
+        Modifier.fillMaxWidth().testTag("start-class-card"),
+        shape = RoundedCornerShape(24.dp),
+        color = groupColor(),
+        border = groupBorder()
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Surface(
+                onClick = pickCourse,
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerLow,
+                modifier = Modifier.fillMaxWidth().testTag("start-course-chip")
+            ) {
+                Row(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    if (course != null) CourseBadge(course.course.id, course.course.name)
+                    else Box(Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceContainerHigh), contentAlignment = Alignment.Center) {
+                        Icon(Icons.Outlined.Add, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(course?.course?.name ?: "选择课程", style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            when {
+                                course == null -> "先给课程起个名字"
+                                suggestion?.courseId == course.course.id && suggestion.reason == CourseSuggestion.Reason.USUAL_TIME ->
+                                    "按你平时的上课时间猜的 · 点此更换"
+                                else -> "点此更换课程"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Icon(Icons.Outlined.ExpandMore, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                StartModeButton(Modifier.weight(1f), CaptureMode.REALTIME_ASR, blocked == null, start)
+                StartModeButton(Modifier.weight(1f), CaptureMode.RECORD_ONLY, blocked == null, start)
             }
             Text(
-                when {
-                    course == null -> "第一次使用需要先给课程起个名字。"
-                    suggestion?.courseId == course.course.id && suggestion.reason == CourseSuggestion.Reason.USUAL_TIME ->
-                        "按你平时的上课时间猜的；录完会再确认一次。"
-                    else -> "录完会再确认保存到哪门课。"
-                },
+                blocked ?: listening.error ?: "录完会再确认保存到哪门课。",
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = if (blocked == null && listening.error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
             )
-            Row(Modifier.fillMaxWidth().heightIn(min = 96.dp).height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                StartModeButton(Modifier.weight(1f).fillMaxHeight(), CaptureMode.REALTIME_ASR, blocked == null, start)
-                StartModeButton(Modifier.weight(1f).fillMaxHeight(), CaptureMode.RECORD_ONLY, blocked == null, start)
-            }
-            (blocked ?: listening.error)?.let {
-                Text(it, style = MaterialTheme.typography.bodySmall, color = if (blocked != null) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error)
-            }
         }
     }
 }
@@ -181,14 +243,15 @@ private fun StartClassCard(
 @Composable
 private fun StartModeButton(modifier: Modifier, mode: CaptureMode, enabled: Boolean, start: (CaptureMode) -> Unit) {
     val realtime = mode == CaptureMode.REALTIME_ASR
-    CaptureModeButton(
-        modifier = modifier.testTag(if (realtime) "home-start-realtime" else "home-start-record-only"),
-        icon = if (realtime) Icons.Outlined.Mic else Icons.Outlined.FiberManualRecord,
-        title = if (realtime) "实时转写" else "仅录音",
-        subtitle = if (realtime) "边录边出文字" else "稍后再识别",
-        enabled = enabled,
-        emphasized = realtime
-    ) { start(mode) }
+    val tag = if (realtime) "home-start-realtime" else "home-start-record-only"
+    val content: @Composable () -> Unit = {
+        if (realtime) Icon(Icons.Outlined.Mic, contentDescription = null, modifier = Modifier.size(20.dp))
+        else Box(Modifier.size(12.dp).clip(CircleShape).background(if (enabled) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outline))
+        Spacer(Modifier.width(8.dp))
+        Text(if (realtime) "实时转写" else "仅录音", style = MaterialTheme.typography.titleMedium)
+    }
+    if (realtime) Button(onClick = { start(mode) }, enabled = enabled, modifier = modifier.height(56.dp).testTag(tag), shape = RoundedCornerShape(18.dp)) { content() }
+    else OutlinedButton(onClick = { start(mode) }, enabled = enabled, modifier = modifier.height(56.dp).testTag(tag), shape = RoundedCornerShape(18.dp)) { content() }
 }
 
 @Composable
@@ -210,17 +273,10 @@ private fun ActiveClassCard(listening: ListeningUiState, open: () -> Unit, pause
     }
 }
 
-@Composable
-private fun HomeSectionTitle(title: String, detail: String? = null) {
-    Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.Bottom) {
-        Text(title, style = MaterialTheme.typography.titleMedium)
-        detail?.let {
-            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 8.dp, bottom = 1.dp))
-        }
-    }
-}
-
-/** A class record row: what, when (with weekday), how much text, and what still needs doing. */
+/**
+ * A class in a list. On home it leads with the course badge; inside a course (where the course is
+ * implied) it leads with the date, which is what you scan for there.
+ */
 @Composable
 internal fun SessionRow(
     summary: SessionSummary,
@@ -228,52 +284,84 @@ internal fun SessionRow(
     capturing: Boolean,
     pendingRecordings: Int,
     open: () -> Unit,
-    menu: (@Composable () -> Unit)?
+    menu: (@Composable () -> Unit)?,
+    paused: Boolean = false
 ) {
     val session = summary.session
-    Card(Modifier.fillMaxWidth().clickable(onClick = open).testTag("session-${session.id}")) {
-        Row(Modifier.fillMaxWidth().padding(start = 16.dp, top = 12.dp, end = 4.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text(
-                    if (showCourse) summary.courseName else session.name,
-                    style = MaterialTheme.typography.titleMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    listOfNotNull(
-                        formatSessionWhen(session.startedAt, session.endedAt),
-                        "${summary.segmentCount} 段".takeIf { summary.segmentCount > 0 }
-                    ).joinToString(" · "),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                when {
-                    capturing -> Text("● 正在录制", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelMedium)
-                    pendingRecordings > 0 -> Text("$pendingRecordings 段录音待识别", color = MaterialTheme.colorScheme.tertiary, style = MaterialTheme.typography.labelMedium)
-                }
-            }
-            if (menu != null) menu() else Spacer(Modifier.width(12.dp))
-        }
+    // Home names the course and number; inside a course the number and topic say enough.
+    val title = if (showCourse) classTitle(summary.courseName, summary.classNumber, null, session.name)
+    else classTitle(null, summary.classNumber, session.topic, session.name)
+    ListRow(
+        title = title,
+        subtitle = sessionSubtitle(summary, includeDay = showCourse, includeTopic = showCourse),
+        modifier = Modifier.testTag("session-${session.id}"),
+        leading = {
+            if (showCourse) CourseBadge(session.courseId, summary.courseName, 38.dp) else DateBlock(session.startedAt)
+        },
+        status = when {
+            capturing -> ({ StatusPill("录制中", StatusTone.PROBLEM) })
+            paused -> ({ StatusPill("已暂停", StatusTone.READY) })
+            pendingRecordings > 0 -> ({ StatusPill("$pendingRecordings 段录音待识别", StatusTone.READY) })
+            else -> null
+        },
+        trailing = menu ?: { ChevronIcon() },
+        onClick = open
+    )
+}
+
+/** "函数的极限 · 周二 10:05–11:40 · 笔记 · 2 处重点"; today's classes leave out the day. */
+internal fun sessionSubtitle(summary: SessionSummary, includeDay: Boolean, includeTopic: Boolean = false, now: Long = System.currentTimeMillis()): String {
+    val session = summary.session
+    val time = SimpleDateFormat("HH:mm", Locale.CHINA)
+    val day = when {
+        !includeDay -> ""
+        recentGroupLabel(session.startedAt, now) == "今天" -> ""
+        recentGroupLabel(session.startedAt, now) == "本周" -> SimpleDateFormat("EEE ", Locale.CHINA).format(Date(session.startedAt))
+        else -> SimpleDateFormat("M月d日 ", Locale.CHINA).format(Date(session.startedAt))
+    }
+    val span = "$day${time.format(Date(session.startedAt))}" + (session.endedAt?.let { "–${time.format(Date(it))}" } ?: "")
+    return listOfNotNull(
+        session.topic?.takeIf { includeTopic && it.isNotBlank() },
+        span,
+        when {
+            summary.noteCount > 0 -> "笔记"
+            summary.segmentCount > 0 -> "${summary.segmentCount} 段文字"
+            else -> null
+        },
+        summary.markCount.takeIf { it > 0 }?.let { "$it 处重点" }
+    ).joinToString(" · ")
+}
+
+internal fun formatSpanMinutes(durationMs: Long): String? {
+    val minutes = (durationMs / 60_000).toInt()
+    return when {
+        minutes <= 0 -> null
+        minutes < 60 -> "$minutes 分钟"
+        minutes % 60 == 0 -> "${minutes / 60} 小时"
+        else -> "${minutes / 60} 小时 ${minutes % 60} 分"
     }
 }
 
 @Composable
-private fun CourseRow(summary: CourseSummary, open: () -> Unit, menu: @Composable () -> Unit) {
-    Card(Modifier.fillMaxWidth().clickable(onClick = open).testTag("course-${summary.course.id}")) {
-        Row(Modifier.fillMaxWidth().padding(start = 16.dp, top = 12.dp, end = 4.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text(summary.course.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(
-                    if (summary.recordCount == 0) "还没有课堂"
-                    else "${summary.recordCount} 节课" + (summary.lastStartedAt?.let { " · 最近 ${formatDayWithWeekday(it)}" } ?: ""),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            menu()
-        }
+private fun DateBlock(at: Long) {
+    Column(Modifier.width(40.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(SimpleDateFormat("EEE", Locale.CHINA).format(Date(at)), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(SimpleDateFormat("d", Locale.CHINA).format(Date(at)), style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold))
     }
+}
+
+@Composable
+private fun CourseRow(summary: CourseSummary, pendingRecordings: Int, open: () -> Unit, menu: @Composable () -> Unit) {
+    ListRow(
+        title = summary.course.name,
+        subtitle = if (summary.recordCount == 0) "还没有课堂"
+        else "${summary.recordCount} 节课" + (summary.lastStartedAt?.let { " · 最近 ${formatDayWithWeekday(it)}" } ?: ""),
+        modifier = Modifier.testTag("course-${summary.course.id}"),
+        leading = { CourseBadge(summary.course.id, summary.course.name, 44.dp) },
+        status = if (pendingRecordings > 0) ({ StatusPill("$pendingRecordings 段待识别", StatusTone.READY) }) else null,
+        trailing = menu,
+        onClick = open
+    )
 }
 
 /** Overflow menu with labelled actions; replaces rows of small unlabeled icon buttons. */
@@ -322,7 +410,8 @@ internal fun CoursePickerDialog(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             RadioButton(selected = selected == summary.course.id, onClick = null)
-                            Text(summary.course.name, Modifier.padding(start = 12.dp).weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            CourseBadge(summary.course.id, summary.course.name, 28.dp, Modifier.padding(start = 8.dp))
+                            Text(summary.course.name, Modifier.padding(start = 10.dp).weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
                     item("create-course") {

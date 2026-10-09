@@ -144,6 +144,17 @@ class CourseViewModel(application: Application) : AndroidViewModel(application) 
         onComplete()
     }
 
+    fun recordSummary(id: Long) = repository.recordSummary(id)
+    fun searchSegments(query: String, onlyMarked: Boolean) = repository.searchSegments(query, onlyMarked)
+    fun searchNotes(query: String) = repository.searchNotes(query)
+    fun markMoment(recordId: Long) = viewModelScope.launch { repository.markMoment(recordId) }
+    fun setMarked(recordId: Long, ids: Set<Long>, marked: Boolean, onComplete: () -> Unit = {}) = viewModelScope.launch {
+        repository.setMarked(recordId, ids, marked)
+        onComplete()
+    }
+    fun setCourseColor(courseId: Long, colorIndex: Int?) = viewModelScope.launch { settings.setCourseColor(courseId, colorIndex) }
+    val courseColors = settings.settings.map { it.courseColors }.distinctUntilChanged()
+
     private companion object {
         const val RECENT_LIMIT = 30
     }
