@@ -64,7 +64,9 @@ data class ListeningUiState(
     /** Record-only: audio already fsynced to disk, i.e. what survives a process kill. */
     val recordOnlySavedMs: Long = 0,
     /** A class the user paused: not capturing, but not ended either (no filing, resumes in place). */
-    val pausedClass: PausedClass? = null
+    val pausedClass: PausedClass? = null,
+    /** Set between 继续 and the microphone actually running, so the class never looks "ended". */
+    val resumingRecordId: Long? = null
 )
 
 data class PausedClass(
@@ -97,6 +99,8 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
     private var resumeOffsetMs = 0L
     /** Set by [pause] before stopping; turned into [ListeningUiState.pausedClass] once capture has stopped. */
     private var pendingPause: PausedClass? = null
+    /** The paused class being resumed; restored if capture fails to start. */
+    private var resumeFrom: PausedClass? = null
     private var sessionStartedAtMs = 0L
     private var sessionRecordId: Long? = null
     private var currentCapturingSegmentId: String? = null
@@ -116,9 +120,15 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
             captureRuntime.state.collect { capture ->
                 if (capture.mode == CaptureMode.RECORD_ONLY || capture.error != null || (_uiState.value.captureMode == CaptureMode.RECORD_ONLY && !capture.active)) {
                     val paused = if (!capture.active) takePendingPause() else null
+                    if (capture.active) resumeFrom = null
+                    else if (capture.error != null && resumeFrom != null) {
+                        resumeFailed()
+                        return@collect
+                    }
                     _uiState.update { current ->
                         current.copy(
                             pausedClass = if (capture.active) null else paused ?: current.pausedClass,
+                            resumingRecordId = if (capture.active) null else current.resumingRecordId,
                             isListening = capture.active,
                             activeRecordId = capture.recordId,
                             listeningStartedAtElapsedRealtimeMs = capture.startedElapsedMs,
@@ -188,22 +198,26 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
         resumeOffsetMs = elapsedOffsetMs.coerceAtLeast(0)
         if (listeningJob?.isActive == true) {
             if (sessionRecordId != recordId) {
-                _uiState.update { it.copy(error = "当前正在记录其他课堂，请先停止监听。") }
+                _uiState.update { it.copy(error = "当前正在记录其他课堂，请先结束。") }
+                resumeFailed()
             }
             return
         }
         when {
             !currentServer.hasApiKey -> {
                 _uiState.update { it.copy(error = "请先在设置中填写 API Key。") }
+                resumeFailed()
                 return
             }
             currentServer.baseUrl.isBlank() -> {
                 _uiState.update { it.copy(error = "请先在设置中填写服务器地址。") }
+                resumeFailed()
                 return
             }
         }
         if (!captureRuntime.tryClaimRealtime(recordId)) {
             _uiState.update { it.copy(error = "当前已有录音或识别任务正在运行。") }
+            resumeFailed()
             return
         }
         _uiState.update { it.copy(pausedClass = null) }
@@ -234,6 +248,7 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update {
                 it.copy(
                     isListening = true,
+                    resumingRecordId = null,
                     isSpeechDetected = false,
                     activeRecordId = recordId,
                     listeningStartedAtElapsedRealtimeMs = SystemClock.elapsedRealtime() - resumeOffsetMs,
@@ -415,7 +430,8 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
     /** Continues a paused class in the same record, with the same mode and a continuous clock. */
     fun resume() {
         val paused = _uiState.value.pausedClass ?: return
-        _uiState.update { it.copy(pausedClass = null, error = null) }
+        resumeFrom = paused
+        _uiState.update { it.copy(pausedClass = null, resumingRecordId = paused.recordId, error = null) }
         if (paused.mode == CaptureMode.RECORD_ONLY) startRecordOnly(paused.recordId, paused.elapsedMs)
         else startListening(paused.recordId, paused.elapsedMs)
     }
@@ -423,11 +439,19 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
     /** Ends the class whether it is capturing or paused. */
     fun endClass() {
         pendingPause = null
-        _uiState.update { it.copy(pausedClass = null) }
+        resumeFrom = null
+        _uiState.update { it.copy(pausedClass = null, resumingRecordId = null) }
         if (_uiState.value.isListening) stopListening()
     }
 
     private fun takePendingPause(): PausedClass? = pendingPause.also { pendingPause = null }
+
+    /** Capture could not start: go back to the paused state so the user can retry or end. */
+    private fun resumeFailed() {
+        val paused = resumeFrom ?: return
+        resumeFrom = null
+        _uiState.update { it.copy(pausedClass = paused, resumingRecordId = null) }
+    }
 
     fun stopListening() {
         _vadDiagnosticsState.update { it.copy(segmentEndReason = "用户停止录制") }
@@ -443,6 +467,7 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
     private fun startRecordOnly(recordId: Long, elapsedOffsetMs: Long) {
         if (captureRuntime.isBusy()) {
             _uiState.update { it.copy(error = "当前已有录音或识别任务正在运行。") }
+            resumeFailed()
             return
         }
         // Starting any capture supersedes a paused class (a paused class elsewhere is simply ended).

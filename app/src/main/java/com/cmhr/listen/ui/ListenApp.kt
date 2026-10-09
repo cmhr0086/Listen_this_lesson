@@ -59,7 +59,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.ui.Alignment
@@ -96,7 +95,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Locale
 
-private enum class MainDestination(val route: String, val label: String) {
+internal enum class MainDestination(val route: String, val label: String) {
     RECORD("record-home", "录音"),
     COURSES("courses", "课程"),
     AI("ai", "AI 会话"),
@@ -139,15 +138,15 @@ private fun isAiWorkspaceRoute(route: String?): Boolean =
     route?.contains("ai-results") == true || route?.contains("ai-result/") == true || route?.startsWith("ai-conversation/") == true
 
 /**
- * Tab that owns [route]. Course and record pages can be reached from both 录音 and 课程, so they
- * stay under whichever tab the user came from ([fallback]) instead of jumping.
+ * Tab that owns a page, decided by what the page is rather than how it was reached: the class that
+ * is recording or paused ([liveRecordId]) belongs to 录音, every other course/class page to 课程.
  */
-private fun mainDestinationForRoute(route: String?, fallback: MainDestination = MainDestination.RECORD): MainDestination = when {
+internal fun mainDestinationForRoute(route: String?, recordId: Long? = null, liveRecordId: Long? = null): MainDestination = when {
     isSettingsRoute(route) -> MainDestination.SETTINGS
     route == "ai" || route?.startsWith("ai/new") == true || route?.startsWith("ai-conversation/") == true || route?.startsWith("ai/result/") == true -> MainDestination.AI
     route == MainDestination.RECORD.route -> MainDestination.RECORD
-    route == MainDestination.COURSES.route -> MainDestination.COURSES
-    else -> fallback
+    route == "record/{recordId}" && recordId != null && recordId == liveRecordId -> MainDestination.RECORD
+    else -> MainDestination.COURSES
 }
 
 /** What to do with a course created from the "新建课程" dialog. */
@@ -201,12 +200,9 @@ fun ListenApp(
     val nav = rememberNavController()
     val backStackEntry by nav.currentBackStackEntryAsState()
     val route = backStackEntry?.destination?.route ?: MainDestination.RECORD.route
-    var lastMainTab by rememberSaveable { mutableStateOf(MainDestination.RECORD) }
-    LaunchedEffect(route) {
-        if (route == MainDestination.RECORD.route || route == MainDestination.COURSES.route) lastMainTab = mainDestinationForRoute(route)
-    }
-    val currentTab = mainDestinationForRoute(route, lastMainTab)
     val sttState by stt.uiState.collectAsStateWithLifecycle()
+    val liveRecordId = sttState.activeRecordId ?: sttState.pausedClass?.recordId
+    val currentTab = mainDestinationForRoute(route, backStackEntry?.arguments?.getString("recordId")?.toLongOrNull(), liveRecordId)
     val courseState by courses.uiState.collectAsStateWithLifecycle()
     val settingsState by settings.uiState.collectAsStateWithLifecycle()
     val aiState by ai.uiState.collectAsStateWithLifecycle()
@@ -362,8 +358,9 @@ fun ListenApp(
         val awaiting = awaitingFilingRecordId ?: return@LaunchedEffect
         val capturingIt = sttState.isListening && sttState.activeRecordId == awaiting
         val pausedIt = !sttState.isListening && sttState.pausedClass?.recordId == awaiting
+        val resumingIt = sttState.resumingRecordId == awaiting
         if (capturingIt) filingCaptureSeen = true
-        else if (filingCaptureSeen && !pausedIt) {
+        else if (filingCaptureSeen && !pausedIt && !resumingIt) {
             filingRecordId = awaiting
             awaitingFilingRecordId = null
             filingCaptureSeen = false
@@ -636,12 +633,11 @@ fun ListenApp(
                         NavigationBarItem(
                             selected = selected,
                             onClick = {
-                                // Restored tab stacks may land on a nested page; remember the tab explicitly.
-                                lastMainTab = destination
                                 nav.navigate(destination.route) {
                                     launchSingleTop = true
                                     popUpTo(MainDestination.RECORD.route) { saveState = true }
-                                    restoreState = true
+                                    // 录音 always opens its own page; other tabs restore where the user was.
+                                    restoreState = destination != MainDestination.RECORD
                                 }
                             },
                             icon = {
@@ -689,12 +685,12 @@ fun ListenApp(
             startDestination = MainDestination.RECORD.route,
             modifier = Modifier.padding(padding),
             enterTransition = {
-                val direction = if (mainDestinationForRoute(targetState.destination.route, lastMainTab).ordinal >= mainDestinationForRoute(initialState.destination.route, lastMainTab).ordinal)
+                val direction = if (mainDestinationForRoute(targetState.destination.route).ordinal >= mainDestinationForRoute(initialState.destination.route).ordinal)
                     AnimatedContentTransitionScope.SlideDirection.Left else AnimatedContentTransitionScope.SlideDirection.Right
                 slideIntoContainer(direction, tween(220))
             },
             exitTransition = {
-                val direction = if (mainDestinationForRoute(targetState.destination.route, lastMainTab).ordinal >= mainDestinationForRoute(initialState.destination.route, lastMainTab).ordinal)
+                val direction = if (mainDestinationForRoute(targetState.destination.route).ordinal >= mainDestinationForRoute(initialState.destination.route).ordinal)
                     AnimatedContentTransitionScope.SlideDirection.Left else AnimatedContentTransitionScope.SlideDirection.Right
                 slideOutOfContainer(direction, tween(220))
             },
@@ -798,6 +794,7 @@ fun ListenApp(
                     stopCapture = stt::endClass,
                     pauseCapture = stt::pause,
                     resumeCapture = stt::resume,
+                    recognizeAll = { recordings.recognizeAll(id) },
                     startOfflineRecognition = recordings::startRecognition,
                     stopOfflineRecognition = recordings::stopRecognition,
                     deleteRecording = recordings::deleteRecording

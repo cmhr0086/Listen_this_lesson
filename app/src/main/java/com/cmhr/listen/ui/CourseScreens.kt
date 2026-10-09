@@ -5,6 +5,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -170,6 +171,7 @@ fun RecordDetailsScreen(
     stopCapture: () -> Unit,
     pauseCapture: () -> Unit = {},
     resumeCapture: () -> Unit = {},
+    recognizeAll: () -> Unit = {},
     startOfflineRecognition: (String) -> Unit,
     stopOfflineRecognition: () -> Unit,
     deleteRecording: (String) -> Unit
@@ -271,7 +273,21 @@ fun RecordDetailsScreen(
                     }
                 } else if (recordings.recordings.isNotEmpty()) {
                     item("recordings-heading") {
-                        SectionHeading("录音", "${recordings.recordings.size} 段 · 共 ${formatClockDuration(recordings.recordings.totalDurationMs())}")
+                        val pending = recordings.recordings.count { it.recordingState.canStartRecognition }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.weight(1f)) {
+                                SectionHeading("录音", "${recordings.recordings.size} 段 · 共 ${formatClockDuration(recordings.recordings.totalDurationMs())}")
+                            }
+                            when {
+                                recordings.recognizingAllRecordId == recordId ->
+                                    Text("正在依次识别…", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 8.dp))
+                                pending >= 2 -> TextButton(
+                                    onClick = recognizeAll,
+                                    enabled = !listening.isListening && !recordings.processing.isProcessing,
+                                    modifier = Modifier.padding(top = 8.dp).testTag("recognize-all")
+                                ) { Text("全部识别（$pending）") }
+                            }
+                        }
                     }
                     val recognitionAllowed = !listening.isListening && !recordings.processing.isProcessing
                     val numbered = recordings.recordings.sortedBy { it.startedAt }.withIndex().associate { (index, value) -> value.recordingId to index + 1 }
