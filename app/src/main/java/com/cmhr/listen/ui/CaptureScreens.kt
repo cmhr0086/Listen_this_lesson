@@ -25,6 +25,10 @@ import androidx.compose.material.icons.outlined.FiberManualRecord
 import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Stop
+import com.cmhr.listen.PausedClass
+import androidx.compose.material.icons.outlined.ArrowDownward
+import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -68,7 +72,7 @@ import java.util.Locale
 /** Why capture cannot start on this record right now, or null when it can. */
 internal fun captureBlockedReason(listening: ListeningUiState, recordId: Long, processing: OfflineRecognitionState): String? = when {
     listening.isListening && listening.activeRecordId != recordId ->
-        "「${listening.currentRecordName ?: "另一节课"}」正在录制，停止后才能在这里开始。"
+        "「${listening.currentRecordName ?: "另一节课"}」正在录制，结束后才能在这里开始。"
     processing.isProcessing -> "正在识别录音，暂停或完成后才能开始录制。"
     else -> null
 }
@@ -84,11 +88,15 @@ internal fun CapturePanel(
     processing: OfflineRecognitionState,
     start: (CaptureMode) -> Unit,
     stop: () -> Unit,
-    compact: Boolean = false
+    compact: Boolean = false,
+    pause: () -> Unit = {},
+    resume: () -> Unit = {}
 ) {
     val activeHere = listening.isListening && listening.activeRecordId == recordId
+    val pausedHere = !listening.isListening && listening.pausedClass?.recordId == recordId
     when {
-        activeHere -> ActiveCapturePanel(listening, stop)
+        activeHere -> ActiveCapturePanel(listening, pause, stop)
+        pausedHere -> PausedCapturePanel(listening.pausedClass!!, resume, stop)
         compact -> CompactCaptureRow(captureBlockedReason(listening, recordId, processing), start)
         else -> IdleCapturePanel(captureBlockedReason(listening, recordId, processing), listening.error, start)
     }
@@ -162,7 +170,7 @@ internal fun CaptureModeButton(
 }
 
 @Composable
-private fun ActiveCapturePanel(listening: ListeningUiState, stop: () -> Unit) {
+private fun ActiveCapturePanel(listening: ListeningUiState, pause: () -> Unit, stop: () -> Unit) {
     val recordOnly = listening.captureMode == CaptureMode.RECORD_ONLY
     Card(
         Modifier.fillMaxWidth().testTag("capture-panel"),
@@ -192,15 +200,7 @@ private fun ActiveCapturePanel(listening: ListeningUiState, stop: () -> Unit) {
                 )
             }
             listening.error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
-            Button(
-                onClick = stop,
-                modifier = Modifier.fillMaxWidth().padding(top = 4.dp).testTag("stop-capture"),
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError)
-            ) {
-                Icon(Icons.Outlined.Stop, contentDescription = null)
-                Spacer(Modifier.width(6.dp))
-                Text(if (recordOnly) "停止录音" else "停止转写")
-            }
+            PauseEndButtons(pause, stop, Modifier.padding(top = 4.dp))
         }
     }
 }
@@ -213,7 +213,7 @@ private fun PulsingDot(color: Color) {
 }
 
 @Composable
-private fun ElapsedClock(startedAt: Long?) {
+private fun ElapsedClock(startedAt: Long?, compact: Boolean = false) {
     var elapsedMs by remember(startedAt) { mutableLongStateOf(0L) }
     LaunchedEffect(startedAt) {
         while (startedAt != null) {
@@ -223,9 +223,128 @@ private fun ElapsedClock(startedAt: Long?) {
     }
     Text(
         formatClockDuration(elapsedMs, alwaysHours = true),
-        style = MaterialTheme.typography.titleLarge.copy(fontFeatureSettings = "tnum"),
+        style = (if (compact) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleLarge).copy(fontFeatureSettings = "tnum"),
         fontWeight = FontWeight.Medium
     )
+}
+
+/** 暂停 keeps the class open; 结束 ends it (and asks where to file a class started from 录音). */
+@Composable
+private fun PauseEndButtons(pause: () -> Unit, end: () -> Unit, modifier: Modifier = Modifier) {
+    Row(modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        FilledTonalButton(onClick = pause, modifier = Modifier.weight(1f).testTag("pause-capture")) {
+            Icon(Icons.Outlined.Pause, contentDescription = null)
+            Spacer(Modifier.width(6.dp))
+            Text("暂停")
+        }
+        Button(
+            onClick = end,
+            modifier = Modifier.weight(1f).testTag("stop-capture"),
+            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError)
+        ) {
+            Icon(Icons.Outlined.Stop, contentDescription = null)
+            Spacer(Modifier.width(6.dp))
+            Text("结束")
+        }
+    }
+}
+
+@Composable
+internal fun PausedCapturePanel(paused: PausedClass, resume: () -> Unit, end: () -> Unit, title: String? = null) {
+    Card(
+        Modifier.fillMaxWidth().testTag("paused-panel"),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Outlined.Pause, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text(title ?: "已暂停", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f), maxLines = 1)
+                Text(formatClockDuration(paused.elapsedMs, alwaysHours = true), style = MaterialTheme.typography.titleLarge.copy(fontFeatureSettings = "tnum"))
+            }
+            Text(
+                (if (paused.mode == CaptureMode.RECORD_ONLY) "仅录音" else "实时转写") + " · 继续会接着录到这节课",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onTertiaryContainer
+            )
+            Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(onClick = resume, modifier = Modifier.weight(1f).testTag("resume-capture")) {
+                    Icon(Icons.Outlined.PlayArrow, contentDescription = null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("继续")
+                }
+                OutlinedButton(onClick = end, modifier = Modifier.weight(1f).testTag("end-paused")) { Text("结束") }
+            }
+        }
+    }
+}
+
+/**
+ * Bottom bar of the class page: capture controls stay reachable while reading, instead of living at
+ * the top of a long transcript.
+ */
+@Composable
+internal fun CaptureControlBar(
+    recordId: Long,
+    listening: ListeningUiState,
+    processing: OfflineRecognitionState,
+    start: (CaptureMode) -> Unit,
+    pause: () -> Unit,
+    resume: () -> Unit,
+    end: () -> Unit,
+    jumpToLatest: (() -> Unit)?
+) {
+    val activeHere = listening.isListening && listening.activeRecordId == recordId
+    val paused = listening.pausedClass?.takeIf { !listening.isListening && it.recordId == recordId }
+    val blocked = captureBlockedReason(listening, recordId, processing)
+    Surface(tonalElevation = 3.dp, shadowElevation = 6.dp, modifier = Modifier.fillMaxWidth().testTag("capture-bar")) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            when {
+                activeHere -> {
+                    PulsingDot(if (listening.captureMode == CaptureMode.RECORD_ONLY) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
+                    Column(Modifier.weight(1f)) {
+                        ElapsedClock(listening.listeningStartedAtElapsedRealtimeMs, compact = true)
+                        Text(
+                            if (listening.captureMode == CaptureMode.RECORD_ONLY) "仅录音 · 已保存 ${formatClockDuration(listening.recordOnlySavedMs)}"
+                            else if (listening.pendingQueueCount > 0) "实时转写 · ${listening.pendingQueueCount} 段识别中" else "实时转写",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    FilledTonalButton(onClick = pause, modifier = Modifier.testTag("bar-pause")) { Icon(Icons.Outlined.Pause, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("暂停") }
+                    Button(
+                        onClick = end,
+                        modifier = Modifier.testTag("bar-end"),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError)
+                    ) { Text("结束") }
+                }
+                paused != null -> {
+                    Icon(Icons.Outlined.Pause, contentDescription = null, tint = MaterialTheme.colorScheme.tertiary)
+                    Column(Modifier.weight(1f)) {
+                        Text("已暂停 ${formatClockDuration(paused.elapsedMs, alwaysHours = true)}", style = MaterialTheme.typography.titleSmall)
+                        Text(if (paused.mode == CaptureMode.RECORD_ONLY) "仅录音" else "实时转写", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Button(onClick = resume, modifier = Modifier.testTag("bar-resume")) { Icon(Icons.Outlined.PlayArrow, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("继续") }
+                    OutlinedButton(onClick = end, modifier = Modifier.testTag("bar-end-paused")) { Text("结束") }
+                }
+                blocked != null -> Text(blocked, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+                else -> {
+                    Text("继续录制", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+                    OutlinedButton(onClick = { start(CaptureMode.REALTIME_ASR) }, modifier = Modifier.testTag("bar-start-realtime")) { Text("实时转写") }
+                    OutlinedButton(onClick = { start(CaptureMode.RECORD_ONLY) }, modifier = Modifier.testTag("bar-start-record-only")) { Text("仅录音") }
+                }
+            }
+            if (jumpToLatest != null) {
+                IconButton(onClick = jumpToLatest, modifier = Modifier.testTag("jump-to-latest")) {
+                    Icon(Icons.Outlined.ArrowDownward, contentDescription = "回到最新")
+                }
+            }
+        }
+    }
 }
 
 internal data class RecordingStatus(val label: String, val tone: StatusTone, val note: String? = null, val showProgress: Boolean = false)

@@ -357,10 +357,13 @@ fun ListenApp(
 
     // Once a quick-started capture has actually run and then stopped (panel, FAB or notification),
     // ask where to file it. Waiting for "seen active" avoids firing before capture starts.
-    LaunchedEffect(sttState.isListening, sttState.activeRecordId, awaitingFilingRecordId) {
+    // A pause is not the end of the class: only ask once it is ended (or superseded by another capture).
+    LaunchedEffect(sttState.isListening, sttState.activeRecordId, sttState.pausedClass, awaitingFilingRecordId) {
         val awaiting = awaitingFilingRecordId ?: return@LaunchedEffect
-        if (sttState.isListening && sttState.activeRecordId == awaiting) filingCaptureSeen = true
-        else if (filingCaptureSeen && !sttState.isListening) {
+        val capturingIt = sttState.isListening && sttState.activeRecordId == awaiting
+        val pausedIt = !sttState.isListening && sttState.pausedClass?.recordId == awaiting
+        if (capturingIt) filingCaptureSeen = true
+        else if (filingCaptureSeen && !pausedIt) {
             filingRecordId = awaiting
             awaitingFilingRecordId = null
             filingCaptureSeen = false
@@ -643,6 +646,7 @@ fun ListenApp(
                             },
                             icon = {
                                 val capturing = destination == MainDestination.RECORD && sttState.isListening
+                                val paused = destination == MainDestination.RECORD && !sttState.isListening && sttState.pausedClass != null
                                 val glyph = when (destination) {
                                     MainDestination.RECORD -> if (capturing) Icons.Filled.Mic else Icons.Outlined.Mic
                                     MainDestination.COURSES -> Icons.Outlined.School
@@ -651,6 +655,8 @@ fun ListenApp(
                                 }
                                 if (capturing) BadgedBox(badge = { Badge(containerColor = MaterialTheme.colorScheme.error, modifier = Modifier.testTag("capturing-badge")) }) {
                                     Icon(glyph, contentDescription = "${destination.label}（正在录制）")
+                                } else if (paused) BadgedBox(badge = { Badge(containerColor = MaterialTheme.colorScheme.tertiary, modifier = Modifier.testTag("paused-badge")) }) {
+                                    Icon(glyph, contentDescription = "${destination.label}（已暂停）")
                                 } else Icon(glyph, contentDescription = destination.label)
                             },
                             label = { Text(destination.label) }
@@ -710,12 +716,19 @@ fun ListenApp(
                         if (courseId == null) { newName = ""; courseCreation = CourseCreation.ThenStart(mode) }
                         else quickStart(courseId, mode)
                     },
-                    stop = stt::stopListening,
+                    stop = stt::endClass,
+                    pause = stt::pause,
+                    resume = stt::resume,
+                    continueRecord = { recordId, mode ->
+                        courseState.recentSessions.firstOrNull { it.session.id == recordId }?.let { courses.selectRecord(it.session.courseId, recordId) }
+                        startCapture(recordId, mode)
+                        nav.navigate("record/$recordId")
+                    },
                     openRecord = { summary ->
                         courses.selectRecord(summary.session.courseId, summary.session.id)
                         nav.navigate("record/${summary.session.id}")
                     },
-                    openActiveRecord = { sttState.activeRecordId?.let { nav.navigate("record/$it") } }
+                    openActiveRecord = { (sttState.activeRecordId ?: sttState.pausedClass?.recordId)?.let { nav.navigate("record/$it") } }
                 )
             }
             composable(MainDestination.COURSES.route) {
@@ -782,7 +795,9 @@ fun ListenApp(
                     openConversation = { nav.navigate("ai-conversation/$it") },
                     recordings = recordingState,
                     startCapture = { mode -> startCapture(id, mode) },
-                    stopCapture = stt::stopListening,
+                    stopCapture = stt::endClass,
+                    pauseCapture = stt::pause,
+                    resumeCapture = stt::resume,
                     startOfflineRecognition = recordings::startRecognition,
                     stopOfflineRecognition = recordings::stopRecognition,
                     deleteRecording = recordings::deleteRecording

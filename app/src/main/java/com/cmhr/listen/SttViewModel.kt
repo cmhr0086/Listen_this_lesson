@@ -40,6 +40,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -58,9 +62,21 @@ data class ListeningUiState(
     val error: String? = null,
     val captureMode: CaptureMode? = null,
     /** Record-only: audio already fsynced to disk, i.e. what survives a process kill. */
-    val recordOnlySavedMs: Long = 0
+    val recordOnlySavedMs: Long = 0,
+    /** A class the user paused: not capturing, but not ended either (no filing, resumes in place). */
+    val pausedClass: PausedClass? = null
 )
 
+data class PausedClass(
+    val recordId: Long,
+    val mode: CaptureMode,
+    val courseName: String?,
+    val recordName: String?,
+    /** Capture time accumulated before the pause; the clock continues from here on resume. */
+    val elapsedMs: Long
+)
+
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class SttViewModel(application: Application) : AndroidViewModel(application) {
     private val recorder = PcmRecorder()
     private val vadConfigRepository = VadConfigRepository(application)
@@ -78,6 +94,9 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
     val asrMessages: SharedFlow<String> = _asrMessages.asSharedFlow()
 
     private var listeningJob: Job? = null
+    private var resumeOffsetMs = 0L
+    /** Set by [pause] before stopping; turned into [ListeningUiState.pausedClass] once capture has stopped. */
+    private var pendingPause: PausedClass? = null
     private var sessionStartedAtMs = 0L
     private var sessionRecordId: Long? = null
     private var currentCapturingSegmentId: String? = null
@@ -96,8 +115,10 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             captureRuntime.state.collect { capture ->
                 if (capture.mode == CaptureMode.RECORD_ONLY || capture.error != null || (_uiState.value.captureMode == CaptureMode.RECORD_ONLY && !capture.active)) {
+                    val paused = if (!capture.active) takePendingPause() else null
                     _uiState.update { current ->
                         current.copy(
+                            pausedClass = if (capture.active) null else paused ?: current.pausedClass,
                             isListening = capture.active,
                             activeRecordId = capture.recordId,
                             listeningStartedAtElapsedRealtimeMs = capture.startedElapsedMs,
@@ -113,15 +134,19 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         viewModelScope.launch {
-            asrRuntime.observeRuntimeSummary().collect { summary ->
-                _uiState.update {
-                    it.copy(
-                        pendingQueueCount = summary.activeCount,
-                        isRecognizing = summary.recognizingCount > 0
-                    )
+            // Count only the class being captured, and only work that is really in progress:
+            // segments waiting for manual confirmation (SUBMISSION_UNKNOWN) are not "queued".
+            _uiState.map { it.activeRecordId }.distinctUntilChanged()
+                .flatMapLatest { recordId -> recordId?.let(asrRuntime::observeRuntimeSummary) ?: flowOf(null) }
+                .collect { summary ->
+                    _uiState.update {
+                        it.copy(
+                            pendingQueueCount = summary?.inProgressCount ?: 0,
+                            isRecognizing = (summary?.recognizingCount ?: 0) > 0
+                        )
+                    }
+                    ListeningForegroundService.update(getApplication(), _uiState.value)
                 }
-                ListeningForegroundService.update(getApplication(), _uiState.value)
-            }
         }
         viewModelScope.launch {
             asrRuntime.health.collect { health -> _uiState.update { it.copy(asrHealth = health) } }
@@ -157,7 +182,10 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun startListening(recordId: Long) {
+    fun startListening(recordId: Long) = startListening(recordId, elapsedOffsetMs = 0)
+
+    private fun startListening(recordId: Long, elapsedOffsetMs: Long) {
+        resumeOffsetMs = elapsedOffsetMs.coerceAtLeast(0)
         if (listeningJob?.isActive == true) {
             if (sessionRecordId != recordId) {
                 _uiState.update { it.copy(error = "当前正在记录其他课堂，请先停止监听。") }
@@ -178,6 +206,7 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update { it.copy(error = "当前已有录音或识别任务正在运行。") }
             return
         }
+        _uiState.update { it.copy(pausedClass = null) }
 
         listeningJob = viewModelScope.launch {
             val record = courseRepository.record(recordId).first()
@@ -207,7 +236,7 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
                     isListening = true,
                     isSpeechDetected = false,
                     activeRecordId = recordId,
-                    listeningStartedAtElapsedRealtimeMs = SystemClock.elapsedRealtime(),
+                    listeningStartedAtElapsedRealtimeMs = SystemClock.elapsedRealtime() - resumeOffsetMs,
                     configuredVadConfig = currentVadConfig,
                     currentCourseName = course?.name,
                     currentRecordName = record.name,
@@ -342,13 +371,15 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
                 currentCapturingSegmentId = null
                 currentCaptureStartedAt = null
                 currentCaptureStartedAtElapsedMs = null
+                val paused = takePendingPause()
                 _uiState.update {
                     it.copy(
                         isListening = false,
                         activeRecordId = null,
                         listeningStartedAtElapsedRealtimeMs = null,
                         isSpeechDetected = false,
-                        captureMode = null
+                        captureMode = null,
+                        pausedClass = paused ?: it.pausedClass
                     )
                 }
                 _vadDiagnosticsState.update {
@@ -365,6 +396,39 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Stops capturing but keeps the class open, so [resume] continues in the same record. */
+    fun pause() {
+        val state = _uiState.value
+        val recordId = state.activeRecordId ?: return
+        if (!state.isListening) return
+        val mode = state.captureMode ?: return
+        pendingPause = PausedClass(
+            recordId = recordId,
+            mode = mode,
+            courseName = state.currentCourseName,
+            recordName = state.currentRecordName,
+            elapsedMs = state.listeningStartedAtElapsedRealtimeMs?.let { SystemClock.elapsedRealtime() - it } ?: 0
+        )
+        stopListening()
+    }
+
+    /** Continues a paused class in the same record, with the same mode and a continuous clock. */
+    fun resume() {
+        val paused = _uiState.value.pausedClass ?: return
+        _uiState.update { it.copy(pausedClass = null, error = null) }
+        if (paused.mode == CaptureMode.RECORD_ONLY) startRecordOnly(paused.recordId, paused.elapsedMs)
+        else startListening(paused.recordId, paused.elapsedMs)
+    }
+
+    /** Ends the class whether it is capturing or paused. */
+    fun endClass() {
+        pendingPause = null
+        _uiState.update { it.copy(pausedClass = null) }
+        if (_uiState.value.isListening) stopListening()
+    }
+
+    private fun takePendingPause(): PausedClass? = pendingPause.also { pendingPause = null }
+
     fun stopListening() {
         _vadDiagnosticsState.update { it.copy(segmentEndReason = "用户停止录制") }
         if (captureRuntime.state.value.mode == CaptureMode.RECORD_ONLY) captureRuntime.stop()
@@ -374,13 +438,16 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun startRecordOnly(recordId: Long) {
+    fun startRecordOnly(recordId: Long) = startRecordOnly(recordId, elapsedOffsetMs = 0)
+
+    private fun startRecordOnly(recordId: Long, elapsedOffsetMs: Long) {
         if (captureRuntime.isBusy()) {
             _uiState.update { it.copy(error = "当前已有录音或识别任务正在运行。") }
             return
         }
-        _uiState.update { it.copy(error = null) }
-        captureRuntime.startRecordOnly(recordId)
+        // Starting any capture supersedes a paused class (a paused class elsewhere is simply ended).
+        _uiState.update { it.copy(error = null, pausedClass = null) }
+        captureRuntime.startRecordOnly(recordId, elapsedOffsetMs)
     }
 
     fun reportPermissionDenied() {

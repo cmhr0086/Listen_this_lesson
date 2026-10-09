@@ -206,6 +206,8 @@ data class AsrRuntimeSummary(
     val inFlightCapacity: Int = MAX_IN_FLIGHT_JOBS
 ) {
     val inFlightCount: Int get() = submittingCount + serverInFlightCount
+    /** Segments still being worked on: waiting to submit, submitting, or in flight on the server. */
+    val inProgressCount: Int get() = queuedLocalCount + submittingCount + serverInFlightCount
     val isBackpressured: Boolean get() = queuedLocalCount > 0 && globalInFlightCount >= inFlightCapacity
 }
 

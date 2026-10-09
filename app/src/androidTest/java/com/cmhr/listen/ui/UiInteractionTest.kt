@@ -27,6 +27,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import com.cmhr.listen.recording.CaptureMode
+import com.cmhr.listen.PausedClass
 import com.cmhr.listen.data.course.CourseEntity
 import com.cmhr.listen.data.course.CourseSuggestion
 import com.cmhr.listen.data.course.CourseSummary
@@ -138,6 +139,86 @@ class UiInteractionTest {
         composeRule.onNodeWithText("检测到语音", substring = true).assertDoesNotExist()
         composeRule.onNodeWithTag("stop-capture").performClick()
         composeRule.runOnIdle { assertTrue(stopped) }
+    }
+
+    @Test
+    fun capturingPanelOffersPauseAndEnd() {
+        var paused = false
+        var ended = false
+        composeRule.setContent {
+            ListenTheme {
+                CapturePanel(
+                    recordId = 1,
+                    listening = ListeningUiState(isListening = true, activeRecordId = 1, captureMode = CaptureMode.REALTIME_ASR, listeningStartedAtElapsedRealtimeMs = SystemClock.elapsedRealtime()),
+                    processing = OfflineRecognitionState(),
+                    start = {},
+                    stop = { ended = true },
+                    pause = { paused = true }
+                )
+            }
+        }
+        composeRule.onNodeWithTag("pause-capture").performClick()
+        composeRule.onNodeWithTag("stop-capture").performClick()
+        composeRule.runOnIdle { assertTrue(paused); assertTrue(ended) }
+    }
+
+    @Test
+    fun pausedClassResumesFromTheControlBar() {
+        var resumed = false
+        composeRule.setContent {
+            ListenTheme {
+                CaptureControlBar(
+                    recordId = 1,
+                    listening = ListeningUiState(pausedClass = PausedClass(1, CaptureMode.RECORD_ONLY, "散打", "散打-10-09", 754_000)),
+                    processing = OfflineRecognitionState(),
+                    start = {}, pause = {}, resume = { resumed = true }, end = {},
+                    jumpToLatest = null
+                )
+            }
+        }
+        composeRule.onNodeWithText("已暂停 00:12:34").assertExists()
+        composeRule.onNodeWithTag("bar-resume").performClick()
+        composeRule.runOnIdle { assertTrue(resumed) }
+        composeRule.onNodeWithTag("jump-to-latest").assertDoesNotExist()
+    }
+
+    @Test
+    fun controlBarOffersContinueAndJumpToLatestForAFinishedClass() {
+        var started: CaptureMode? = null
+        var jumped = false
+        composeRule.setContent {
+            ListenTheme {
+                CaptureControlBar(
+                    recordId = 1,
+                    listening = ListeningUiState(),
+                    processing = OfflineRecognitionState(),
+                    start = { started = it }, pause = {}, resume = {}, end = {},
+                    jumpToLatest = { jumped = true }
+                )
+            }
+        }
+        composeRule.onNodeWithTag("bar-start-record-only").performClick()
+        composeRule.onNodeWithContentDescription("回到最新").performClick()
+        composeRule.runOnIdle { assertEquals(CaptureMode.RECORD_ONLY, started); assertTrue(jumped) }
+    }
+
+    @Test
+    fun controlBarWhileCapturingShowsPauseAndEnd() {
+        var paused = false
+        composeRule.setContent {
+            ListenTheme {
+                CaptureControlBar(
+                    recordId = 1,
+                    listening = ListeningUiState(isListening = true, activeRecordId = 1, captureMode = CaptureMode.REALTIME_ASR, pendingQueueCount = 2, listeningStartedAtElapsedRealtimeMs = SystemClock.elapsedRealtime()),
+                    processing = OfflineRecognitionState(),
+                    start = {}, pause = { paused = true }, resume = {}, end = {},
+                    jumpToLatest = null
+                )
+            }
+        }
+        composeRule.onNodeWithText("实时转写 · 2 段识别中").assertExists()
+        composeRule.onNodeWithTag("bar-pause").performClick()
+        composeRule.runOnIdle { assertTrue(paused) }
     }
 
     @Test

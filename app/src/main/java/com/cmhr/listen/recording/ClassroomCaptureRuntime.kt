@@ -89,7 +89,8 @@ class ClassroomCaptureRuntime private constructor(private val context: Context) 
         RecordingOperationGuard.release(REALTIME_OWNER)
     }
 
-    fun startRecordOnly(recordId: Long) {
+    /** [elapsedOffsetMs]: time already recorded before a pause, so a resumed class keeps one running clock. */
+    fun startRecordOnly(recordId: Long, elapsedOffsetMs: Long = 0) {
         if (!RecordingOperationGuard.tryAcquire(RECORD_ONLY_OWNER) || !mutex.tryLock()) {
             RecordingOperationGuard.release(RECORD_ONLY_OWNER)
             _state.value = _state.value.copy(error = "当前已有录音或识别任务正在运行。")
@@ -104,7 +105,7 @@ class ClassroomCaptureRuntime private constructor(private val context: Context) 
                 val course = courses.course(record.courseId).first()
                 courses.reopenRecord(recordId)
                 val created = recordings.create(recordId, record.sessionId).also { row = it }
-                val startedElapsed = SystemClock.elapsedRealtime()
+                val startedElapsed = SystemClock.elapsedRealtime() - elapsedOffsetMs.coerceAtLeast(0)
                 _state.value = CaptureRuntimeState(true, CaptureMode.RECORD_ONLY, recordId, created.recordingId, startedElapsed, course?.name, record.name)
                 ListeningForegroundService.startRecordOnly(context, recordId, course?.name, record.name, startedElapsed)
                 val activeWriter = StreamingWavRecorder(File(recordings.directory, created.localPath)).also { writer = it }
