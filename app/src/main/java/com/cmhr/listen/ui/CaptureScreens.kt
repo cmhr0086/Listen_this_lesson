@@ -7,6 +7,8 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.material3.TextButton
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,6 +26,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.FiberManualRecord
 import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.MoreVert
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.Stop
 import com.cmhr.listen.PausedClass
 import androidx.compose.material.icons.outlined.ArrowDownward
@@ -297,9 +302,11 @@ internal fun CaptureControlBar(
     val activeHere = listening.isListening && listening.activeRecordId == recordId
     val paused = listening.pausedClass?.takeIf { !listening.isListening && it.recordId == recordId }
     val blocked = captureBlockedReason(listening, recordId, processing)
-    Surface(tonalElevation = 3.dp, shadowElevation = 6.dp, modifier = Modifier.fillMaxWidth().testTag("capture-bar")) {
+    // Same surface as the navigation bar below it, so the two read as one bottom area.
+    Surface(color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.fillMaxWidth().testTag("capture-bar")) { Column {
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+            Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
@@ -334,8 +341,12 @@ internal fun CaptureControlBar(
                 blocked != null -> Text(blocked, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
                 else -> {
                     Text("继续录制", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
-                    OutlinedButton(onClick = { start(CaptureMode.REALTIME_ASR) }, modifier = Modifier.testTag("bar-start-realtime")) { Text("实时转写") }
-                    OutlinedButton(onClick = { start(CaptureMode.RECORD_ONLY) }, modifier = Modifier.testTag("bar-start-record-only")) { Text("仅录音") }
+                    TextButton(onClick = { start(CaptureMode.REALTIME_ASR) }, modifier = Modifier.testTag("bar-start-realtime")) {
+                        Icon(Icons.Outlined.Mic, contentDescription = null, modifier = Modifier.size(18.dp)); Spacer(Modifier.width(4.dp)); Text("实时转写")
+                    }
+                    TextButton(onClick = { start(CaptureMode.RECORD_ONLY) }, modifier = Modifier.testTag("bar-start-record-only")) {
+                        Icon(Icons.Outlined.FiberManualRecord, contentDescription = null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.error); Spacer(Modifier.width(4.dp)); Text("仅录音")
+                    }
                 }
             }
             if (jumpToLatest != null) {
@@ -344,7 +355,7 @@ internal fun CaptureControlBar(
                 }
             }
         }
-    }
+    } }
 }
 
 internal data class RecordingStatus(val label: String, val tone: StatusTone, val note: String? = null, val showProgress: Boolean = false)
@@ -361,6 +372,104 @@ internal fun recordingStatus(recording: RecordingEntity, processingHere: Boolean
         RecordingState.FAILED -> RecordingStatus("识别出错", StatusTone.PROBLEM, recording.errorMessage, showProgress = recording.processedFrames > 0)
     }
 
+/**
+ * All of a class's recordings as one card: overall status and the single most useful action up
+ * front (全部识别 / 暂停识别 / 重试), compact rows only when expanded. Pause/continue produces several
+ * recordings per class; they must not push the transcript off screen.
+ */
+@Composable
+internal fun RecordingsSummaryCard(
+    recordings: List<RecordingEntity>,
+    processing: OfflineRecognitionState,
+    recognizingAll: Boolean,
+    recognitionAllowed: Boolean,
+    expanded: Boolean,
+    toggleExpanded: () -> Unit,
+    recognizeAll: () -> Unit,
+    startRecognition: (String) -> Unit,
+    pauseRecognition: () -> Unit,
+    delete: (String) -> Unit
+) {
+    val numbered = recordings.sortedBy { it.startedAt }.withIndex().associate { (index, value) -> value.recordingId to index + 1 }
+    val active = recordings.firstOrNull { it.recordingId == processing.activeRecordingId }
+    val pending = recordings.filter { it.recordingState.canStartRecognition }
+    val failed = recordings.count { it.recordingState == RecordingState.FAILED }
+    val capturing = recordings.any { it.recordingState == RecordingState.RECORDING }
+    val summary: Pair<String, StatusTone> = when {
+        active != null -> {
+            val progress = (processing.processedFrames.toFloat() / active.totalFrames.coerceAtLeast(1) * 100).toInt().coerceIn(0, 100)
+            val rest = if (recognizingAll && pending.size > 1) " · 之后还有 ${pending.size - 1} 段" else ""
+            ("正在识别录音 ${numbered[active.recordingId]} · $progress%$rest") to StatusTone.ACTIVE
+        }
+        capturing -> "录音中" to StatusTone.ACTIVE
+        failed > 0 -> "$failed 段识别出错" to StatusTone.PROBLEM
+        pending.isNotEmpty() -> "${pending.size} 段待识别" to StatusTone.READY
+        else -> "已全部识别" to StatusTone.DONE
+    }
+    OutlinedCard(Modifier.fillMaxWidth().testTag("recordings-summary")) {
+        Column {
+            Row(
+                Modifier.fillMaxWidth().clickable(onClick = toggleExpanded).padding(start = 16.dp, top = 12.dp, end = 8.dp, bottom = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("录音文件 ${recordings.size} 段 · ${formatClockDuration(recordings.totalDurationMs())}", style = MaterialTheme.typography.titleSmall)
+                    Text(summary.first, style = MaterialTheme.typography.bodySmall, color = summary.second.color())
+                }
+                when {
+                    active != null -> TextButton(onClick = pauseRecognition, modifier = Modifier.testTag("summary-pause")) { Text("暂停识别") }
+                    !capturing && pending.size > 1 -> FilledTonalButton(onClick = recognizeAll, enabled = recognitionAllowed, modifier = Modifier.testTag("recognize-all")) { Text("全部识别") }
+                    !capturing && pending.size == 1 -> FilledTonalButton(
+                        onClick = { startRecognition(pending.single().recordingId) },
+                        enabled = recognitionAllowed,
+                        modifier = Modifier.testTag("summary-recognize")
+                    ) { Text(recognitionLabel(pending.single().recordingState)) }
+                }
+                Icon(
+                    if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                    contentDescription = if (expanded) "收起录音文件" else "展开录音文件",
+                    modifier = Modifier.padding(start = 4.dp)
+                )
+            }
+            active?.let {
+                LinearProgressIndicator(
+                    progress = { (processing.processedFrames.toFloat() / it.totalFrames.coerceAtLeast(1)).coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 8.dp)
+                )
+            }
+            if (expanded) {
+                HorizontalDivider()
+                recordings.forEach { recording ->
+                    RecordingItem(
+                        recording = recording,
+                        number = numbered.getValue(recording.recordingId),
+                        processing = processing,
+                        recognitionAllowed = recognitionAllowed,
+                        startRecognition = startRecognition,
+                        pauseRecognition = pauseRecognition,
+                        delete = delete
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun recognitionLabel(state: RecordingState) = when (state) {
+    RecordingState.PAUSED -> "继续识别"
+    RecordingState.FAILED -> "重试识别"
+    else -> "开始识别"
+}
+
+@Composable
+private fun StatusTone.color() = when (this) {
+    StatusTone.ACTIVE -> MaterialTheme.colorScheme.primary
+    StatusTone.READY -> MaterialTheme.colorScheme.tertiary
+    StatusTone.DONE -> MaterialTheme.colorScheme.onSurfaceVariant
+    StatusTone.PROBLEM -> MaterialTheme.colorScheme.error
+}
+
+/** One recording as a compact row: number, time, length, status, and a small action. */
 @Composable
 internal fun RecordingItem(
     recording: RecordingEntity,
@@ -379,55 +488,42 @@ internal fun RecordingItem(
     var menuExpanded by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
 
-    OutlinedCard(Modifier.fillMaxWidth().testTag("recording-${recording.recordingId}")) {
-        Column(Modifier.padding(start = 16.dp, top = 12.dp, end = 4.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text("录音 $number", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        "${formatClockTime(recording.startedAt)} 开始 · 时长 ${formatClockDuration(recording.durationMs)}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                StatusChip(status)
-                if (state.canDelete && !processingHere) {
-                    Box {
-                        IconButton(onClick = { menuExpanded = true }) { Icon(Icons.Outlined.MoreVert, contentDescription = "录音操作") }
-                        DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
-                            DropdownMenuItem(text = { Text("删除录音") }, onClick = { menuExpanded = false; confirmDelete = true })
-                        }
-                    }
-                } else Spacer(Modifier.width(12.dp))
-            }
-            if (status.showProgress) LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth().padding(end = 12.dp))
-            status.note?.takeIf { it.isNotBlank() }?.let {
+    Column(Modifier.fillMaxWidth().testTag("recording-${recording.recordingId}").padding(start = 16.dp, end = 4.dp, top = 6.dp, bottom = 6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
                 Text(
-                    it,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (status.tone == StatusTone.PROBLEM) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(end = 12.dp)
+                    "录音 $number · ${formatClockTime(recording.startedAt)} · ${formatClockDuration(recording.durationMs)}",
+                    style = MaterialTheme.typography.bodyMedium
                 )
+                Text(status.label, style = MaterialTheme.typography.labelMedium, color = status.tone.color())
             }
-            processing.error?.takeIf { processingHere }?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
             when {
-                processingHere -> OutlinedButton(onClick = pauseRecognition, modifier = Modifier.testTag("pause-recognition")) { Text("暂停识别") }
-                state.canStartRecognition -> FilledTonalButton(
+                processingHere -> TextButton(onClick = pauseRecognition, modifier = Modifier.testTag("pause-recognition")) { Text("暂停识别") }
+                state.canStartRecognition -> TextButton(
                     onClick = { startRecognition(recording.recordingId) },
                     enabled = recognitionAllowed,
                     modifier = Modifier.testTag("start-recognition")
-                ) {
-                    Text(
-                        when (state) {
-                            RecordingState.PAUSED -> "继续识别"
-                            RecordingState.FAILED -> "重试识别"
-                            else -> "开始识别"
-                        }
-                    )
-                }
-                else -> Unit
+                ) { Text(recognitionLabel(state)) }
             }
+            if (state.canDelete && !processingHere) {
+                Box {
+                    IconButton(onClick = { menuExpanded = true }) { Icon(Icons.Outlined.MoreVert, contentDescription = "录音操作") }
+                    DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                        DropdownMenuItem(text = { Text("删除录音") }, onClick = { menuExpanded = false; confirmDelete = true })
+                    }
+                }
+            } else Spacer(Modifier.width(12.dp))
         }
+        if (status.showProgress) LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth().padding(top = 4.dp, end = 12.dp))
+        status.note?.takeIf { it.isNotBlank() }?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (status.tone == StatusTone.PROBLEM) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 2.dp, end = 12.dp)
+            )
+        }
+        processing.error?.takeIf { processingHere }?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
     }
     if (confirmDelete) TimedDeleteDialog(
         title = "删除录音",
@@ -435,19 +531,6 @@ internal fun RecordingItem(
         confirm = { delete(recording.recordingId); confirmDelete = false },
         dismiss = { confirmDelete = false }
     )
-}
-
-@Composable
-private fun StatusChip(status: RecordingStatus) {
-    val (container, content) = when (status.tone) {
-        StatusTone.ACTIVE -> MaterialTheme.colorScheme.primaryContainer to MaterialTheme.colorScheme.onPrimaryContainer
-        StatusTone.READY -> MaterialTheme.colorScheme.tertiaryContainer to MaterialTheme.colorScheme.onTertiaryContainer
-        StatusTone.DONE -> MaterialTheme.colorScheme.surfaceVariant to MaterialTheme.colorScheme.onSurfaceVariant
-        StatusTone.PROBLEM -> MaterialTheme.colorScheme.errorContainer to MaterialTheme.colorScheme.onErrorContainer
-    }
-    Surface(color = container, contentColor = content, shape = MaterialTheme.shapes.small) {
-        Text(status.label, style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp))
-    }
 }
 
 internal fun formatClockDuration(milliseconds: Long, alwaysHours: Boolean = false): String {

@@ -266,42 +266,19 @@ fun RecordDetailsScreen(
                     CapturePanel(recordId, listening, recordings.processing, startCapture, stopCapture, pause = pauseCapture, resume = resumeCapture)
                 }
                 aiState.error?.let { item("ai-error") { ErrorCard(it) } }
-                val allRecognized = recordings.recordings.isNotEmpty() && recordings.recordings.all { it.recordingState == RecordingState.COMPLETED }
-                if (allRecognized && !recordingsExpanded) {
-                    item("recordings-collapsed") {
-                        RecordingsCollapsedRow(recordings.recordings.size, recordings.recordings.totalDurationMs()) { recordingsExpanded = true }
-                    }
-                } else if (recordings.recordings.isNotEmpty()) {
-                    item("recordings-heading") {
-                        val pending = recordings.recordings.count { it.recordingState.canStartRecognition }
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(Modifier.weight(1f)) {
-                                SectionHeading("录音", "${recordings.recordings.size} 段 · 共 ${formatClockDuration(recordings.recordings.totalDurationMs())}")
-                            }
-                            when {
-                                recordings.recognizingAllRecordId == recordId ->
-                                    Text("正在依次识别…", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 8.dp))
-                                pending >= 2 -> TextButton(
-                                    onClick = recognizeAll,
-                                    enabled = !listening.isListening && !recordings.processing.isProcessing,
-                                    modifier = Modifier.padding(top = 8.dp).testTag("recognize-all")
-                                ) { Text("全部识别（$pending）") }
-                            }
-                        }
-                    }
-                    val recognitionAllowed = !listening.isListening && !recordings.processing.isProcessing
-                    val numbered = recordings.recordings.sortedBy { it.startedAt }.withIndex().associate { (index, value) -> value.recordingId to index + 1 }
-                    items(recordings.recordings, key = { "recording-${it.recordingId}" }) { recording ->
-                        RecordingItem(
-                            recording = recording,
-                            number = numbered.getValue(recording.recordingId),
-                            processing = recordings.processing,
-                            recognitionAllowed = recognitionAllowed,
-                            startRecognition = startOfflineRecognition,
-                            pauseRecognition = stopOfflineRecognition,
-                            delete = deleteRecording
-                        )
-                    }
+                if (recordings.recordings.isNotEmpty()) item("recordings-summary") {
+                    RecordingsSummaryCard(
+                        recordings = recordings.recordings,
+                        processing = recordings.processing,
+                        recognizingAll = recordings.recognizingAllRecordId == recordId,
+                        recognitionAllowed = !listening.isListening && !recordings.processing.isProcessing,
+                        expanded = recordingsExpanded,
+                        toggleExpanded = { recordingsExpanded = !recordingsExpanded },
+                        recognizeAll = recognizeAll,
+                        startRecognition = startOfflineRecognition,
+                        pauseRecognition = stopOfflineRecognition,
+                        delete = deleteRecording
+                    )
                 }
                 item("segment-heading") {
                     SectionHeading("文字", if (segments.isEmpty()) null else "${segments.size} 段 · ${groups.size} 个段落")
@@ -337,7 +314,8 @@ fun RecordDetailsScreen(
                 }
             }
         }
-        if (record != null && useControlBar) {
+        // While selecting text the bar only stays for a live or paused class.
+        if (record != null && useControlBar && (!selectionMode || capturingHere || pausedHere)) {
             CaptureControlBar(
                 recordId = recordId,
                 listening = listening,
@@ -351,17 +329,6 @@ fun RecordDetailsScreen(
                 } else null
             )
         }
-    }
-}
-
-@Composable
-private fun RecordingsCollapsedRow(count: Int, totalMs: Long, expand: () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().clickable(onClick = expand).padding(vertical = 8.dp).testTag("recordings-collapsed"),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text("录音 $count 段 · 共 ${formatClockDuration(totalMs)} · 已全部识别", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
-        Text("展开", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
     }
 }
 

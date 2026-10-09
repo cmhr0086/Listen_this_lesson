@@ -333,6 +333,36 @@ class UiInteractionTest {
     }
 
     @Test
+    fun recordingsCollapseIntoOneSummaryWithRecognizeAll() {
+        var all = false
+        var expanded by mutableStateOf(false)
+        val recordings = (0..3).map { i ->
+            RecordingEntity(recordId = 1, sessionId = "s", localPath = "$i.wav", startedAt = i * 60_000L, durationMs = 10_000, totalFrames = 160_000, state = RecordingState.RECORDED.name)
+        }
+        composeRule.setContent {
+            ListenTheme {
+                RecordingsSummaryCard(
+                    recordings = recordings,
+                    processing = OfflineRecognitionState(),
+                    recognizingAll = false,
+                    recognitionAllowed = true,
+                    expanded = expanded,
+                    toggleExpanded = { expanded = !expanded },
+                    recognizeAll = { all = true },
+                    startRecognition = {}, pauseRecognition = {}, delete = {}
+                )
+            }
+        }
+        composeRule.onNodeWithText("录音文件 4 段 · 00:40").assertExists()
+        composeRule.onNodeWithText("4 段待识别").assertExists()
+        composeRule.onNodeWithTag("recording-${recordings[0].recordingId}").assertDoesNotExist()
+        composeRule.onNodeWithTag("recognize-all").performClick()
+        composeRule.onNodeWithContentDescription("展开录音文件").performClick()
+        composeRule.onNodeWithTag("recording-${recordings[0].recordingId}").assertExists()
+        composeRule.runOnIdle { assertTrue(all) }
+    }
+
+    @Test
     fun interruptedRecordingIsReadyToRecognizeWithNeutralNote() {
         var started: String? = null
         val recording = RecordingEntity(recordId = 1, sessionId = "s", localPath = "a.wav", startedAt = 0, durationMs = 5_000, totalFrames = 80_000, state = RecordingState.INTERRUPTED.name)
