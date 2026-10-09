@@ -18,7 +18,7 @@
 ## 安装
 
 1. 打开 [GitHub Releases](https://github.com/cmhr0086/Listen_this_lesson/releases)。
-2. 下载 `Listen_this_lesson-v1.2.0-arm64-v8a.apk`。
+2. 下载 `Listen_this_lesson-v1.2.1-arm64-v8a.apk`。
 3. 在 Android 设备上允许当前安装来源，然后安装 APK。
 
 当前正式安装包仅支持 `arm64-v8a`，最低系统版本为 Android 8.0（API 26）。

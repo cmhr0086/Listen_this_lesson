@@ -192,13 +192,7 @@ fun RecordDetailsScreen(
     val listState = rememberLazyListState()
     val atEnd by remember { androidx.compose.runtime.derivedStateOf { !listState.canScrollForward } }
     val scope = androidx.compose.runtime.rememberCoroutineScope()
-    // Follow new text during realtime transcription, unless the user scrolled up to read.
-    androidx.compose.runtime.LaunchedEffect(orderedSegments.size, realtimeHere) {
-        if (!realtimeHere || orderedSegments.isEmpty()) return@LaunchedEffect
-        val info = listState.layoutInfo
-        val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: return@LaunchedEffect
-        if (lastVisible >= info.totalItemsCount - 3) listState.animateScrollToItem((info.totalItemsCount - 1).coerceAtLeast(0))
-    }
+    val follow = rememberFollowLatest(listState, enabled = realtimeHere && !selectionMode, key = recordId)
     val dragSelection = rememberDragSelectionController(
         listState = listState,
         orderedKeys = orderedSegments.map { it.id },
@@ -249,8 +243,9 @@ fun RecordDetailsScreen(
     }
 
     Column(Modifier.fillMaxSize()) {
+      Box(Modifier.weight(1f).fillMaxWidth()) {
         LazyColumn(
-            Modifier.weight(1f).fillMaxWidth().dragSelectionViewport(dragSelection),
+            Modifier.fillMaxSize().dragSelectionViewport(dragSelection),
             state = listState,
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -285,8 +280,12 @@ fun RecordDetailsScreen(
                 }
                 if (segments.isEmpty()) item("empty-segments") {
                     Text(
-                        if (recordings.recordings.isEmpty()) "还没有文字。用「实时转写」上课，或先「仅录音」再识别。"
-                        else "还没有文字。点上方录音的「开始识别」后，文字会出现在这里。",
+                        when {
+                            capturingHere && listening.captureMode == CaptureMode.RECORD_ONLY -> "正在仅录音。结束后点上方「全部识别」，文字会出现在这里。"
+                            capturingHere -> "正在听，识别出的文字会出现在这里。"
+                            recordings.recordings.isEmpty() -> "还没有文字。用「实时转写」上课，或先「仅录音」再识别。"
+                            else -> "还没有文字。点上方录音文件的「全部识别」后，文字会出现在这里。"
+                        },
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -314,6 +313,14 @@ fun RecordDetailsScreen(
                 }
             }
         }
+        JumpToLatestButton(
+            visible = !atEnd && orderedSegments.isNotEmpty() && !(realtimeHere && follow.following),
+            modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp)
+        ) {
+            follow.resume()
+            scope.launch { listState.scrollToBottom() }
+        }
+      }
         // While selecting text the bar only stays for a live or paused class.
         if (record != null && useControlBar && (!selectionMode || capturingHere || pausedHere)) {
             CaptureControlBar(
@@ -323,10 +330,7 @@ fun RecordDetailsScreen(
                 start = startCapture,
                 pause = pauseCapture,
                 resume = resumeCapture,
-                end = stopCapture,
-                jumpToLatest = if (!atEnd && orderedSegments.isNotEmpty()) {
-                    { scope.launch { listState.animateScrollToItem((listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)) } }
-                } else null
+                end = stopCapture
             )
         }
     }

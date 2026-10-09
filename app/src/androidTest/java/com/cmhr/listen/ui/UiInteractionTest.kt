@@ -171,8 +171,7 @@ class UiInteractionTest {
                     recordId = 1,
                     listening = ListeningUiState(pausedClass = PausedClass(1, CaptureMode.RECORD_ONLY, "散打", "散打-10-09", 754_000)),
                     processing = OfflineRecognitionState(),
-                    start = {}, pause = {}, resume = { resumed = true }, end = {},
-                    jumpToLatest = null
+                    start = {}, pause = {}, resume = { resumed = true }, end = {}
                 )
             }
         }
@@ -183,23 +182,21 @@ class UiInteractionTest {
     }
 
     @Test
-    fun controlBarOffersContinueAndJumpToLatestForAFinishedClass() {
+    fun controlBarOffersContinueForAFinishedClass() {
         var started: CaptureMode? = null
-        var jumped = false
         composeRule.setContent {
             ListenTheme {
                 CaptureControlBar(
                     recordId = 1,
                     listening = ListeningUiState(),
                     processing = OfflineRecognitionState(),
-                    start = { started = it }, pause = {}, resume = {}, end = {},
-                    jumpToLatest = { jumped = true }
+                    start = { started = it }, pause = {}, resume = {}, end = {}
                 )
             }
         }
         composeRule.onNodeWithTag("bar-start-record-only").performClick()
-        composeRule.onNodeWithContentDescription("回到最新").performClick()
-        composeRule.runOnIdle { assertEquals(CaptureMode.RECORD_ONLY, started); assertTrue(jumped) }
+        composeRule.onNodeWithTag("jump-to-latest").assertDoesNotExist()
+        composeRule.runOnIdle { assertEquals(CaptureMode.RECORD_ONLY, started) }
     }
 
     @Test
@@ -211,8 +208,7 @@ class UiInteractionTest {
                     recordId = 1,
                     listening = ListeningUiState(isListening = true, activeRecordId = 1, captureMode = CaptureMode.REALTIME_ASR, pendingQueueCount = 2, listeningStartedAtElapsedRealtimeMs = SystemClock.elapsedRealtime()),
                     processing = OfflineRecognitionState(),
-                    start = {}, pause = { paused = true }, resume = {}, end = {},
-                    jumpToLatest = null
+                    start = {}, pause = { paused = true }, resume = {}, end = {}
                 )
             }
         }
