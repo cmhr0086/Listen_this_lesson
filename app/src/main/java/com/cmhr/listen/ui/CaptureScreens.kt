@@ -1,7 +1,9 @@
 package com.cmhr.listen.ui
 
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material.icons.outlined.BookmarkAdd
-import androidx.compose.material3.OutlinedIconButton
 import android.os.SystemClock
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -230,9 +232,14 @@ private fun ElapsedClock(startedAt: Long?, compact: Boolean = false) {
     Text(
         formatClockDuration(elapsedMs, alwaysHours = true),
         style = (if (compact) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleLarge).copy(fontFeatureSettings = "tnum"),
-        fontWeight = FontWeight.Medium
+        fontWeight = FontWeight.Medium,
+        maxLines = 1,
+        softWrap = false
     )
 }
+
+/** Tighter than Material's 24dp so pause, end and the mark button fit one row on small phones. */
+private val CompactButtonPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp)
 
 /** 暂停 keeps the class open; 结束 ends it (and asks where to file a class started from 录音). */
 @Composable
@@ -317,19 +324,27 @@ internal fun CaptureControlBar(
                     Column(Modifier.weight(1f)) {
                         ElapsedClock(listening.listeningStartedAtElapsedRealtimeMs, compact = true)
                         Text(
-                            if (listening.captureMode == CaptureMode.RECORD_ONLY) "仅录音 · 已保存 ${formatClockDuration(listening.recordOnlySavedMs)}"
+                            if (listening.captureMode == CaptureMode.RECORD_ONLY) "仅录音 · 已存 ${formatClockDuration(listening.recordOnlySavedMs)}"
                             else if (listening.pendingQueueCount > 0) "实时转写 · ${listening.pendingQueueCount} 段识别中" else "实时转写",
                             style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                     // "重点": marks what is being said now; also on the notification for a locked screen.
-                    OutlinedIconButton(onClick = mark, modifier = Modifier.testTag("bar-mark")) {
-                        Icon(Icons.Outlined.BookmarkAdd, contentDescription = "标记重点", tint = MaterialTheme.colorScheme.tertiary)
-                    }
-                    FilledTonalButton(onClick = pause, modifier = Modifier.testTag("bar-pause")) { Icon(Icons.Outlined.Pause, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("暂停") }
+                    FilledTonalIconButton(
+                        onClick = mark,
+                        modifier = Modifier.testTag("bar-mark"),
+                        colors = IconButtonDefaults.filledTonalIconButtonColors(
+                            containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onTertiaryContainer
+                        )
+                    ) { Icon(Icons.Outlined.BookmarkAdd, contentDescription = "标记重点") }
+                    FilledTonalButton(onClick = pause, contentPadding = CompactButtonPadding, modifier = Modifier.testTag("bar-pause")) { Text("暂停") }
                     Button(
                         onClick = end,
+                        contentPadding = CompactButtonPadding,
                         modifier = Modifier.testTag("bar-end"),
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError)
                     ) { Text("结束") }

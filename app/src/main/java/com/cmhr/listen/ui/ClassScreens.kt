@@ -334,7 +334,7 @@ private fun ClassTextTab(
 
 /** Bottom bar while selecting text: the things you do with what you selected. */
 @Composable
-private fun SelectionActionBar(
+internal fun SelectionActionBar(
     count: Int,
     aiEnabled: Boolean,
     allMarked: Boolean,
