@@ -240,6 +240,7 @@ internal fun CourseMenu(course: CourseEntity, listening: ListeningUiState, model
     var renaming by remember { mutableStateOf(false) }
     var editingPrompt by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf(false) }
+    var pickingColor by remember { mutableStateOf(false) }
     var warning by remember { mutableStateOf<String?>(null) }
     var name by remember(course.id, course.name) { mutableStateOf(course.name) }
     var prompt by remember(course.id, course.asrPrompt) { mutableStateOf(course.asrPrompt) }
@@ -248,13 +249,20 @@ internal fun CourseMenu(course: CourseEntity, listening: ListeningUiState, model
         description = "${course.name} 的操作",
         actions = listOf(
             "重命名" to { renaming = true },
-            "ASR 提示词" to { editingPrompt = true },
+            "更换颜色" to { pickingColor = true },
+            "专业词提示" to { editingPrompt = true },
             "删除课程" to {
                 if (listening.isListening) warning = "正在录制时不能删除课程，请先停止。" else deleting = true
             }
         )
     )
     if (renaming) NameDialog("重命名课程", name, { name = it }, { model.renameCourse(course.id, name); renaming = false }, { renaming = false })
+    if (pickingColor) CourseColorDialog(
+        course = course,
+        current = CourseColors.indexFor(course.id, LocalCourseColors.current),
+        pick = { model.setCourseColor(course.id, it); pickingColor = false },
+        dismiss = { pickingColor = false }
+    )
     if (editingPrompt) AsrPromptDialog(
         prompt = prompt,
         update = { prompt = it },
@@ -363,4 +371,35 @@ internal fun weekGroupLabel(startedAt: Long, now: Long): String {
         !day.isBefore(weekStart.minusWeeks(1)) -> "上周"
         else -> "${day.monthValue}月"
     }
+}
+
+/** Picks one of the course colors; the badge previews the choice. */
+@Composable
+private fun CourseColorDialog(course: CourseEntity, current: Int, pick: (Int) -> Unit, dismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = dismiss,
+        title = { Text("「${course.name}」的颜色") },
+        text = {
+            androidx.compose.foundation.layout.FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                repeat(CourseColors.count) { index ->
+                    val tone = CourseColors.tone(index, isDarkSurface())
+                    androidx.compose.material3.Surface(
+                        onClick = { pick(index) },
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp),
+                        color = tone.background,
+                        border = if (index == current) androidx.compose.foundation.BorderStroke(2.dp, tone.foreground) else null,
+                        modifier = Modifier.size(52.dp).testTag("course-color-$index")
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text(courseInitial(course.name), color = tone.foreground, style = MaterialTheme.typography.titleLarge)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = dismiss) { Text("完成") } }
+    )
 }
