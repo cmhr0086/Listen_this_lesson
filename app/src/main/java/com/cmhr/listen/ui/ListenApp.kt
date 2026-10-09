@@ -9,6 +9,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.SystemClock
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContentTransitionScope
@@ -87,6 +88,7 @@ import com.cmhr.listen.AiViewModel
 import com.cmhr.listen.AppNavigationRequests
 import com.cmhr.listen.CourseViewModel
 import com.cmhr.listen.SettingsViewModel
+import com.cmhr.listen.AiPromptKind
 import com.cmhr.listen.SttViewModel
 import com.cmhr.listen.RecordingViewModel
 import com.cmhr.listen.recording.CaptureMode
@@ -173,14 +175,16 @@ private fun routeTitle(route: String?): String = when (route) {
     "settings" -> "设置"
     "search" -> "搜索"
     "settings/stt-service" -> "语音识别"
-    "settings/vad-parameters" -> "VAD 参数"
-    "settings/vad-presets" -> "VAD 预设"
+    "settings/vad" -> "VAD 预设与参数"
     "settings/ai-service" -> "AI 服务"
+    "settings/ai-service/models" -> "选择模型"
+    "settings/asr-prompt-policy/thresholds" -> "自动模式门槛"
     "settings/cloud-sync" -> "云同步"
     "settings/appearance" -> "外观"
     "settings/ai-prompts" -> "AI 提示词"
     "settings/asr-prompt-policy" -> "专业词提示"
     "settings/ai-generation" -> "AI 生成参数"
+    "settings/ai-prompts/{kind}" -> "编辑提示词"
     "settings/asr-diagnostics" -> "ASR 诊断"
     "settings/asr-diagnostics/history/{recordId}" -> "ASR 诊断历史"
     "record/{recordId}/ai-results" -> "AI 结果"
@@ -210,6 +214,7 @@ fun ListenApp(
     val currentTab = mainDestinationForRoute(route, backStackEntry?.arguments?.getString("recordId")?.toLongOrNull(), liveRecordId)
     val courseState by courses.uiState.collectAsStateWithLifecycle()
     val settingsState by settings.uiState.collectAsStateWithLifecycle()
+    val backDispatcher = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
     val aiState by ai.uiState.collectAsStateWithLifecycle()
     val recordingState by recordings.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -613,10 +618,14 @@ fun ListenApp(
                 else -> TopAppBar(
                     title = {
                         // The course page shows its name in its own header.
-                        if (route != "course/{courseId}") Text(routeTitle(route), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        val promptKind = if (route == "settings/ai-prompts/{kind}") {
+                            backStackEntry?.arguments?.getString("kind")?.let { name -> AiPromptKind.entries.firstOrNull { it.name == name } }
+                        } else null
+                        if (route != "course/{courseId}") Text(promptKind?.label ?: routeTitle(route), maxLines = 1, overflow = TextOverflow.Ellipsis)
                     },
                     navigationIcon = {
-                        if (nested) IconButton(onClick = { nav.popBackStack() }) {
+                        // Through the dispatcher, so a page's BackHandler (unsaved edits) also sees this.
+                        if (nested) IconButton(onClick = { backDispatcher?.onBackPressed() ?: nav.popBackStack() }) {
                             Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
                         }
                     },
@@ -824,22 +833,44 @@ fun ListenApp(
                 SettingsScreen(settingsState, settings,
                     onSttService = { nav.navigate("settings/stt-service") },
                     onAiService = { nav.navigate("settings/ai-service") },
-                    onVadParameters = { nav.navigate("settings/vad-parameters") },
-                    onVadPresets = { nav.navigate("settings/vad-presets") },
+                    onVad = { nav.navigate("settings/vad") },
                     onAiPrompts = { nav.navigate("settings/ai-prompts") },
                     onAsrPromptPolicy = { nav.navigate("settings/asr-prompt-policy") },
                     onAiGeneration = { nav.navigate("settings/ai-generation") },
                     onCloudSync = { nav.navigate("settings/cloud-sync") },
                     onAsrDiagnostics = { nav.navigate("settings/asr-diagnostics") },
-                    onAppearance = { nav.navigate("settings/appearance") }
+                    onAppearance = { nav.navigate("settings/appearance") },
+                    vadSummary = sttState.selectedVadPreset?.displayName ?: "自定义（基于「${nearestVadPreset(sttState.configuredVadConfig).displayName}」）"
                 )
             }
-            composable("settings/stt-service") { SttServiceSettingsScreen(settingsState, settings) }
-            composable("settings/ai-service") { AiServiceSettingsScreen(settingsState, settings) }
+            composable("settings/stt-service") {
+                SttServiceSettingsScreen(settingsState, settings, openAsrPrompt = { nav.navigate("settings/asr-prompt-policy") })
+            }
+            composable("settings/ai-service") {
+                AiServiceSettingsScreen(settingsState, settings, openModels = { nav.navigate("settings/ai-service/models") })
+            }
+            composable("settings/ai-service/models") { AiModelsScreen(settingsState, settings, done = { nav.popBackStack() }) }
             composable("settings/cloud-sync") { CloudSyncSettingsScreen(settingsState, settings) }
             composable("settings/appearance") { AppearanceSettingsScreen(settingsState, settings) }
-            composable("settings/ai-prompts") { AiPromptsSettingsScreen(settingsState, settings) }
-            composable("settings/asr-prompt-policy") { AsrPromptPolicySettingsScreen(settingsState, settings) }
+            composable("settings/ai-prompts") {
+                AiPromptsSettingsScreen(settingsState, settings, open = { nav.navigate("settings/ai-prompts/${it.name}") })
+            }
+            composable("settings/ai-prompts/{kind}") { entry ->
+                val kind = entry.arguments?.getString("kind")?.let { name -> AiPromptKind.entries.firstOrNull { it.name == name } }
+                if (kind != null) AiPromptEditScreen(kind, settingsState, settings, done = { nav.popBackStack() })
+            }
+            composable("settings/asr-prompt-policy") {
+                AsrPromptPolicySettingsScreen(
+                    settingsState, settings,
+                    courses = courseState.courses,
+                    saveCourse = { id, prompt, mode ->
+                        courses.updateCourseAsrPrompt(id, prompt)
+                        courses.updateCourseAsrPromptMode(id, mode)
+                    },
+                    openThresholds = { nav.navigate("settings/asr-prompt-policy/thresholds") }
+                )
+            }
+            composable("settings/asr-prompt-policy/thresholds") { AsrPromptThresholdsScreen(settingsState, settings) }
             composable("settings/ai-generation") { AiGenerationSettingsScreen(settingsState, settings) }
             composable("settings/asr-diagnostics") {
                 if (!settingsState.developerMode) {
@@ -914,8 +945,7 @@ fun ListenApp(
                     )
                 }
             }
-            composable("settings/vad-parameters") { VadParametersScreen(sttState.configuredVadConfig, stt) }
-            composable("settings/vad-presets") { VadPresetsScreen(sttState.selectedVadPreset, stt) }
+            composable("settings/vad") { VadSettingsScreen(sttState.configuredVadConfig, sttState.selectedVadPreset, stt) }
             composable("record/{recordId}/ai-results") { entry ->
                 val id = entry.arguments?.getString("recordId")?.toLongOrNull() ?: return@composable
                 AiResultsScreen(id, ai) { key ->

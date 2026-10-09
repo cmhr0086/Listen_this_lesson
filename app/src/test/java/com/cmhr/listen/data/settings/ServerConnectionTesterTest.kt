@@ -47,4 +47,41 @@ class ServerConnectionTesterTest {
             assertTrue(result is ConnectionTestResult.Failure && result.message.contains("超时"))
         }
     }
+
+    @Test
+    fun verifyTreatsUnknownJobAsValidKey() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(200).setBody("ok"))
+            server.enqueue(MockResponse().setResponseCode(404).setBody("{\"detail\":\"Job not found\"}"))
+            val result = ServerConnectionTester(OkHttpClient()).verify(server.url("/").toString(), "secret")
+
+            assertEquals(ConnectionTestResult.Success(404), result)
+            assertEquals("/health", server.takeRequest().path)
+            val probe = server.takeRequest()
+            assertEquals("/jobs/listen-key-probe", probe.path)
+            assertEquals("Bearer secret", probe.getHeader("Authorization"))
+        }
+    }
+
+    @Test
+    fun verifyReportsRejectedKey() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(200))
+            server.enqueue(MockResponse().setResponseCode(403))
+            val result = ServerConnectionTester(OkHttpClient()).verify(server.url("/").toString(), "wrong")
+
+            assertEquals(ConnectionTestResult.Failure("API Key 无效（HTTP 403）。"), result)
+        }
+    }
+
+    @Test
+    fun verifyWithoutKeyStopsAfterHealth() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(200))
+            val result = ServerConnectionTester(OkHttpClient()).verify(server.url("/").toString(), "")
+
+            assertTrue(result is ConnectionTestResult.Failure && result.message.contains("还没填 API Key"))
+            assertEquals(1, server.requestCount)
+        }
+    }
 }

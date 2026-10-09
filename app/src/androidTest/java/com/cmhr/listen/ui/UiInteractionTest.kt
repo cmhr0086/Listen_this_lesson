@@ -799,7 +799,7 @@ class UiInteractionTest {
                 SettingsOverview(
                     state = SettingsUiState(),
                     setDeveloperMode = {},
-                    onSttService = {}, onAiService = {}, onVadParameters = {}, onVadPresets = {}, onAiPrompts = {},
+                    onSttService = {}, onAiService = {}, onVad = {}, onAiPrompts = {},
                     onAsrPromptPolicy = {}, onAiGeneration = {}
                 )
             }
