@@ -210,6 +210,8 @@ Android 的正式云同步设置要求 HTTPS；本地端到端调试如需让模
 
 ### UI 与入口
 
+> v1.3.0 起：视觉组件在 `ui/Lists.kt`（`ListGroup`/`ListRow`/`StatusPill`/`CourseBadge`，课程颜色 `CourseColors` + DataStore `course_colors` 覆盖，经 `LocalCourseColors` 提供）。课堂页在 `ui/ClassScreens.kt`（`ClassTab` 文字/笔记/问答、`SelectionActionBar`），搜索在 `ui/SearchScreen.kt`。Room v12：`records.topic`、`transcript_segments.marked`、`pending_marks` 表 + `mark_new_segments` 触发器（`ListenDatabase.TRIGGERS_CALLBACK` 在 onOpen 建立），标记入口 `CourseRepository.markMoment`（控制栏、通知 `ACTION_MARK`）。自动笔记 `AiViewModel.autoOrganizeNotes`（归档后、全部识别后触发；`splitTopic` 取首行“主题：”写入 topic）。同步新增 `topic`/`marked`，`@EncodeDefault(NEVER)` 保证旧服务端兼容；sync-server 的 `initialize_database` 启动时补列。
+>
 > v1.2.0 起：课堂可暂停/继续（`SttViewModel.pause/resume/endClass`，状态在 `ListeningUiState.pausedClass`/`resumingRecordId`，续录用 `elapsedOffsetMs` 保持计时连续）；归档确认只在“结束”后出现。课堂页底部控制栏为 `CaptureScreens.kt` 的 `CaptureControlBar`，多段录音汇总为 `RecordingsSummaryCard`，“全部识别”是 `RecordingViewModel.recognizeAll`。底栏高亮由 `mainDestinationForRoute` 按内容判断。排队数只取当前记录的 `AsrRuntimeSummary.inProgressCount`。
 >
 > v1.1.0 起：底栏为“录音 / 课程 / AI 会话 / 设置”。“录音”页（`HomeScreens.kt` 的 `RecordHomeScreen`）先开始录制，课程由 `CourseSuggester` 按星期几和时间预选，停止后 `ListenApp` 弹出归档确认并调用 `CourseRepository.moveRecord`（只改 `records.courseId`/自动名称，标记 PENDING）。课堂文字阅读模式在 `TranscriptReading.kt`（仅显示层分段，不改片段数据）；长按/拖动多选内的点按需用 `selectionAwareTap`。主题在 `ui/theme/Palettes.kt`，外观偏好存 DataStore（`theme_palette`、`dark_mode`）。
