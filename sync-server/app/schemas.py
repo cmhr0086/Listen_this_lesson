@@ -26,6 +26,8 @@ class SessionPayload(StrictModel):
     createdAt: Timestamp
     updatedAt: Timestamp
     deleted: bool = False
+    # Added in app 1.3.0; optional so older clients keep working.
+    topic: str | None = None
 
     @field_validator("sessionId")
     @classmethod
@@ -54,6 +56,8 @@ class SegmentPayload(StrictModel):
     createdAt: Timestamp
     updatedAt: Timestamp
     deleted: bool = False
+    # Added in app 1.3.0 ("重点" marks); optional so older clients keep working.
+    marked: bool = False
 
     @field_validator("segmentId", "sessionId")
     @classmethod

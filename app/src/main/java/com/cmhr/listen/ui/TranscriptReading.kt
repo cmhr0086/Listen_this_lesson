@@ -1,5 +1,11 @@
 package com.cmhr.listen.ui
 
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.material.icons.filled.RemoveCircle
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -97,19 +103,67 @@ internal fun linePosition(index: Int, size: Int): LinePosition = when {
     else -> LinePosition.MIDDLE
 }
 
+internal enum class GroupSelection { NONE, PARTIAL, ALL }
+
+internal fun groupSelection(group: TranscriptGroup, selected: Set<Long>): GroupSelection {
+    val count = group.segments.count { it.id in selected }
+    return when (count) {
+        0 -> GroupSelection.NONE
+        group.segments.size -> GroupSelection.ALL
+        else -> GroupSelection.PARTIAL
+    }
+}
+
+/**
+ * Time label of a paragraph. While selecting it becomes a "选择整段" control: one tap selects
+ * the whole paragraph, another clears it.
+ */
 @Composable
-internal fun TranscriptGroupHeader(group: TranscriptGroup) {
+internal fun TranscriptGroupHeader(
+    group: TranscriptGroup,
+    selectionMode: Boolean = false,
+    selection: GroupSelection = GroupSelection.NONE,
+    toggleGroup: () -> Unit = {}
+) {
     val minutes = ((group.endTime - group.startTime) / 60_000).toInt()
-    Row(Modifier.fillMaxWidth().padding(top = 8.dp, start = 4.dp, bottom = 6.dp), verticalAlignment = Alignment.Bottom) {
-        Text(
-            SimpleDateFormat("HH:mm", Locale.CHINA).format(Date(group.startTime)),
-            style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.primary
+    val time = SimpleDateFormat("HH:mm", Locale.CHINA).format(Date(group.startTime))
+    Row(
+        Modifier.fillMaxWidth()
+            .padding(top = 6.dp, bottom = 4.dp)
+            .clip(RoundedCornerShape(22.dp))
+            .then(
+                if (selectionMode) Modifier.heightIn(min = 44.dp).clickable(onClickLabel = "选择整段", onClick = toggleGroup)
+                    .testTag("select-group-${group.segments.first().id}")
+                else Modifier
+            )
+            .padding(start = 4.dp, end = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        if (selectionMode) Icon(
+            when (selection) {
+                GroupSelection.ALL -> Icons.Filled.CheckCircle
+                GroupSelection.PARTIAL -> Icons.Filled.RemoveCircle
+                GroupSelection.NONE -> Icons.Outlined.RadioButtonUnchecked
+            },
+            contentDescription = null,
+            tint = if (selection == GroupSelection.NONE) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(22.dp)
         )
-        if (minutes >= 1) Text(
-            " · 约 $minutes 分钟",
+        Text(time, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+        Text(
+            listOfNotNull(
+                "约 $minutes 分钟".takeIf { minutes >= 1 },
+                group.segments.count { it.marked }.takeIf { it > 0 }?.let { "$it 处重点" }
+            ).joinToString(" · "),
             style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f)
+        )
+        if (selectionMode) Text(
+            if (selection == GroupSelection.ALL) "取消整段" else "选择整段",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary
         )
     }
 }
@@ -150,14 +204,18 @@ internal fun TranscriptLine(
     val shape = position.shape()
     // Selected lines get a tinted band (adjacent selections merge into one), and in selection mode
     // every line shows a check mark, so state is readable without heavy borders.
-    val background = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
-        .compositeOver(MaterialTheme.colorScheme.surfaceContainerHigh)
-    else MaterialTheme.colorScheme.surfaceContainerHigh
+    val base = groupColor()
+    val background = when {
+        selected -> MaterialTheme.colorScheme.primary.copy(alpha = 0.16f).compositeOver(base)
+        segment.marked -> MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.45f).compositeOver(base)
+        else -> base
+    }
     Row(
         modifier
             .fillMaxWidth()
             .clip(shape)
             .background(background)
+            .semantics { if (segment.marked) stateDescription = "重点" }
             .testTag("segment-${segment.id}")
             .semantics {
                 this.selected = selected
@@ -185,6 +243,14 @@ internal fun TranscriptLine(
             )
         }
         Column(Modifier.weight(1f)) {
+            if (segment.marked) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                Icon(Icons.Filled.Bookmark, contentDescription = null, tint = MaterialTheme.colorScheme.tertiary, modifier = Modifier.size(14.dp))
+                Text(
+                    "重点 · " + SimpleDateFormat("HH:mm", Locale.CHINA).format(Date(segment.startTime)),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.tertiary
+                )
+            }
             Text(segment.effectiveText, style = MaterialTheme.typography.bodyLarge)
             if (segment.correctedText != null) {
                 TextButton(onClick = { showCorrection = true }, enabled = !selectionMode, modifier = Modifier.align(Alignment.End)) {
@@ -268,9 +334,16 @@ internal suspend fun LazyListState.scrollToBottom() {
 
 /** Floating "back to latest" button over the transcript, away from the capture controls. */
 @Composable
-internal fun JumpToLatestButton(visible: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+internal fun JumpToLatestButton(visible: Boolean, modifier: Modifier = Modifier, newCount: Int = 0, onClick: () -> Unit) {
     AnimatedVisibility(visible, modifier = modifier, enter = fadeIn() + scaleIn(), exit = fadeOut() + scaleOut()) {
-        SmallFloatingActionButton(
+        if (newCount > 0) ExtendedFloatingActionButton(
+            onClick = onClick,
+            containerColor = MaterialTheme.colorScheme.primary,
+            contentColor = MaterialTheme.colorScheme.onPrimary,
+            modifier = Modifier.heightIn(min = 44.dp).testTag("jump-to-latest"),
+            icon = { Icon(Icons.Outlined.ArrowDownward, contentDescription = null) },
+            text = { Text("$newCount 条新内容") }
+        ) else SmallFloatingActionButton(
             onClick = onClick,
             containerColor = MaterialTheme.colorScheme.secondaryContainer,
             modifier = Modifier.testTag("jump-to-latest")

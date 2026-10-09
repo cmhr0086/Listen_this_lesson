@@ -1,5 +1,16 @@
 package com.cmhr.listen.ui
 
+import androidx.compose.material.icons.outlined.Mic
+import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.Cloud
+import androidx.compose.material.icons.outlined.Palette
+import androidx.compose.material.icons.outlined.Translate
+import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material.icons.outlined.Code
+import androidx.compose.material.icons.outlined.MonitorHeart
+import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.size
@@ -86,6 +97,7 @@ fun SettingsScreen(
 ) = SettingsOverview(
     state = state,
     setDeveloperMode = model::setDeveloperMode,
+    setAutoNotes = model::setAutoNotes,
     onSttService = onSttService,
     onAiService = onAiService,
     onVadParameters = onVadParameters,
@@ -111,72 +123,135 @@ internal fun SettingsOverview(
     onAiGeneration: () -> Unit,
     onCloudSync: () -> Unit = {},
     onAsrDiagnostics: () -> Unit = {},
-    onAppearance: () -> Unit = {}
+    onAppearance: () -> Unit = {},
+    setAutoNotes: (Boolean) -> Unit = {}
 ) {
+    val sttReady = state.server.hasApiKey && state.server.baseUrl.isNotBlank()
+    val aiReady = state.ai.hasApiKey && state.ai.model.isNotBlank()
+    val syncReady = state.cloudSync.baseUrl.isNotBlank() && state.cloudSync.hasApiToken
     LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        Modifier.fillMaxSize().testTag("settings-list"),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        item("stt-link") {
-            SettingsLink(
-                "STT 服务器",
-                state.server.baseUrl.ifBlank { "未设置地址" },
-                onSttService,
-                attention = if (state.server.hasApiKey && state.server.baseUrl.isNotBlank()) null else "未配置",
-                done = state.server.hasApiKey && state.server.baseUrl.isNotBlank()
-            )
+        item("services-heading") { SectionHeader("服务") }
+        item("services") {
+            ListGroup {
+                SettingsRow(
+                    "语音识别", state.server.baseUrl.ifBlank { "未设置地址" }, Icons.Outlined.Mic, onSttService,
+                    status = if (sttReady) "已配置" to StatusTone.DONE else "未配置" to StatusTone.READY,
+                    modifier = Modifier.testTag("settings-stt")
+                )
+                ListDivider(62.dp)
+                SettingsRow(
+                    "AI 服务", "${providerName(state.ai.provider)} · ${state.ai.model.ifBlank { "未设置模型" }}", Icons.Outlined.AutoAwesome, onAiService,
+                    status = if (aiReady) "已配置" to StatusTone.DONE else "可选" to StatusTone.READY,
+                    modifier = Modifier.testTag("settings-ai")
+                )
+                ListDivider(62.dp)
+                SettingsRow(
+                    "云同步",
+                    when {
+                        !syncReady -> "在多台设备之间同步课堂文字"
+                        state.cloudSync.lastSyncAt > 0 -> "上次同步 ${formatSyncTime(state.cloudSync.lastSyncAt)}"
+                        else -> "已配置，尚未同步"
+                    },
+                    Icons.Outlined.Cloud, onCloudSync,
+                    status = if (syncReady) null else "可选" to StatusTone.READY,
+                    modifier = Modifier.testTag("settings-sync")
+                )
+            }
         }
-        item("ai-link") {
-            SettingsLink(
-                "AI 配置",
-                "${providerName(state.ai.provider)} · ${state.ai.model.ifBlank { "未设置模型" }}",
-                onAiService,
-                attention = if (state.ai.hasApiKey && state.ai.model.isNotBlank()) null else "可选 · 未配置",
-                done = state.ai.hasApiKey && state.ai.model.isNotBlank()
-            )
+        item("use-heading") { SectionHeader("使用", Modifier.padding(top = 8.dp)) }
+        item("use") {
+            ListGroup {
+                SettingsRow("外观", "${state.appearance.palette.label} · ${state.appearance.darkMode.label}", Icons.Outlined.Palette, onAppearance)
+                ListDivider(62.dp)
+                SettingsRow("专业词提示", "全局：${state.globalAsrPromptMode.displayName}", Icons.Outlined.Translate, onAsrPromptPolicy)
+                ListDivider(62.dp)
+                SettingsSwitchRow(
+                    "下课后自动整理笔记",
+                    if (aiReady) "归档或识别完成后，用 AI 把整节课整理成笔记" else "需要先配置 AI 服务",
+                    Icons.Outlined.Description,
+                    checked = state.autoNotes,
+                    onChange = setAutoNotes,
+                    modifier = Modifier.testTag("settings-auto-notes")
+                )
+            }
         }
-        item("cloud-sync-link") {
-            val configured = state.cloudSync.baseUrl.isNotBlank() && state.cloudSync.hasApiToken
-            SettingsLink(
-                "云同步",
-                when {
-                    !configured -> "可在多台设备之间同步课堂文字"
-                    state.cloudSync.lastSyncAt > 0 -> "上次同步：${formatSyncTime(state.cloudSync.lastSyncAt)}"
-                    else -> "已配置，尚未同步"
-                },
-                onCloudSync,
-                attention = if (configured) null else "可选 · 未配置",
-                done = configured
-            )
-        }
-        item("appearance-link") {
-            SettingsLink("外观", "${state.appearance.palette.label} · ${state.appearance.darkMode.label}", onAppearance)
-        }
-        item("asr-prompt-policy-link") {
-            SettingsLink("ASR 提示词模式", "全局模式：${state.globalAsrPromptMode.displayName}", onAsrPromptPolicy)
-        }
-
-        item("developer-switch") {
-            Card(Modifier.fillMaxWidth()) {
-                Row(Modifier.padding(16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("开发者模式", style = MaterialTheme.typography.titleMedium)
-                        Text("开启后显示 VAD 设置和独立的 ASR 诊断页面。", style = MaterialTheme.typography.bodySmall)
-                    }
-                    Switch(state.developerMode, setDeveloperMode)
+        item("dev-heading") { SectionHeader("开发者", Modifier.padding(top = 8.dp)) }
+        item("dev") {
+            ListGroup {
+                SettingsSwitchRow(
+                    "开发者模式", "显示 VAD、ASR 诊断和 AI 参数", Icons.Outlined.Code,
+                    checked = state.developerMode, onChange = setDeveloperMode
+                )
+                if (state.developerMode) {
+                    ListDivider(62.dp)
+                    SettingsRow("ASR 诊断", "队列、异步任务和网络阶段", Icons.Outlined.MonitorHeart, onAsrDiagnostics)
+                    ListDivider(62.dp)
+                    SettingsRow("VAD 参数", "阈值、静音、前后保留和时长限制", Icons.Outlined.Tune, onVadParameters)
+                    ListDivider(62.dp)
+                    SettingsRow("VAD 预设", "默认、远距离、近距离或高噪声", Icons.Outlined.Tune, onVadPresets)
+                    ListDivider(62.dp)
+                    SettingsRow("AI 提示词", "笔记、纠错、回答、对话和图片场景", Icons.Outlined.Description, onAiPrompts)
+                    ListDivider(62.dp)
+                    SettingsRow("AI 生成参数", "输出长度、温度、思考模式与推理强度", Icons.Outlined.Tune, onAiGeneration)
                 }
             }
         }
-        if (state.developerMode) {
-            item("asr-diagnostics-link") { SettingsLink("ASR 诊断", "查看持久队列、异步任务、网络阶段和前后台状态。", onAsrDiagnostics) }
-            item("vad-parameters-link") { SettingsLink("VAD 参数", "调整阈值、静音、前后保留和时长限制。", onVadParameters) }
-            item("vad-presets-link") { SettingsLink("VAD 预设", "选择默认、远距离、近距离或高噪声配置。", onVadPresets) }
-            item("ai-prompts-link") { SettingsLink("AI 提示词", "编辑笔记、纠错、回答、对话和图片场景提示词。", onAiPrompts) }
-            item("ai-generation-link") { SettingsLink("AI 生成参数", "调整输出长度、温度、思考模式与推理强度。", onAiGeneration) }
+        item("version") {
+            Text(
+                "听这节课 ${com.cmhr.listen.BuildConfig.VERSION_NAME}",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 4.dp, top = 8.dp)
+            )
         }
     }
 }
+
+@Composable
+private fun SettingsIcon(icon: androidx.compose.ui.graphics.vector.ImageVector) {
+    Box(
+        Modifier.size(34.dp).clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.surfaceContainerHigh),
+        contentAlignment = Alignment.Center
+    ) { Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp)) }
+}
+
+@Composable
+private fun SettingsRow(
+    title: String,
+    description: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    click: () -> Unit,
+    status: Pair<String, StatusTone>? = null,
+    modifier: Modifier = Modifier
+) = ListRow(
+    title = title,
+    subtitle = description,
+    leading = { SettingsIcon(icon) },
+    status = status?.let { (text, tone) -> { StatusPill(text, tone) } },
+    onClick = click,
+    modifier = modifier
+)
+
+@Composable
+private fun SettingsSwitchRow(
+    title: String,
+    description: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    checked: Boolean,
+    onChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier
+) = ListRow(
+    title = title,
+    subtitle = description,
+    leading = { SettingsIcon(icon) },
+    trailing = { Switch(checked, onChange) },
+    onClick = { onChange(!checked) },
+    modifier = modifier
+)
 
 @Composable
 fun CloudSyncSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
@@ -202,7 +277,7 @@ fun CloudSyncSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         item("cloud-sync-settings") {
-            Card(Modifier.fillMaxWidth()) {
+            GroupCard(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     OutlinedTextField(
                         value = baseUrl,
@@ -297,7 +372,7 @@ fun SttServiceSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         item("stt-settings") {
-            Card(Modifier.fillMaxWidth()) {
+            GroupCard(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     OutlinedTextField(
                         serverUrl,
@@ -368,7 +443,7 @@ fun AiServiceSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         item("provider") {
-            Card(Modifier.fillMaxWidth()) {
+            GroupCard(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("接口类型", style = MaterialTheme.typography.titleMedium)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -388,7 +463,7 @@ fun AiServiceSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
             }
         }
         item("ai-form") {
-            Card(Modifier.fillMaxWidth()) {
+            GroupCard(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     OutlinedTextField(baseUrl, { baseUrl = it }, label = { Text("API Base URL") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
                     Box {
@@ -490,7 +565,7 @@ fun AsrPromptPolicySettingsScreen(state: SettingsUiState, model: SettingsViewMod
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item("asr-mode") {
-            Card(Modifier.fillMaxWidth()) {
+            GroupCard(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("全局提示词模式", style = MaterialTheme.typography.titleMedium)
                     HorizontalChoiceSelector(
@@ -506,7 +581,7 @@ fun AsrPromptPolicySettingsScreen(state: SettingsUiState, model: SettingsViewMod
             }
         }
         if (state.developerMode) item("auto-thresholds") {
-            Card(Modifier.fillMaxWidth()) {
+            GroupCard(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("自动模式质量门槛", style = MaterialTheme.typography.titleMedium)
                     MsParameter("最短音频", "片段总长度", config.minAudioDurationMs, 500..10000, 100) { config = config.copy(minAudioDurationMs = it) }
@@ -533,7 +608,7 @@ fun AiGenerationSettingsScreen(state: SettingsUiState, model: SettingsViewModel)
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item("generation-settings") {
-            Card(Modifier.fillMaxWidth()) {
+            GroupCard(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("仅影响后续 AI 请求。诊断不会记录密钥或思维链。", style = MaterialTheme.typography.bodySmall)
                     IntParameter("最大输出 Tokens", value.maxTokens, 512..32768, 512) { value = value.copy(maxTokens = it) }
@@ -619,7 +694,7 @@ fun VadPresetsScreen(selectedPreset: VadPreset?, model: SttViewModel) {
         item("current-preset") { Text("当前预设：${selectedPreset?.displayName ?: "自定义"}", style = MaterialTheme.typography.titleMedium) }
         items(VadPreset.entries, key = { "preset-${it.id}" }) { preset ->
             val config = preset.config
-            Card(Modifier.fillMaxWidth().clickable { model.applyVadPreset(preset) }) {
+            GroupCard(Modifier.fillMaxWidth().clickable { model.applyVadPreset(preset) }) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(preset.displayName, style = MaterialTheme.typography.titleMedium)
                     Text("阈值 ${formatFloat(config.threshold)} · 开始 ${config.startConfirmMs} ms · 静音 ${config.endSilenceMs} ms")
@@ -631,7 +706,7 @@ fun VadPresetsScreen(selectedPreset: VadPreset?, model: SttViewModel) {
 }
 
 @Composable
-private fun VadParametersCard(config: VadConfig, change: (VadConfig) -> Unit, restore: () -> Unit) = Card(Modifier.fillMaxWidth()) {
+private fun VadParametersCard(config: VadConfig, change: (VadConfig) -> Unit, restore: () -> Unit) = GroupCard(Modifier.fillMaxWidth()) {
     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Text("参数会保存到本机；正在切分的片段从下一段使用新边界参数。", style = MaterialTheme.typography.bodySmall)
         FloatParameter("VAD 阈值", "判定语音的概率门槛", config.threshold, 0.1f..0.9f, 0.05f) { change(config.copy(threshold = it)) }
@@ -677,7 +752,7 @@ private fun MsParameter(label: String, description: String, value: Long, range: 
 /** A settings row; [attention] flags something the user still has to set up, [done] confirms it. */
 @Composable
 private fun SettingsLink(title: String, description: String, click: () -> Unit, attention: String? = null, done: Boolean = false) =
-    Card(Modifier.fillMaxWidth().clickable(onClick = click)) {
+    GroupCard(Modifier.fillMaxWidth().clickable(onClick = click)) {
         Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(title, style = MaterialTheme.typography.titleMedium)
@@ -698,7 +773,7 @@ fun AppearanceSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
     val palettes = ThemePalette.entries.filter { it != ThemePalette.DYNAMIC || android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         item("palette") {
-            Card(Modifier.fillMaxWidth()) {
+            GroupCard(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("主题色", style = MaterialTheme.typography.titleMedium)
                     Text("状态颜色（待识别、出错等）在所有主题色下保持一致。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -721,7 +796,7 @@ fun AppearanceSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
             }
         }
         item("dark-mode") {
-            Card(Modifier.fillMaxWidth()) {
+            GroupCard(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("深色模式", style = MaterialTheme.typography.titleMedium)
                     DarkModePreference.entries.forEach { mode ->

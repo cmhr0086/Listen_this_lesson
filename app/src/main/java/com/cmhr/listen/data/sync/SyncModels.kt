@@ -1,5 +1,7 @@
 package com.cmhr.listen.data.sync
 
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -11,7 +13,10 @@ data class SyncSessionPayload(
     val endedAt: Long? = null,
     val createdAt: Long,
     val updatedAt: Long,
-    val deleted: Boolean
+    val deleted: Boolean,
+    /** Added in 1.3.0; left out while unset so a server that predates it still accepts the request. */
+    @OptIn(ExperimentalSerializationApi::class)
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val topic: String? = null
 )
 
 @Serializable
@@ -35,7 +40,10 @@ data class SyncSegmentPayload(
     val serverModel: String? = null,
     val createdAt: Long,
     val updatedAt: Long,
-    val deleted: Boolean
+    val deleted: Boolean,
+    /** Added in 1.3.0; left out while false so a server that predates it still accepts the request. */
+    @OptIn(ExperimentalSerializationApi::class)
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val marked: Boolean = false
 )
 
 @Serializable

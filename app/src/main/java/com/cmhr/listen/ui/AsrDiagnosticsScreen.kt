@@ -193,7 +193,7 @@ private fun DiagSectionTitle(text: String) {
 
 @Composable
 private fun DiagCard(title: String, modifier: Modifier = Modifier, trailing: @Composable () -> Unit = {}, content: @Composable () -> Unit) {
-    Card(modifier.fillMaxWidth()) {
+    GroupCard(modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
@@ -352,7 +352,7 @@ private fun MetricTile(label: String, value: Int, tag: String, modifier: Modifie
     Column(
         modifier
             .clip(RoundedCornerShape(12.dp))
-            .background(if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface)
+            .background(if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh)
             .padding(vertical = 10.dp)
             .semantics(mergeDescendants = true) {}
             .testTag("asr-metric-$tag"),
@@ -435,8 +435,8 @@ private fun AsrDiagnosticCard(
     val state = diagnostic.lifecycleState
     val color = stateColor(state)
     val active = diagnostic.state in ACTIVE_ASR_STATES
-    Card(
-        Modifier.fillMaxWidth()
+    GroupCard(
+            Modifier.fillMaxWidth()
             .testTag("asr-diagnostic-${diagnostic.segmentId}")
             .clickable { expanded = !expanded }
     ) {

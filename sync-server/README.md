@@ -44,6 +44,7 @@ docker run -d --name listen-sync \
 - `updatedAt` 只用于 Last Write Wins：仅当 incoming 严格大于 existing 时覆盖。
 - 删除是 `deleted=true` tombstone，不执行物理删除。
 - `syncStatus` 只存在于 Android 本地数据库。
+- App 1.3.0 起新增可选字段：Session 的 `topic`（课堂主题）与 Segment 的 `marked`（重点）。旧客户端不发送它们仍可同步；客户端未设置时也不发送，因此 1.3.0 客户端可以连接旧服务端，只是不同步重点与主题。已有数据库在服务启动时由 `initialize_database` 自动补列，无需手动迁移。
 - `lastSyncAt/serverTime` 是服务端变更游标。内部 `serverChangedAt` 与 SQLite `BEGIN IMMEDIATE` 事务共同保证 `(lastSyncAt, serverTime]` 增量窗口不会遗漏并发提交。
 
 ## 测试

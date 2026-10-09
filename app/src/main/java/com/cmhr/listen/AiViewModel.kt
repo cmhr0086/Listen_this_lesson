@@ -75,7 +75,8 @@ data class AiContentItem(
     val updatedAt: Long,
     val status: String,
     val preview: String,
-    val recordName: String? = null
+    val recordName: String? = null,
+    val courseId: Long? = null
 )
 
 /**
@@ -95,6 +96,7 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
     private val database = ListenDatabase.get(application)
     private val attachmentStore = AiAttachmentStore(application)
     private val repository = AiRepository(database, attachmentStore)
+    private val courseRepository = com.cmhr.listen.data.course.CourseRepository(database)
     private val settingsRepository = AppSettingsRepository(application)
     private val client = AiServiceClient()
     private val _uiState = MutableStateFlow(AiUiState())
@@ -150,7 +152,8 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
                 updatedAt = row.updatedAt,
                 status = row.status,
                 preview = row.preview,
-                recordName = row.recordName
+                recordName = row.recordName,
+                courseId = row.courseId
             )
         }
     }
@@ -412,7 +415,33 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update { it.copy(error = "当前课堂记录还没有识别内容。") }
             return
         }
-        runAction(recordId, action, segments, attachments, clearSelectionAfterCreate = false, onCreated)
+        runAction(
+            recordId, action, segments, attachments, clearSelectionAfterCreate = false, onCreated,
+            extractTopic = action == AiActionType.ORGANIZE_NOTES
+        )
+    }
+
+    /**
+     * Whole-class notes generated after a class is filed. Silent: does nothing when auto notes are
+     * off, the AI service is not configured, another request is running, the class has no text yet,
+     * or notes already cover its latest text.
+     */
+    fun autoOrganizeNotes(recordId: Long) {
+        if (aiJob?.isActive == true) return
+        viewModelScope.launch {
+            val settings = settingsRepository.settings.first()
+            if (!settings.autoNotes || settings.ai.baseUrl.isBlank() || settings.ai.model.isBlank()) return@launch
+            if (runCatching { settingsRepository.readAiApiKey() }.getOrNull().isNullOrBlank()) return@launch
+            val segments = database.transcriptDao().segments(recordId).first()
+            if (segments.isEmpty()) return@launch
+            val newestText = segments.maxOf { it.endTime }
+            val covered = repository.results(recordId).first().any {
+                it.actionType == AiActionType.ORGANIZE_NOTES.name &&
+                    it.status != AiRequestStatus.ERROR.name && it.createdAt >= newestText
+            }
+            if (covered || aiJob?.isActive == true) return@launch
+            runAction(recordId, AiActionType.ORGANIZE_NOTES, segments, emptyList(), clearSelectionAfterCreate = false, onCreated = {}, extractTopic = true)
+        }
     }
 
     private fun runAction(
@@ -421,7 +450,8 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
         segments: List<TranscriptEntity>,
         attachments: List<PendingAiAttachment>,
         clearSelectionAfterCreate: Boolean,
-        onCreated: (Long) -> Unit
+        onCreated: (Long) -> Unit,
+        extractTopic: Boolean = false
     ) {
         aiJob = viewModelScope.launch {
             val selected = orderTranscriptSegments(segments)
@@ -459,14 +489,16 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
                     credentials,
                     listOf(
                         AiChatMessage("system", prompt),
-                        AiChatMessage("user", actionUserMessage(action, selected, snapshot), images)
+                        AiChatMessage("user", actionUserMessage(action, selected, snapshot, askTopic = extractTopic), images)
                     ),
                     requestOptions(chat = false)
                 )
                 val correction = if (action == AiActionType.CORRECT_ASR) {
                     CorrectionPayloadCodec.decode(completion.content, selected)
                 } else null
-                val output = correction?.let { CorrectionPayloadCodec.toMarkdown(it, selected) } ?: completion.content
+                val (topic, notes) = if (extractTopic && correction == null) splitTopic(completion.content) else null to completion.content
+                topic?.let { courseRepository.updateTopic(recordId, it) }
+                val output = correction?.let { CorrectionPayloadCodec.toMarkdown(it, selected) } ?: notes
                 repository.completeResult(
                     id = resultId,
                     output = output,
@@ -1034,7 +1066,7 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
         fun buildSourceSnapshot(segments: List<TranscriptEntity>): String {
             val formatter = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
             return orderTranscriptSegments(segments).joinToString("\n\n") { segment ->
-                "[${formatter.format(Date(segment.startTime))}]\n${segment.effectiveText}"
+                "[${formatter.format(Date(segment.startTime))}]${if (segment.marked) MARKED_PREFIX else ""}\n${segment.effectiveText}"
             }
         }
 
@@ -1115,12 +1147,27 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
             }.trim()
         }
 
-        fun actionUserMessage(action: AiActionType?, segments: List<TranscriptEntity>, snapshot: String): String =
+        fun actionUserMessage(action: AiActionType?, segments: List<TranscriptEntity>, snapshot: String, askTopic: Boolean = false): String =
             if (action == AiActionType.CORRECT_ASR) {
                 "请按协议校对以下课堂转写：\n\n${buildCorrectionSource(segments)}"
-            } else {
-                "以下是按时间排列的课堂原文：\n\n$snapshot"
+            } else buildString {
+                if (askTopic) appendLine("请先在第一行单独写「主题：」加不超过 12 个字的本节课主题，空一行后再正文。")
+                if (segments.any { it.marked }) appendLine("标有$MARKED_PREFIX 的内容是学生上课时标记的重点，请在结果中突出。")
+                if (isNotEmpty()) appendLine()
+                append("以下是按时间排列的课堂原文：\n\n$snapshot")
             }
+
+        const val MARKED_PREFIX = "【重点】"
+
+        /** Takes a leading "主题：…" line off generated notes; anything else leaves the text as is. */
+        fun splitTopic(content: String): Pair<String?, String> {
+            val lines = content.trimStart().lines()
+            val first = lines.firstOrNull()?.trim().orEmpty().removePrefix("#").trim().removeSurrounding("**").trim()
+            val topic = listOf("主题：", "主题:").firstOrNull { first.startsWith(it) }
+                ?.let { first.removePrefix(it).trim().trim('「', '」', '“', '”', '*').take(24) }
+                ?.takeIf { it.isNotEmpty() } ?: return null to content
+            return topic to lines.drop(1).joinToString("\n").trim()
+        }
 
         fun promptFor(action: AiActionType): String = promptFor(action, AiPromptSettings())
 

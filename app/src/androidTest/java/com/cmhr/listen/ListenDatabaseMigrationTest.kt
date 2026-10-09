@@ -42,7 +42,7 @@ class ListenDatabaseMigrationTest {
     @After fun after() { context.deleteDatabase(databaseName) }
 
     @Test
-    fun migratesV1ThroughV11AndSupportsRecordingState() = runBlocking {
+    fun migratesV1ThroughV12AndSupportsRecordingState() = runBlocking {
         val configuration = SupportSQLiteOpenHelper.Configuration.builder(context)
             .name(databaseName)
             .callback(object : SupportSQLiteOpenHelper.Callback(1) {
@@ -75,19 +75,31 @@ class ListenDatabaseMigrationTest {
                 ListenDatabase.MIGRATION_7_8,
                 ListenDatabase.MIGRATION_8_9,
                 ListenDatabase.MIGRATION_9_10,
-                ListenDatabase.MIGRATION_10_11
+                ListenDatabase.MIGRATION_10_11,
+                ListenDatabase.MIGRATION_11_12
             )
+            .addCallback(ListenDatabase.TRIGGERS_CALLBACK)
             .build()
         try {
+            // v12: existing rows get no topic and no marks; the mark trigger exists after migration.
+            assertEquals(null, database.recordDao().record(1).first()?.topic)
+            assertEquals(false, database.transcriptDao().segments(1).first().first { it.id == 1L }.marked)
+            // The old line ended at 2.6 s, well before the press at 9 s; the new one starts right after it.
+            CourseRepository(database).markMoment(1, at = 9_000)
+            database.transcriptDao().insert(
+                TranscriptEntity(recordId = 1, sessionId = database.recordDao().record(1).first()!!.sessionId, startTime = 10_000, endTime = 11_000, audioDurationMs = 1_000, recognitionDurationMs = null, text = "标记后才识别出来")
+            )
+            assertEquals(listOf(false, true), database.transcriptDao().segments(1).first().sortedBy { it.startTime }.map { it.marked })
             assertEquals("", database.courseDao().course(1).first()?.asrPrompt)
             assertEquals(null, database.courseDao().course(1).first()?.asrPromptModeOverride)
             assertEquals("第一课", database.recordDao().record(1).first()?.name)
-            assertEquals("原始识别文本", database.transcriptDao().segments(1).first().single().text)
-            assertEquals(null, database.transcriptDao().segments(1).first().single().correctedText)
-            assertEquals(null, database.transcriptDao().segments(1).first().single().sourceSegmentId)
-            assertEquals(null, database.transcriptDao().segments(1).first().single().sequenceNumber)
+            val original = database.transcriptDao().segments(1).first().first { it.id == 1L }
+            assertEquals("原始识别文本", original.text)
+            assertEquals(null, original.correctedText)
+            assertEquals(null, original.sourceSegmentId)
+            assertEquals(null, original.sequenceNumber)
             val migratedSession = database.recordDao().record(1).first()!!
-            val migratedSegment = database.transcriptDao().segments(1).first().single()
+            val migratedSegment = original
             UUID.fromString(migratedSession.sessionId)
             UUID.fromString(migratedSegment.segmentId)
             assertEquals(migratedSession.sessionId, migratedSegment.sessionId)
@@ -140,11 +152,11 @@ class ListenDatabaseMigrationTest {
                 correctionId,
                 CorrectionPayload(listOf(CorrectionSegment(1, "纠正后的文本", listOf("识别错误 → 正确文本"))))
             )
-            val corrected = database.transcriptDao().segments(1).first().single()
+            val corrected = database.transcriptDao().segments(1).first().first { it.id == 1L }
             assertEquals("原始识别文本", corrected.text)
             assertEquals("纠正后的文本", corrected.effectiveText)
             aiRepository.restoreOriginal(1)
-            assertEquals("原始识别文本", database.transcriptDao().segments(1).first().single().effectiveText)
+            assertEquals("原始识别文本", database.transcriptDao().segments(1).first().first { it.id == 1L }.effectiveText)
 
             val generalConversationId = aiRepository.createConversation(
                 recordId = null,
@@ -457,7 +469,8 @@ class ListenDatabaseMigrationTest {
         }
 
         val database = Room.databaseBuilder(context, ListenDatabase::class.java, databaseName)
-            .addMigrations(ListenDatabase.MIGRATION_8_9, ListenDatabase.MIGRATION_9_10, ListenDatabase.MIGRATION_10_11)
+            .addMigrations(ListenDatabase.MIGRATION_8_9, ListenDatabase.MIGRATION_9_10, ListenDatabase.MIGRATION_10_11,
+                ListenDatabase.MIGRATION_11_12)
             .build()
         try {
             val diagnostic = database.asrDiagnosticsDao().segment("legacy-clock")

@@ -49,7 +49,8 @@ data class SettingsUiState(
     val availableAiModels: List<String> = emptyList(),
     val isLoadingAiModels: Boolean = false,
     val connectionTestState: ConnectionTestState = ConnectionTestState.Idle,
-    val aiConnectionTestState: ConnectionTestState = ConnectionTestState.Idle
+    val aiConnectionTestState: ConnectionTestState = ConnectionTestState.Idle,
+    val autoNotes: Boolean = true
 )
 
 sealed interface ConnectionTestState {
@@ -87,11 +88,13 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             aiGeneration = settings.aiGeneration,
             globalAsrPromptMode = settings.globalAsrPromptMode,
             asrPromptAutoConfig = settings.asrPromptAutoConfig,
-            cloudSync = settings.cloudSync
+            cloudSync = settings.cloudSync,
+            autoNotes = settings.autoNotes
         ) }
     } } }
 
     fun setDeveloperMode(enabled: Boolean) = viewModelScope.launch { repository.setDeveloperMode(enabled) }
+    fun setAutoNotes(enabled: Boolean) = viewModelScope.launch { repository.setAutoNotes(enabled) }
     fun setThemePalette(palette: ThemePalette) = viewModelScope.launch { repository.setThemePalette(palette) }
     fun setDarkMode(mode: DarkModePreference) = viewModelScope.launch { repository.setDarkMode(mode) }
     fun saveServer(baseUrl: String, apiKey: String?) = viewModelScope.launch {

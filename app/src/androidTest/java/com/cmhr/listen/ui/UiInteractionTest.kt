@@ -657,13 +657,32 @@ class UiInteractionTest {
     }
 
     @Test
-    fun selectionTopBarCopiesSelectedText() {
-        var copied = false
+    fun selectionTopBarCountsAndSelectsAll() {
+        var all = false
         composeRule.setContent {
-            ListenTheme { RecordSelectionTopBar(2, aiEnabled = true, close = {}, process = {}, delete = {}, copy = { copied = true }) }
+            ListenTheme { RecordSelectionTopBar(2, close = {}, selectAll = { all = true }) }
         }
-        composeRule.onNodeWithContentDescription("复制").assertIsEnabled().performClick()
-        composeRule.runOnIdle { assertTrue(copied) }
+        composeRule.onNodeWithText("已选 2 段").assertExists()
+        composeRule.onNodeWithTag("select-all").performClick()
+        composeRule.runOnIdle { assertTrue(all) }
+    }
+
+    @Test
+    fun selectionActionBarCopiesAndMarksSelectedText() {
+        var copied = false
+        var marked = false
+        composeRule.setContent {
+            ListenTheme {
+                SelectionActionBar(
+                    count = 2, aiEnabled = true, allMarked = false,
+                    copy = { copied = true }, askAi = {}, toggleMark = { marked = true },
+                    toNotes = {}, correct = {}, delete = {}
+                )
+            }
+        }
+        composeRule.onNodeWithTag("selection-copy").performClick()
+        composeRule.onNodeWithText("标为重点").performClick()
+        composeRule.runOnIdle { assertTrue(copied); assertTrue(marked) }
     }
 
     @Test
@@ -696,13 +715,45 @@ class UiInteractionTest {
     }
 
     @Test
-    fun zeroSelectionTopBarDisablesAiProcessing() {
-        composeRule.setContent {
-            ListenTheme { RecordSelectionTopBar(0, aiEnabled = false, close = {}, process = {}, delete = {}) }
+    fun paragraphHeaderSelectsTheWholeParagraphWhileSelecting() {
+        val lines = (1L..3L).map { id ->
+            TranscriptEntity(id = id, recordId = 1, sessionId = "s", startTime = id * 1_000, endTime = id * 1_000 + 500, audioDurationMs = 500, recognitionDurationMs = null, text = "第 $id 句")
         }
+        val group = groupTranscript(lines).single()
+        var selected by mutableStateOf(setOf(1L))
+        composeRule.setContent {
+            ListenTheme {
+                TranscriptGroupHeader(
+                    group,
+                    selectionMode = true,
+                    selection = groupSelection(group, selected),
+                    toggleGroup = {
+                        val ids = group.segments.map { it.id }.toSet()
+                        selected = if (groupSelection(group, selected) == GroupSelection.ALL) selected - ids else selected + ids
+                    }
+                )
+            }
+        }
+        composeRule.onNodeWithText("选择整段").assertExists()
+        composeRule.onNodeWithTag("select-group-1").performClick()
+        composeRule.runOnIdle { assertEquals(setOf(1L, 2L, 3L), selected) }
+        composeRule.onNodeWithText("取消整段").assertExists()
+        composeRule.onNodeWithTag("select-group-1").performClick()
+        composeRule.runOnIdle { assertEquals(emptySet<Long>(), selected) }
+    }
 
-        composeRule.onNodeWithText("已选择 0 条").assertTextContains("已选择 0 条")
-        composeRule.onNodeWithText("AI 处理").assertIsNotEnabled()
+    @Test
+    fun emptySelectionDisablesTheActions() {
+        composeRule.setContent {
+            ListenTheme {
+                SelectionActionBar(
+                    count = 0, aiEnabled = false, allMarked = false,
+                    copy = {}, askAi = {}, toggleMark = {}, toNotes = {}, correct = {}, delete = {}
+                )
+            }
+        }
+        composeRule.onNodeWithTag("selection-ask-ai").assertIsNotEnabled()
+        composeRule.onNodeWithTag("selection-copy").assertIsNotEnabled()
     }
 
     @Test
@@ -711,20 +762,23 @@ class UiInteractionTest {
         composeRule.setContent {
             ListenTheme {
                 RecordNormalTopBar(
+                    title = "高等数学 · 第 8 节",
+                    subtitle = "10月9日 周四 10:05–11:40",
+                    course = CourseEntity(id = 1, name = "高等数学", createdAt = 1),
                     menuExpanded = expanded,
                     setMenuExpanded = { expanded = it },
-                    back = {}, organizeNotes = {}, exportTxt = {},
-                    openResults = {}, select = {}, editAsrPrompt = {}
+                    back = {}, exportTxt = {}, select = {}, editAsrPrompt = {}
                 )
             }
         }
 
-        composeRule.onNodeWithText("记录详情").assertTextContains("记录详情")
+        composeRule.onNodeWithText("高等数学 · 第 8 节").assertExists()
         composeRule.onNodeWithContentDescription("更多操作").performClick()
-        listOf("整理成笔记", "导出 TXT", "AI 结果", "选择片段", "ASR 提示词").forEach {
+        listOf("导出 TXT", "选择片段", "专业词提示").forEach {
             composeRule.onNodeWithText(it).assertExists()
         }
-        composeRule.onNodeWithText("总结").assertDoesNotExist()
+        // Notes and AI results live in the class's tabs now, not in the menu.
+        composeRule.onNodeWithText("整理成笔记").assertDoesNotExist()
     }
 
     @Test
@@ -751,12 +805,12 @@ class UiInteractionTest {
             }
         }
 
-        composeRule.onNodeWithText("STT 服务器").assertExists()
-        composeRule.onNodeWithText("AI 配置").assertExists()
+        composeRule.onNodeWithText("语音识别").assertExists()
+        composeRule.onNodeWithText("AI 服务").assertExists()
         composeRule.onNodeWithText("云同步").assertExists()
-        composeRule.onNodeWithText("开发者功能").assertDoesNotExist()
-        composeRule.onNodeWithText("语音识别服务").assertDoesNotExist()
-        composeRule.onNodeWithText("AI 服务").assertDoesNotExist()
+        composeRule.onNodeWithText("下课后自动整理笔记").assertExists()
+        // Developer pages only appear once developer mode is on.
+        composeRule.onNodeWithText("ASR 诊断").assertDoesNotExist()
     }
 
     @Test

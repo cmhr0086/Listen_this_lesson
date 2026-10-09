@@ -29,6 +29,7 @@ def session_payload(*, session_id: str | None = None, updated_at: int = 1_000, d
         "createdAt": 900,
         "updatedAt": updated_at,
         "deleted": deleted,
+        "topic": None,
     }
 
 
@@ -54,6 +55,7 @@ def segment_payload(*, session_id: str, segment_id: str | None = None, updated_a
         "createdAt": 990,
         "updatedAt": updated_at,
         "deleted": deleted,
+        "marked": False,
     }
 
 
@@ -332,3 +334,52 @@ def test_large_responses_are_gzip_compressed(client):
     )
     assert response.headers.get("content-encoding") == "gzip"
     assert len(response.json()["segments"]) == 40
+
+
+def test_marked_segments_and_session_topics_round_trip(client):
+    session = session_payload() | {"topic": "函数的极限"}
+    segment = segment_payload(session_id=session["sessionId"]) | {"marked": True}
+    sync(client, device_id=str(uuid4()), sessions=[session], segments=[segment])
+
+    downloaded = sync(client, device_id=str(uuid4()))
+    assert downloaded["sessions"][0]["topic"] == "函数的极限"
+    assert downloaded["segments"][0]["marked"] is True
+
+
+def test_older_clients_without_new_fields_still_sync(client):
+    session = session_payload()
+    session.pop("topic")
+    segment = segment_payload(session_id=session["sessionId"])
+    segment.pop("marked")
+    result = sync(client, device_id=str(uuid4()), sessions=[session], segments=[segment])
+    assert result["sessionAcks"][0]["matches"] is True
+    assert result["segmentAcks"][0]["matches"] is True
+
+
+def test_database_from_an_older_server_gains_the_new_columns(tmp_path, monkeypatch):
+    import sqlite3
+
+    path = tmp_path / "legacy.db"
+    legacy = sqlite3.connect(path)
+    legacy.executescript(
+        """
+        CREATE TABLE sessions (sessionId TEXT PRIMARY KEY, courseName TEXT NOT NULL, name TEXT NOT NULL,
+            startedAt INTEGER NOT NULL, endedAt INTEGER, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
+            deleted BOOLEAN NOT NULL, serverChangedAt INTEGER NOT NULL);
+        CREATE TABLE segments (segmentId TEXT PRIMARY KEY, sessionId TEXT NOT NULL REFERENCES sessions(sessionId),
+            startTime INTEGER NOT NULL, endTime INTEGER NOT NULL, audioDurationMs INTEGER NOT NULL,
+            recognitionDurationMs INTEGER, text TEXT NOT NULL, correctedText TEXT, correctedAt INTEGER,
+            sourceSegmentId TEXT, sequenceNumber INTEGER, asrJobId TEXT, queueDurationMs INTEGER,
+            uploadDurationMs INTEGER, responseWaitDurationMs INTEGER, totalAsrDurationMs INTEGER, serverModel TEXT,
+            createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, deleted BOOLEAN NOT NULL,
+            serverChangedAt INTEGER NOT NULL);
+        INSERT INTO sessions VALUES ('11111111-1111-1111-1111-111111111111', '高数', '旧课', 1, NULL, 1, 1, 0, 1);
+        """
+    )
+    legacy.commit()
+    legacy.close()
+
+    monkeypatch.setenv("SYNC_API_TOKEN", API_TOKEN)
+    with TestClient(create_app(f"sqlite:///{path}")) as migrated:
+        downloaded = sync(migrated, device_id=str(uuid4()))
+    assert downloaded["sessions"][0]["topic"] is None

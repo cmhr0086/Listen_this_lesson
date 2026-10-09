@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterator
 
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Engine, create_engine, event, inspect
 from sqlalchemy.orm import Session
 
 from .models import Base
@@ -34,8 +34,23 @@ def create_sync_engine(database_url: str | None = None) -> Engine:
     return engine
 
 
+# Columns added after the first release. create_all() never alters existing tables, so
+# databases created by an older server get them here; each is nullable or has a default.
+ADDED_COLUMNS = {
+    "sessions": {"topic": "TEXT"},
+    "segments": {"marked": "BOOLEAN NOT NULL DEFAULT 0"},
+}
+
+
 def initialize_database(engine: Engine) -> None:
     Base.metadata.create_all(engine)
+    with engine.connect() as connection:
+        for table, columns in ADDED_COLUMNS.items():
+            existing = {column["name"] for column in inspect(connection).get_columns(table)}
+            for name, ddl in columns.items():
+                if name not in existing:
+                    connection.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+        connection.commit()
 
 
 def session_provider(engine: Engine) -> Iterator[Session]:

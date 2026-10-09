@@ -1,5 +1,9 @@
 package com.cmhr.listen.ui
 
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Column
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.material.icons.outlined.Search
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
@@ -144,7 +148,7 @@ private fun isAiWorkspaceRoute(route: String?): Boolean =
 internal fun mainDestinationForRoute(route: String?, recordId: Long? = null, liveRecordId: Long? = null): MainDestination = when {
     isSettingsRoute(route) -> MainDestination.SETTINGS
     route == "ai" || route?.startsWith("ai/new") == true || route?.startsWith("ai-conversation/") == true || route?.startsWith("ai/result/") == true -> MainDestination.AI
-    route == MainDestination.RECORD.route -> MainDestination.RECORD
+    route == MainDestination.RECORD.route || route == "search" -> MainDestination.RECORD
     route == "record/{recordId}" && recordId != null && recordId == liveRecordId -> MainDestination.RECORD
     else -> MainDestination.COURSES
 }
@@ -167,14 +171,15 @@ private fun routeTitle(route: String?): String = when (route) {
     "course/{courseId}" -> "课堂记录"
     "record/{recordId}" -> "记录详情"
     "settings" -> "设置"
-    "settings/stt-service" -> "STT 服务器"
+    "search" -> "搜索"
+    "settings/stt-service" -> "语音识别"
     "settings/vad-parameters" -> "VAD 参数"
     "settings/vad-presets" -> "VAD 预设"
-    "settings/ai-service" -> "AI 配置"
+    "settings/ai-service" -> "AI 服务"
     "settings/cloud-sync" -> "云同步"
     "settings/appearance" -> "外观"
     "settings/ai-prompts" -> "AI 提示词"
-    "settings/asr-prompt-policy" -> "ASR 提示词模式"
+    "settings/asr-prompt-policy" -> "专业词提示"
     "settings/ai-generation" -> "AI 生成参数"
     "settings/asr-diagnostics" -> "ASR 诊断"
     "settings/asr-diagnostics/history/{recordId}" -> "ASR 诊断历史"
@@ -225,12 +230,10 @@ fun ListenApp(
     var pendingPermissionRecordId by remember { mutableStateOf<Long?>(null) }
     var pendingCaptureMode by remember { mutableStateOf(CaptureMode.REALTIME_ASR) }
     var recordMenuExpanded by remember { mutableStateOf(false) }
-    var showSelectionAiActions by remember { mutableStateOf(false) }
     var editingRecordCoursePrompt by remember { mutableStateOf(false) }
     var promptDraft by remember { mutableStateOf("") }
     var promptModeDraft by remember { mutableStateOf<String?>(null) }
     var exportContent by remember { mutableStateOf<String?>(null) }
-    var requestedFullAiAction by remember { mutableStateOf<AiActionType?>(null) }
     var confirmDeleteAiContents by remember { mutableStateOf(false) }
     var confirmDeleteTranscripts by remember { mutableStateOf(false) }
     var aiContextMenuExpanded by remember { mutableStateOf(false) }
@@ -258,6 +261,25 @@ fun ListenApp(
     val currentRecord = courseState.selectedRecord?.takeIf { it.id == recordId }
     val currentCourse = currentRecord?.let { record -> courseState.courses.firstOrNull { it.id == record.courseId } }
     val currentSegments = courseState.detailSegments.filter { it.recordId == recordId }
+    val currentSummary by remember(recordId) {
+        recordId?.let(courses::recordSummary) ?: flowOf(null)
+    }.collectAsStateWithLifecycle(initialValue = null)
+    val courseColors by courses.courseColors.collectAsStateWithLifecycle(initialValue = emptyMap())
+    // Notes are made once a class is over: after it is filed, or after its recordings are recognized.
+    var autoNotesFor by remember { mutableStateOf<Long?>(null) }
+    LaunchedEffect(recordingState.recognizingAllRecordId) {
+        val finished = autoNotesFor
+        if (recordingState.recognizingAllRecordId == null && finished != null) ai.autoOrganizeNotes(finished)
+        autoNotesFor = recordingState.recognizingAllRecordId
+    }
+    val copySelection: () -> Unit = {
+        val selected = aiState.selectedSegmentIds
+        val text = com.cmhr.listen.AiViewModel.orderTranscriptSegments(currentSegments.filter { it.id in selected })
+            .joinToString("\n") { it.effectiveText }
+        context.getSystemService(android.content.ClipboardManager::class.java)
+            ?.setPrimaryClip(android.content.ClipData.newPlainText("课堂文字", text))
+        scope.launch { snackbarHostState.showSnackbar("已复制 ${selected.size} 段文字", duration = SnackbarDuration.Short) }
+    }
     val openNewConversation = {
         nav.navigate(newAiConversationRoute(sttState.activeRecordId, sttState.isListening))
     }
@@ -266,10 +288,7 @@ fun ListenApp(
     }
 
     BackHandler(enabled = selectionMode || contentSelectionMode) {
-        if (selectionMode) {
-            showSelectionAiActions = false
-            ai.clearSelection()
-        } else ai.clearContentSelection()
+        if (selectionMode) ai.clearSelection() else ai.clearContentSelection()
     }
     LaunchedEffect(settings) {
         settings.messages.collectLatest { message ->
@@ -285,7 +304,6 @@ fun ListenApp(
         recordMenuExpanded = false
         aiContextMenuExpanded = false
         showAiContext = false
-        if (!selectionMode) showSelectionAiActions = false
     }
     LaunchedEffect(nav) {
         AppNavigationRequests.recordRequests.collectLatest { requestedRecordId ->
@@ -422,9 +440,10 @@ fun ListenApp(
                 courses.moveRecord(filing, courseId)
                 startCourseOverride = null
                 filingRecordId = null
+                ai.autoOrganizeNotes(filing)
             },
-            createNew = { filingRecordId = null; newName = ""; courseCreation = CourseCreation.ThenFile(filing) },
-            dismiss = { filingRecordId = null },
+            createNew = { filingRecordId = null; newName = ""; courseCreation = CourseCreation.ThenFile(filing); ai.autoOrganizeNotes(filing) },
+            dismiss = { filingRecordId = null; ai.autoOrganizeNotes(filing) },
             dismissLabel = "保持不变"
         )
     }
@@ -485,10 +504,10 @@ fun ListenApp(
     // bar's 录音 icon carries a red dot while capturing, so no floating stop button is needed.
     val fabState: FabState = when {
         route == "courses" -> FabState.NewCourse
-        route == "course/{courseId}" && courseId != null -> FabState.NewRecord(courseId)
         else -> FabState.None
     }
 
+    CompositionLocalProvider(LocalCourseColors provides courseColors) {
     Scaffold(
         // The chat composer is the single owner of IME avoidance. Keeping IME
         // insets out of Scaffold prevents its content padding from changing at
@@ -525,28 +544,19 @@ fun ListenApp(
                 )
                 selectionMode -> RecordSelectionTopBar(
                     selectedCount = aiState.selectedSegmentIds.size,
-                    aiEnabled = aiState.selectedSegmentIds.isNotEmpty() && !aiState.isBusy,
                     close = ai::clearSelection,
-                    process = { showSelectionAiActions = true },
-                    delete = { confirmDeleteTranscripts = true },
-                    copy = {
-                        val selected = aiState.selectedSegmentIds
-                        val text = com.cmhr.listen.AiViewModel.orderTranscriptSegments(currentSegments.filter { it.id in selected })
-                            .joinToString("\n") { it.effectiveText }
-                        context.getSystemService(android.content.ClipboardManager::class.java)
-                            ?.setPrimaryClip(android.content.ClipData.newPlainText("课堂文字", text))
-                        scope.launch { snackbarHostState.showSnackbar("已复制 ${selected.size} 段文字", duration = SnackbarDuration.Short) }
-                    }
+                    selectAll = { recordId?.let { id -> ai.replaceSelection(id, currentSegments.mapTo(linkedSetOf()) { it.id }) } }
                 )
                 route == "record/{recordId}" && recordId != null -> RecordNormalTopBar(
-                    title = currentRecord?.name ?: "记录详情",
+                    title = currentSummary?.let { classTitle(it.courseName, it.classNumber, null, it.session.name) }
+                        ?: currentRecord?.name ?: "课堂",
+                    subtitle = currentRecord?.let { record ->
+                        formatSessionWhen(record.startedAt, record.endedAt) + (record.topic?.let { " · $it" } ?: "")
+                    },
+                    course = currentCourse,
                     menuExpanded = recordMenuExpanded,
                     setMenuExpanded = { recordMenuExpanded = it },
                     back = { nav.popBackStack() },
-                    organizeNotes = {
-                        recordMenuExpanded = false
-                        requestedFullAiAction = AiActionType.ORGANIZE_NOTES
-                    },
                     exportTxt = {
                         recordMenuExpanded = false
                         val course = currentCourse
@@ -556,7 +566,6 @@ fun ListenApp(
                             exportLauncher.launch("${record.name}.txt")
                         }
                     },
-                    openResults = { recordMenuExpanded = false; nav.navigate("record/$recordId/ai-results") },
                     select = { recordMenuExpanded = false; ai.beginSelection(recordId) },
                     editAsrPrompt = {
                         recordMenuExpanded = false
@@ -603,13 +612,19 @@ fun ListenApp(
                 )
                 else -> TopAppBar(
                     title = {
-                        val courseName = courseId?.takeIf { route == "course/{courseId}" }
-                            ?.let { id -> courseState.courseSummaries.firstOrNull { it.course.id == id }?.course?.name }
-                        Text(courseName ?: routeTitle(route), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        // The course page shows its name in its own header.
+                        if (route != "course/{courseId}") Text(routeTitle(route), maxLines = 1, overflow = TextOverflow.Ellipsis)
                     },
                     navigationIcon = {
                         if (nested) IconButton(onClick = { nav.popBackStack() }) {
                             Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
+                        }
+                    },
+                    actions = {
+                        if (route == MainDestination.RECORD.route || route == MainDestination.COURSES.route) {
+                            IconButton(onClick = { nav.navigate("search") }, modifier = Modifier.testTag("open-search")) {
+                                Icon(Icons.Outlined.Search, contentDescription = "搜索课堂")
+                            }
                         }
                     }
                 )
@@ -763,7 +778,7 @@ fun ListenApp(
             }
             composable("course/{courseId}") { entry ->
                 val id = entry.arguments?.getString("courseId")?.toLongOrNull() ?: return@composable
-                CourseRecordsScreen(id, courseState, sttState, courses, recordingState.pendingCounts) { record ->
+                CourseRecordsScreen(id, courseState, sttState, courses, recordingState.pendingCounts, startClass = { mode -> quickStart(id, mode) }) { record ->
                     courses.selectRecord(id, record)
                     nav.navigate("record/$record")
                 }
@@ -778,10 +793,6 @@ fun ListenApp(
                     developerMode = settingsState.developerMode,
                     aiState = aiState,
                     aiModel = ai,
-                    showAiActions = showSelectionAiActions,
-                    dismissAiActions = { showSelectionAiActions = false },
-                    requestedFullAction = requestedFullAiAction,
-                    consumeFullAction = { requestedFullAiAction = null },
                     openResult = { nav.navigate("record/$id/ai-result/$it") },
                     openConversation = { nav.navigate("ai-conversation/$it") },
                     recordings = recordingState,
@@ -792,8 +803,22 @@ fun ListenApp(
                     recognizeAll = { recordings.recognizeAll(id) },
                     startOfflineRecognition = recordings::startRecognition,
                     stopOfflineRecognition = recordings::stopRecognition,
-                    deleteRecording = recordings::deleteRecording
+                    deleteRecording = recordings::deleteRecording,
+                    markMoment = {
+                        courses.markMoment(id)
+                        scope.launch { snackbarHostState.showSnackbar("已标记重点", duration = SnackbarDuration.Short) }
+                    },
+                    setMarked = { ids, marked -> courses.setMarked(id, ids, marked) { ai.clearSelection() } },
+                    copySelection = copySelection,
+                    deleteSelection = { confirmDeleteTranscripts = true },
+                    summary = currentSummary
                 )
+            }
+            composable("search") {
+                SearchScreen(courses) { courseId, recordId ->
+                    courses.selectRecord(courseId, recordId)
+                    nav.navigate("record/$recordId")
+                }
             }
             composable("settings") {
                 SettingsScreen(settingsState, settings,
@@ -933,27 +958,21 @@ fun ListenApp(
             }
         }
     }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun RecordSelectionTopBar(
     selectedCount: Int,
-    aiEnabled: Boolean,
     close: () -> Unit,
-    process: () -> Unit,
-    delete: () -> Unit,
-    copy: () -> Unit = {}
+    selectAll: () -> Unit
 ) = TopAppBar(
     navigationIcon = {
         IconButton(onClick = close) { Icon(Icons.Outlined.Close, contentDescription = "退出选择") }
     },
-    title = { Text("已选择 $selectedCount 条") },
-    actions = {
-        IconButton(onClick = copy, enabled = selectedCount > 0) { Icon(Icons.Outlined.ContentCopy, contentDescription = "复制") }
-        IconButton(onClick = delete, enabled = selectedCount > 0) { Icon(Icons.Outlined.Delete, contentDescription = "删除") }
-        TextButton(onClick = process, enabled = aiEnabled) { Text("AI 处理") }
-    },
+    title = { Text("已选 $selectedCount 段") },
+    actions = { TextButton(onClick = selectAll, modifier = Modifier.testTag("select-all")) { Text("全选") } },
     colors = TopAppBarDefaults.topAppBarColors(
         containerColor = MaterialTheme.colorScheme.primaryContainer,
         titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -987,17 +1006,27 @@ internal fun AiContentSelectionTopBar(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun RecordNormalTopBar(
+    title: String,
+    subtitle: String?,
+    course: com.cmhr.listen.data.course.CourseEntity?,
     menuExpanded: Boolean,
     setMenuExpanded: (Boolean) -> Unit,
     back: () -> Unit,
-    organizeNotes: () -> Unit,
     exportTxt: () -> Unit,
-    openResults: () -> Unit,
     select: () -> Unit,
-    editAsrPrompt: () -> Unit,
-    title: String = "记录详情"
+    editAsrPrompt: () -> Unit
 ) = TopAppBar(
-    title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+    title = {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            course?.let { CourseBadge(it.id, it.name, 32.dp, Modifier.padding(end = 10.dp)) }
+            Column {
+                Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
+                subtitle?.let {
+                    Text(it, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+    },
     navigationIcon = {
         IconButton(onClick = back) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回") }
     },
@@ -1008,17 +1037,13 @@ internal fun RecordNormalTopBar(
         DropdownMenu(
             expanded = menuExpanded,
             onDismissRequest = { setMenuExpanded(false) },
-            modifier = Modifier.widthIn(min = 240.dp),
+            modifier = Modifier.widthIn(min = 220.dp),
             shape = RoundedCornerShape(20.dp)
         ) {
-            // AI · 导出与选择 · 课程设置
-            DropdownMenuItem(text = { Text("整理成笔记") }, onClick = organizeNotes)
-            DropdownMenuItem(text = { Text("AI 结果") }, onClick = openResults)
-            HorizontalDivider()
             DropdownMenuItem(text = { Text("选择片段") }, onClick = select)
             DropdownMenuItem(text = { Text("导出 TXT") }, onClick = exportTxt)
             HorizontalDivider()
-            DropdownMenuItem(text = { Text("ASR 提示词") }, onClick = editAsrPrompt)
+            DropdownMenuItem(text = { Text("专业词提示") }, onClick = editAsrPrompt)
         }
     }
 )

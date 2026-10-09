@@ -110,7 +110,7 @@ fun TimedDeleteDialog(
 
 @Composable
 fun ExpandHeader(title: String, expanded: Boolean, click: () -> Unit) =
-    Card(Modifier.fillMaxWidth().clickable(onClick = click)) {
+    GroupCard(Modifier.fillMaxWidth().clickable(onClick = click)) {
         Text("$title ${if (expanded) "▲" else "▼"}", Modifier.padding(16.dp), style = MaterialTheme.typography.titleMedium)
     }
 

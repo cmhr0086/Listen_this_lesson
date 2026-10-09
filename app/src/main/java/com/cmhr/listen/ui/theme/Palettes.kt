@@ -29,7 +29,7 @@ private data class Accent(
 private data class Tone(val primary: Long, val onPrimary: Long, val container: Long, val onContainer: Long)
 
 private fun accent(palette: ThemePalette): Accent = when (palette) {
-    ThemePalette.TEAL, ThemePalette.DYNAMIC -> Accent(Tone(0xFF00696B, 0xFFFFFFFF, 0xFF9CF1F2, 0xFF002020), Tone(0xFF80D4D6, 0xFF003738, 0xFF004F51, 0xFF9CF1F2))
+    ThemePalette.TEAL, ThemePalette.DYNAMIC -> Accent(Tone(0xFF00696B, 0xFFFFFFFF, 0xFFCCE8E7, 0xFF002020), Tone(0xFF80D4D6, 0xFF003738, 0xFF004F51, 0xFF9CF1F2))
     ThemePalette.BLUE -> Accent(Tone(0xFF2B5EA7, 0xFFFFFFFF, 0xFFD6E3FF, 0xFF001B3E), Tone(0xFFA9C7FF, 0xFF003063, 0xFF0F4688, 0xFFD6E3FF))
     ThemePalette.GREEN -> Accent(Tone(0xFF2E6A44, 0xFFFFFFFF, 0xFFB1F1C1, 0xFF00210E), Tone(0xFF96D5A6, 0xFF00391C, 0xFF13512E, 0xFFB1F1C1))
     ThemePalette.PURPLE -> Accent(Tone(0xFF6750A4, 0xFFFFFFFF, 0xFFEADDFF, 0xFF21005D), Tone(0xFFD0BCFF, 0xFF381E72, 0xFF4F378B, 0xFFEADDFF))
