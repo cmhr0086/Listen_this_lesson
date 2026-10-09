@@ -27,6 +27,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import com.cmhr.listen.recording.CaptureMode
+import com.cmhr.listen.PausedClass
 import com.cmhr.listen.data.course.CourseEntity
 import com.cmhr.listen.data.course.CourseSuggestion
 import com.cmhr.listen.data.course.CourseSummary
@@ -141,6 +142,86 @@ class UiInteractionTest {
     }
 
     @Test
+    fun capturingPanelOffersPauseAndEnd() {
+        var paused = false
+        var ended = false
+        composeRule.setContent {
+            ListenTheme {
+                CapturePanel(
+                    recordId = 1,
+                    listening = ListeningUiState(isListening = true, activeRecordId = 1, captureMode = CaptureMode.REALTIME_ASR, listeningStartedAtElapsedRealtimeMs = SystemClock.elapsedRealtime()),
+                    processing = OfflineRecognitionState(),
+                    start = {},
+                    stop = { ended = true },
+                    pause = { paused = true }
+                )
+            }
+        }
+        composeRule.onNodeWithTag("pause-capture").performClick()
+        composeRule.onNodeWithTag("stop-capture").performClick()
+        composeRule.runOnIdle { assertTrue(paused); assertTrue(ended) }
+    }
+
+    @Test
+    fun pausedClassResumesFromTheControlBar() {
+        var resumed = false
+        composeRule.setContent {
+            ListenTheme {
+                CaptureControlBar(
+                    recordId = 1,
+                    listening = ListeningUiState(pausedClass = PausedClass(1, CaptureMode.RECORD_ONLY, "散打", "散打-10-09", 754_000)),
+                    processing = OfflineRecognitionState(),
+                    start = {}, pause = {}, resume = { resumed = true }, end = {},
+                    jumpToLatest = null
+                )
+            }
+        }
+        composeRule.onNodeWithText("已暂停 00:12:34").assertExists()
+        composeRule.onNodeWithTag("bar-resume").performClick()
+        composeRule.runOnIdle { assertTrue(resumed) }
+        composeRule.onNodeWithTag("jump-to-latest").assertDoesNotExist()
+    }
+
+    @Test
+    fun controlBarOffersContinueAndJumpToLatestForAFinishedClass() {
+        var started: CaptureMode? = null
+        var jumped = false
+        composeRule.setContent {
+            ListenTheme {
+                CaptureControlBar(
+                    recordId = 1,
+                    listening = ListeningUiState(),
+                    processing = OfflineRecognitionState(),
+                    start = { started = it }, pause = {}, resume = {}, end = {},
+                    jumpToLatest = { jumped = true }
+                )
+            }
+        }
+        composeRule.onNodeWithTag("bar-start-record-only").performClick()
+        composeRule.onNodeWithContentDescription("回到最新").performClick()
+        composeRule.runOnIdle { assertEquals(CaptureMode.RECORD_ONLY, started); assertTrue(jumped) }
+    }
+
+    @Test
+    fun controlBarWhileCapturingShowsPauseAndEnd() {
+        var paused = false
+        composeRule.setContent {
+            ListenTheme {
+                CaptureControlBar(
+                    recordId = 1,
+                    listening = ListeningUiState(isListening = true, activeRecordId = 1, captureMode = CaptureMode.REALTIME_ASR, pendingQueueCount = 2, listeningStartedAtElapsedRealtimeMs = SystemClock.elapsedRealtime()),
+                    processing = OfflineRecognitionState(),
+                    start = {}, pause = { paused = true }, resume = {}, end = {},
+                    jumpToLatest = null
+                )
+            }
+        }
+        composeRule.onNodeWithText("实时转写 · 2 段识别中").assertExists()
+        composeRule.onNodeWithTag("bar-pause").performClick()
+        composeRule.runOnIdle { assertTrue(paused) }
+    }
+
+    @Test
     fun realtimePanelShowsSpeechAndQueue() {
         composeRule.setContent {
             ListenTheme {
@@ -252,6 +333,36 @@ class UiInteractionTest {
     }
 
     @Test
+    fun recordingsCollapseIntoOneSummaryWithRecognizeAll() {
+        var all = false
+        var expanded by mutableStateOf(false)
+        val recordings = (0..3).map { i ->
+            RecordingEntity(recordId = 1, sessionId = "s", localPath = "$i.wav", startedAt = i * 60_000L, durationMs = 10_000, totalFrames = 160_000, state = RecordingState.RECORDED.name)
+        }
+        composeRule.setContent {
+            ListenTheme {
+                RecordingsSummaryCard(
+                    recordings = recordings,
+                    processing = OfflineRecognitionState(),
+                    recognizingAll = false,
+                    recognitionAllowed = true,
+                    expanded = expanded,
+                    toggleExpanded = { expanded = !expanded },
+                    recognizeAll = { all = true },
+                    startRecognition = {}, pauseRecognition = {}, delete = {}
+                )
+            }
+        }
+        composeRule.onNodeWithText("录音文件 4 段 · 00:40").assertExists()
+        composeRule.onNodeWithText("4 段待识别").assertExists()
+        composeRule.onNodeWithTag("recording-${recordings[0].recordingId}").assertDoesNotExist()
+        composeRule.onNodeWithTag("recognize-all").performClick()
+        composeRule.onNodeWithContentDescription("展开录音文件").performClick()
+        composeRule.onNodeWithTag("recording-${recordings[0].recordingId}").assertExists()
+        composeRule.runOnIdle { assertTrue(all) }
+    }
+
+    @Test
     fun interruptedRecordingIsReadyToRecognizeWithNeutralNote() {
         var started: String? = null
         val recording = RecordingEntity(recordId = 1, sessionId = "s", localPath = "a.wav", startedAt = 0, durationMs = 5_000, totalFrames = 80_000, state = RecordingState.INTERRUPTED.name)
@@ -323,12 +434,12 @@ class UiInteractionTest {
 
         composeRule.waitForIdle()
         composeRule.runOnIdle { assertEquals(0, healthRefreshes) }
-        composeRule.onNodeWithText("客户端队列：1 / 持久化").assertExists()
-        composeRule.onNodeWithText("待提交：1").assertExists()
-        composeRule.onNodeWithText("提交中：1").assertExists()
-        composeRule.onNodeWithText("服务端在途：2").assertExists()
-        composeRule.onNodeWithText("全局并发槽：3 / 3").assertExists()
-        composeRule.onNodeWithText("正在轮询：1").assertExists()
+        composeRule.onNodeWithText("本记录未完成 1").assertExists()
+        composeRule.onNodeWithTag("asr-metric-queued").assertTextContains("1", substring = true)
+        composeRule.onNodeWithTag("asr-metric-submitting").assertTextContains("1", substring = true)
+        composeRule.onNodeWithTag("asr-metric-server").assertTextContains("2", substring = true)
+        composeRule.onNodeWithTag("asr-metric-polling").assertTextContains("1", substring = true)
+        composeRule.onNodeWithText("并发槽 3 / 3").assertExists()
         composeRule.onNodeWithTag("asr-capture-vad").assertExists()
         composeRule.onNodeWithText("全部记录").assertDoesNotExist()
         composeRule.onNodeWithTag("asr-diagnostics-list")
@@ -373,8 +484,8 @@ class UiInteractionTest {
             }
         }
 
-        composeRule.onNodeWithTag("asr-diagnostics-list").performScrollToIndex(3)
-        composeRule.onNodeWithText("服务端等待：—（估算中）").assertExists()
+        composeRule.onNodeWithTag("asr-diagnostics-list").performScrollToNode(hasTestTag("asr-diagnostic-processing-anchor-test"))
+        composeRule.onNodeWithText("服务端等待 —（估算中）").assertExists()
         composeRule.onNodeWithText("81188.9s", substring = true).assertDoesNotExist()
     }
 
@@ -413,8 +524,7 @@ class UiInteractionTest {
         composeRule.onNodeWithTag("asr-diagnostics-list").performScrollToNode(hasTestTag("asr-diagnostic-preview-16"))
         composeRule.onNodeWithTag("asr-diagnostic-preview-16").assertExists()
         composeRule.onNodeWithTag("asr-diagnostic-preview-1").assertDoesNotExist()
-        // record, capture/VAD, summary, fifteen diagnostics, then the more action
-        composeRule.onNodeWithTag("asr-diagnostics-list").performScrollToIndex(18)
+        composeRule.onNodeWithTag("asr-diagnostics-list").performScrollToNode(hasTestTag("asr-more-button"))
         composeRule.onNodeWithTag("asr-more-button").assertExists().performClick()
         composeRule.runOnIdle { assertEquals(8L, openedRecordId) }
     }

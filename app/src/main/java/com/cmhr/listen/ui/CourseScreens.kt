@@ -5,6 +5,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -59,6 +60,7 @@ import com.cmhr.listen.data.ai.AiActionType
 import com.cmhr.listen.data.course.ClassRecordEntity
 import com.cmhr.listen.data.course.CourseEntity
 import com.cmhr.listen.data.course.TranscriptEntity
+import kotlinx.coroutines.launch
 import com.cmhr.listen.data.stt.AsrPromptMode
 
 @Composable
@@ -167,6 +169,9 @@ fun RecordDetailsScreen(
     recordings: RecordingUiState,
     startCapture: (CaptureMode) -> Unit,
     stopCapture: () -> Unit,
+    pauseCapture: () -> Unit = {},
+    resumeCapture: () -> Unit = {},
+    recognizeAll: () -> Unit = {},
     startOfflineRecognition: (String) -> Unit,
     stopOfflineRecognition: () -> Unit,
     deleteRecording: (String) -> Unit
@@ -182,7 +187,11 @@ fun RecordDetailsScreen(
     val capturingHere = listening.isListening && listening.activeRecordId == recordId
     val realtimeHere = capturingHere && listening.captureMode == CaptureMode.REALTIME_ASR
     var recordingsExpanded by remember(recordId) { mutableStateOf(false) }
+    val pausedHere = !listening.isListening && listening.pausedClass?.recordId == recordId
+    val useControlBar = capturingHere || pausedHere || segments.isNotEmpty() || recordings.recordings.isNotEmpty()
     val listState = rememberLazyListState()
+    val atEnd by remember { androidx.compose.runtime.derivedStateOf { !listState.canScrollForward } }
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
     // Follow new text during realtime transcription, unless the user scrolled up to read.
     androidx.compose.runtime.LaunchedEffect(orderedSegments.size, realtimeHere) {
         if (!realtimeHere || orderedSegments.isEmpty()) return@LaunchedEffect
@@ -251,34 +260,25 @@ fun RecordDetailsScreen(
                 item("record-summary") {
                     RecordDetailCard(course, record)
                 }
-                item("capture-panel") {
-                    // A finished class with content only needs a small "继续录制" entry.
-                    val compact = !capturingHere && record.endedAt != null && (segments.isNotEmpty() || recordings.recordings.isNotEmpty())
-                    CapturePanel(recordId, listening, recordings.processing, startCapture, stopCapture, compact = compact)
+                // Only a brand-new, empty class shows the big start cards; every other state uses the
+                // bottom control bar so pause/continue/end never require scrolling to the top.
+                if (!useControlBar) item("capture-panel") {
+                    CapturePanel(recordId, listening, recordings.processing, startCapture, stopCapture, pause = pauseCapture, resume = resumeCapture)
                 }
                 aiState.error?.let { item("ai-error") { ErrorCard(it) } }
-                val allRecognized = recordings.recordings.isNotEmpty() && recordings.recordings.all { it.recordingState == RecordingState.COMPLETED }
-                if (allRecognized && !recordingsExpanded) {
-                    item("recordings-collapsed") {
-                        RecordingsCollapsedRow(recordings.recordings.size, recordings.recordings.totalDurationMs()) { recordingsExpanded = true }
-                    }
-                } else if (recordings.recordings.isNotEmpty()) {
-                    item("recordings-heading") {
-                        SectionHeading("录音", "${recordings.recordings.size} 段 · 共 ${formatClockDuration(recordings.recordings.totalDurationMs())}")
-                    }
-                    val recognitionAllowed = !listening.isListening && !recordings.processing.isProcessing
-                    val numbered = recordings.recordings.sortedBy { it.startedAt }.withIndex().associate { (index, value) -> value.recordingId to index + 1 }
-                    items(recordings.recordings, key = { "recording-${it.recordingId}" }) { recording ->
-                        RecordingItem(
-                            recording = recording,
-                            number = numbered.getValue(recording.recordingId),
-                            processing = recordings.processing,
-                            recognitionAllowed = recognitionAllowed,
-                            startRecognition = startOfflineRecognition,
-                            pauseRecognition = stopOfflineRecognition,
-                            delete = deleteRecording
-                        )
-                    }
+                if (recordings.recordings.isNotEmpty()) item("recordings-summary") {
+                    RecordingsSummaryCard(
+                        recordings = recordings.recordings,
+                        processing = recordings.processing,
+                        recognizingAll = recordings.recognizingAllRecordId == recordId,
+                        recognitionAllowed = !listening.isListening && !recordings.processing.isProcessing,
+                        expanded = recordingsExpanded,
+                        toggleExpanded = { recordingsExpanded = !recordingsExpanded },
+                        recognizeAll = recognizeAll,
+                        startRecognition = startOfflineRecognition,
+                        pauseRecognition = stopOfflineRecognition,
+                        delete = deleteRecording
+                    )
                 }
                 item("segment-heading") {
                     SectionHeading("文字", if (segments.isEmpty()) null else "${segments.size} 段 · ${groups.size} 个段落")
@@ -314,17 +314,21 @@ fun RecordDetailsScreen(
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun RecordingsCollapsedRow(count: Int, totalMs: Long, expand: () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().clickable(onClick = expand).padding(vertical = 8.dp).testTag("recordings-collapsed"),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text("录音 $count 段 · 共 ${formatClockDuration(totalMs)} · 已全部识别", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
-        Text("展开", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+        // While selecting text the bar only stays for a live or paused class.
+        if (record != null && useControlBar && (!selectionMode || capturingHere || pausedHere)) {
+            CaptureControlBar(
+                recordId = recordId,
+                listening = listening,
+                processing = recordings.processing,
+                start = startCapture,
+                pause = pauseCapture,
+                resume = resumeCapture,
+                end = stopCapture,
+                jumpToLatest = if (!atEnd && orderedSegments.isNotEmpty()) {
+                    { scope.launch { listState.animateScrollToItem((listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)) } }
+                } else null
+            )
+        }
     }
 }
 

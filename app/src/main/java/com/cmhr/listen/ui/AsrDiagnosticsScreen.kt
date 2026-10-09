@@ -2,6 +2,38 @@ package com.cmhr.listen.ui
 
 import android.os.SystemClock
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ExpandLess
+import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Dp
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -83,27 +115,28 @@ fun AsrDiagnosticsScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item("record") {
-            Text(
-                currentRecordName?.let { "当前记录：$it" } ?: "请先选择课堂记录",
-                style = MaterialTheme.typography.titleMedium
-            )
+            Column(Modifier.padding(horizontal = 4.dp)) {
+                Text(currentRecordName ?: "请先选择课堂记录", style = MaterialTheme.typography.titleLarge)
+                if (currentRecordId != null) Text(
+                    "本记录共 $totalCount 个识别片段",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
-        item("capture-vad") { CaptureAndVadCard(state, vadState) }
-        item("summary") {
-            RuntimeSummaryCard(
-                activeDiagnostics = visibleActiveDiagnostics,
-                totalCount = totalCount,
-                recentCounts = recentCounts,
-                runtimeSummary = runtimeSummary,
-                health = health,
-                healthRefreshing = healthRefreshing,
-                healthError = healthError,
-                refreshHealth = refreshHealth
-            )
+        item("capture-vad") { CaptureAndVadCard(state, vadState, recentCounts.discardedFillerCount) }
+        item("summary") { QueueCard(visibleActiveDiagnostics, runtimeSummary, recentCounts) }
+        item("server") { ServerCard(health, healthRefreshing, healthError, refreshHealth) }
+        item("segments-heading") {
+            DiagSectionTitle(if (totalCount > DIAGNOSTICS_PREVIEW_LIMIT) "最近 $DIAGNOSTICS_PREVIEW_LIMIT 个片段" else "片段")
         }
         if (visibleDiagnostics.isEmpty() && vadState.capturingSegmentId == null) {
             item("empty") {
-                Text(if (currentRecordId == null) "选择课堂记录后可查看诊断。" else "当前记录尚无 ASR 生命周期数据。")
+                Text(
+                    if (currentRecordId == null) "选择课堂记录后可查看诊断。" else "当前记录尚无 ASR 生命周期数据。",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                )
             }
         }
         items(visibleDiagnostics, key = { "diagnostic-${it.segmentId}" }) { diagnostic ->
@@ -115,7 +148,7 @@ fun AsrDiagnosticsScreen(
                     onClick = { openHistory(currentRecordId) },
                     modifier = Modifier.fillMaxWidth().testTag("asr-more-button")
                 ) {
-                    Text("查看更多（剩余 ${totalCount - DIAGNOSTICS_PREVIEW_LIMIT} 条）")
+                    Text("查看全部（还有 ${totalCount - DIAGNOSTICS_PREVIEW_LIMIT} 个）")
                 }
             }
         }
@@ -133,13 +166,13 @@ fun AsrDiagnosticsHistoryScreen(
     LazyColumn(
         modifier = Modifier.fillMaxSize().testTag("asr-diagnostics-history-list"),
         contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         item("record") {
-            Text(
-                recordName?.let { "课堂记录：$it" } ?: "ASR 诊断历史",
-                style = MaterialTheme.typography.titleMedium
-            )
+            Column(Modifier.padding(horizontal = 4.dp, vertical = 4.dp)) {
+                Text(recordName ?: "ASR 诊断历史", style = MaterialTheme.typography.titleLarge)
+                Text("共 ${diagnostics.size} 个片段，最新的在前", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
         if (diagnostics.isEmpty()) item("empty") { Text("当前记录尚无 ASR 生命周期数据。") }
         items(diagnostics, key = { "diagnostic-history-${it.segmentId}" }) { diagnostic ->
@@ -149,92 +182,247 @@ fun AsrDiagnosticsHistoryScreen(
 }
 
 @Composable
-private fun CaptureAndVadCard(state: ListeningUiState, vadState: VadDiagnosticsUiState) {
+private fun DiagSectionTitle(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.titleSmall,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(start = 4.dp, top = 8.dp)
+    )
+}
+
+@Composable
+private fun DiagCard(title: String, modifier: Modifier = Modifier, trailing: @Composable () -> Unit = {}, content: @Composable () -> Unit) {
+    Card(modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                trailing()
+            }
+            content()
+        }
+    }
+}
+
+/** A label on the left and a monospace value on the right; used for every key/value line. */
+@Composable
+private fun DiagRow(label: String, value: String, valueColor: Color = Color.Unspecified, indent: Boolean = false) {
+    DiagRow(label, indent) { Text(value, style = DiagValueStyle, color = valueColor) }
+}
+
+@Composable
+private fun DiagRow(label: String, indent: Boolean = false, value: @Composable () -> Unit) {
+    // Sub-steps of the line above are indented so the breakdown reads as a tree.
+    Row(Modifier.fillMaxWidth().padding(start = if (indent) 16.dp else 0.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+        value()
+    }
+}
+
+@Composable
+private fun StatusDot(color: Color, size: Dp = 8.dp) {
+    Box(Modifier.size(size).clip(CircleShape).background(color))
+}
+
+@Composable
+private fun CaptureAndVadCard(state: ListeningUiState, vadState: VadDiagnosticsUiState, discardedFillers: Int) {
     var expanded by remember { mutableStateOf(false) }
-    Card(Modifier.fillMaxWidth().testTag("asr-capture-vad")) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Text("采集与 VAD", style = MaterialTheme.typography.titleMedium)
-            Text("采集状态：${if (state.isListening) "正在监听" else "未监听"}")
-            Text("当前片段：${vadState.capturingSegmentId?.let(::shortSegmentId) ?: "无"}")
-            if (vadState.capturingSegmentId != null) {
-                SmoothElapsedText(
-                    label = "已收音：",
+    val listeningColor = if (state.isListening) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outline
+    DiagCard(
+        "采集与 VAD",
+        Modifier.testTag("asr-capture-vad"),
+        trailing = {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                StatusDot(listeningColor)
+                Text(if (state.isListening) "正在监听" else "未监听", style = MaterialTheme.typography.labelLarge, color = listeningColor)
+            }
+        }
+    ) {
+        VadMeter(vadState)
+        DiagRow("当前片段") {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(vadState.capturingSegmentId?.let(::shortSegmentId) ?: "无", style = DiagValueStyle)
+                if (vadState.capturingSegmentId != null) SmoothElapsedText(
+                    label = "",
                     startElapsedRealtimeMs = vadState.capturingStartedAtElapsedRealtimeMs,
                     fallbackStartWallTimeMs = vadState.capturingStartedAt,
                     active = true,
                     modifier = Modifier.testTag("asr-capturing-elapsed")
                 )
             }
-            Text("VAD 语音概率：${formatFloat(vadState.vadProbability)}")
-            Text("当前实际阈值：${formatFloat(vadState.effectiveVadConfig.threshold)}")
-            Text("检测到语音：${if (vadState.isSpeechDetected) "是" else "否"}")
-            Text("连续静音：${vadState.silenceDurationMs} ms")
-            ExpandHeader("更多采集信息", expanded) { expanded = !expanded }
-            if (expanded) {
-                Text("片段开始原因：${vadState.segmentStartReason ?: "无"}")
-                Text("片段结束原因：${vadState.segmentEndReason ?: "无"}")
-                Text("已丢弃过短片段：${vadState.discardedShortSegments}")
-                Text("录音读取错误：${vadState.audioReadErrors}")
-                vadState.lastPromptDecision?.let {
-                    Text("Prompt 模式：${it.effectiveMode.displayName}")
-                    Text("最近片段携带 Prompt：${if (it.included) "是" else "否"}")
-                    Text("Prompt 决策：${it.reason}")
-                }
+        }
+        DiagRow("连续静音", "${vadState.silenceDurationMs} ms")
+        Row(Modifier.fillMaxWidth().clickable { expanded = !expanded }, verticalAlignment = Alignment.CenterVertically) {
+            Text("更多采集信息", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary, modifier = Modifier.weight(1f))
+            Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+        }
+        if (expanded) {
+            DiagRow("片段开始原因", vadState.segmentStartReason ?: "无")
+            DiagRow("片段结束原因", vadState.segmentEndReason ?: "无")
+            DiagRow("丢弃过短片段", "${vadState.discardedShortSegments}")
+            DiagRow("丢弃语气词片段（24h）", "$discardedFillers")
+            DiagRow("录音读取错误", "${vadState.audioReadErrors}", if (vadState.audioReadErrors > 0) MaterialTheme.colorScheme.error else Color.Unspecified)
+            vadState.lastPromptDecision?.let {
+                DiagRow("Prompt 模式", it.effectiveMode.displayName)
+                DiagRow("最近片段携带 Prompt", if (it.included) "是" else "否")
+                Text("Prompt 决策：${it.reason}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+/** Speech probability as a bar with the threshold marked, so "why did it not cut?" is visible. */
+@Composable
+private fun VadMeter(vadState: VadDiagnosticsUiState) {
+    val probability = vadState.vadProbability.coerceIn(0f, 1f)
+    val threshold = vadState.effectiveVadConfig.threshold.coerceIn(0f, 1f)
+    val speech = vadState.isSpeechDetected
+    val barColor = if (speech) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
+    val track = MaterialTheme.colorScheme.outlineVariant
+    val marker = MaterialTheme.colorScheme.onSurface
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(
+                if (speech) "检测到语音" else "静音",
+                style = MaterialTheme.typography.titleSmall,
+                color = if (speech) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                "概率 ${formatFloat(vadState.vadProbability)} · 阈值 ${formatFloat(vadState.effectiveVadConfig.threshold)}",
+                style = DiagValueStyle
+            )
+        }
+        Canvas(Modifier.fillMaxWidth().height(10.dp).testTag("asr-vad-meter")) {
+            val radius = CornerRadius(size.height / 2, size.height / 2)
+            drawRoundRect(track, cornerRadius = radius)
+            if (probability > 0f) drawRoundRect(barColor, size = Size(size.width * probability, size.height), cornerRadius = radius)
+            val x = size.width * threshold
+            drawLine(marker, Offset(x, -2.dp.toPx()), Offset(x, size.height + 2.dp.toPx()), strokeWidth = 2.dp.toPx())
+        }
+    }
+}
+
+@Composable
+private fun QueueCard(activeDiagnostics: List<AsrSegmentDiagnosticEntity>, runtimeSummary: AsrRuntimeSummary?, recentCounts: AsrDiagnosticStateCounts) {
+    val processing = activeDiagnostics.firstOrNull {
+        it.lifecycleState == AsrLifecycleState.SUBMITTING ||
+            it.lifecycleState == AsrLifecycleState.QUEUED_SERVER ||
+            it.lifecycleState == AsrLifecycleState.PROCESSING
+    }
+    DiagCard(
+        "识别队列",
+        trailing = {
+            Text("本记录未完成 ${activeDiagnostics.size}", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    ) {
+        if (runtimeSummary == null) {
+            Text("队列状态尚未就绪。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        } else {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MetricTile("待提交", runtimeSummary.queuedLocalCount, "queued", Modifier.weight(1f))
+                MetricTile("提交中", runtimeSummary.submittingCount, "submitting", Modifier.weight(1f))
+                MetricTile("服务端", runtimeSummary.serverInFlightCount, "server", Modifier.weight(1f))
+                MetricTile("轮询", runtimeSummary.pollingCount, "polling", Modifier.weight(1f))
+            }
+            ConcurrencyBar(runtimeSummary.globalInFlightCount, runtimeSummary.inFlightCapacity)
+            if (runtimeSummary.isBackpressured) {
+                Text("并发槽已满，新的片段在本地持久队列等待。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary)
+            }
+            if (runtimeSummary.submissionUnknownCount > 0) {
+                Text(
+                    "${runtimeSummary.submissionUnknownCount} 个片段提交状态未知，在下方展开确认。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+            DiagRow("本次运行", "完成 ${runtimeSummary.completedCount} · 失败 ${runtimeSummary.failedCount}")
+        }
+        DiagRow(
+            "最近 24 小时（全部记录）",
+            "成功 ${recentCounts.completedCount} · 失败 ${recentCounts.failedCount} · 丢弃 ${recentCounts.droppedCount}"
+        )
+        DiagRow("当前处理", processing?.let { shortSegmentId(it.segmentId) + " · " + stateName(it.lifecycleState) } ?: "无")
+    }
+}
+
+@Composable
+private fun MetricTile(label: String, value: Int, tag: String, modifier: Modifier) {
+    val active = value > 0
+    Column(
+        modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface)
+            .padding(vertical = 10.dp)
+            .semantics(mergeDescendants = true) {}
+            .testTag("asr-metric-$tag"),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            "$value",
+            style = MaterialTheme.typography.titleLarge.copy(fontFeatureSettings = "tnum"),
+            color = if (active) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(label, style = MaterialTheme.typography.labelMedium, color = if (active) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+/** Global in-flight slots as discrete pips: full means new segments must wait locally. */
+@Composable
+private fun ConcurrencyBar(used: Int, capacity: Int) {
+    val full = used >= capacity
+    DiagRow("并发槽 $used / $capacity") {
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            repeat(capacity) { index ->
+                Box(
+                    Modifier.size(width = 18.dp, height = 8.dp).clip(RoundedCornerShape(4.dp)).background(
+                        when {
+                            index >= used -> MaterialTheme.colorScheme.outlineVariant
+                            full -> MaterialTheme.colorScheme.tertiary
+                            else -> MaterialTheme.colorScheme.primary
+                        }
+                    )
+                )
             }
         }
     }
 }
 
 @Composable
-private fun RuntimeSummaryCard(
-    activeDiagnostics: List<AsrSegmentDiagnosticEntity>,
-    totalCount: Int,
-    recentCounts: AsrDiagnosticStateCounts,
-    runtimeSummary: AsrRuntimeSummary?,
-    health: AsrHealthSnapshot?,
-    healthRefreshing: Boolean,
-    healthError: String?,
-    refreshHealth: () -> Unit
-) {
-    val processing = activeDiagnostics.firstOrNull {
-        it.lifecycleState == AsrLifecycleState.SUBMITTING ||
-            it.lifecycleState == AsrLifecycleState.QUEUED_SERVER ||
-            it.lifecycleState == AsrLifecycleState.PROCESSING
-    }
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("运行概况", style = MaterialTheme.typography.titleMedium)
-            Text("客户端队列：${activeDiagnostics.size} / 持久化")
-            if (runtimeSummary != null) {
-                Text("待提交：${runtimeSummary.queuedLocalCount}")
-                Text("提交中：${runtimeSummary.submittingCount}")
-                Text("服务端在途：${runtimeSummary.serverInFlightCount}")
-                Text("全局并发槽：${runtimeSummary.globalInFlightCount} / ${runtimeSummary.inFlightCapacity}")
-                Text("正在轮询：${runtimeSummary.pollingCount}")
-                Text("待人工确认：${runtimeSummary.submissionUnknownCount}")
-                Text("累计完成：${runtimeSummary.completedCount} · 失败 ${runtimeSummary.failedCount}")
-                if (runtimeSummary.isBackpressured) {
-                    Text(
-                        "并发槽已满，新的片段正在本地持久队列等待。",
-                        color = MaterialTheme.colorScheme.tertiary
-                    )
-                }
+private fun ServerCard(health: AsrHealthSnapshot?, refreshing: Boolean, error: String?, refresh: () -> Unit) {
+    DiagCard(
+        "服务端",
+        trailing = {
+            TextButton(
+                onClick = refresh,
+                enabled = !refreshing,
+                contentPadding = PaddingValues(horizontal = 8.dp),
+                modifier = Modifier.height(32.dp).testTag("asr-health-refresh")
+            ) {
+                if (refreshing) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                else Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(if (refreshing) "正在刷新" else "刷新")
             }
-            Text("当前处理：${processing?.let { shortSegmentId(it.segmentId) + " · " + stateName(it.lifecycleState) } ?: "无"}")
-            Text("诊断记录：$totalCount 条")
-            Text("服务端模型：${health?.model ?: "尚未手动获取"}")
-            Text("服务端队列：${health?.let { "queued ${it.queuedJobs} · processing ${it.processingJobs} · 上限 ${it.maxQueueDepth}" } ?: "—"}")
-            Text("Health 手动快照：${health?.observedAt?.let(::formatDiagnosticTime) ?: "—"}")
-            Text("最近 24 小时：成功 ${recentCounts.completedCount} · 失败 ${recentCounts.failedCount} · 丢弃 ${recentCounts.droppedCount}")
-            Text("其中已丢弃语气词片段：${recentCounts.discardedFillerCount}")
-            healthError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-            OutlinedButton(
-                onClick = refreshHealth,
-                enabled = !healthRefreshing,
-                modifier = Modifier.testTag("asr-health-refresh")
-            ) { Text(if (healthRefreshing) "正在刷新" else "刷新服务状态") }
         }
+    ) {
+        if (health == null) {
+            Text("不会自动请求服务端；需要时点「刷新」获取一次快照。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        } else {
+            DiagRow("模型", health.model + (health.dtype?.let { " · $it" } ?: ""))
+            DiagRow("服务端队列", "排队 ${health.queuedJobs} · 处理 ${health.processingJobs} · 上限 ${health.maxQueueDepth}")
+            DiagRow("快照时间", formatDiagnosticTime(health.observedAt))
+        }
+        error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
     }
+}
+
+@Composable
+private fun stateColor(state: AsrLifecycleState): Color = when (state) {
+    AsrLifecycleState.FAILED, AsrLifecycleState.DROPPED, AsrLifecycleState.SUBMISSION_UNKNOWN -> MaterialTheme.colorScheme.error
+    AsrLifecycleState.COMPLETED -> MaterialTheme.colorScheme.primary
+    AsrLifecycleState.RETRY_WAIT -> MaterialTheme.colorScheme.tertiary
+    else -> MaterialTheme.colorScheme.secondary
 }
 
 @Composable
@@ -245,50 +433,74 @@ private fun AsrDiagnosticCard(
 ) {
     var expanded by remember(diagnostic.segmentId) { mutableStateOf(false) }
     val state = diagnostic.lifecycleState
+    val color = stateColor(state)
+    val active = diagnostic.state in ACTIVE_ASR_STATES
     Card(
         Modifier.fillMaxWidth()
             .testTag("asr-diagnostic-${diagnostic.segmentId}")
             .clickable { expanded = !expanded }
     ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Text(
-                "${shortSegmentId(diagnostic.segmentId)} · ${stateName(state)}",
-                style = MaterialTheme.typography.titleMedium,
-                color = when (state) {
-                    AsrLifecycleState.FAILED, AsrLifecycleState.DROPPED,
-                    AsrLifecycleState.SUBMISSION_UNKNOWN -> MaterialTheme.colorScheme.error
-                    AsrLifecycleState.COMPLETED -> MaterialTheme.colorScheme.primary
-                    else -> MaterialTheme.colorScheme.onSurface
-                }
-            )
-            Text("捕获：${formatDiagnosticTime(diagnostic.audioStartTime)} · 音频 ${formatMs(diagnostic.audioDurationMs)}")
-            Text("生命周期：${diagnostic.state}", style = MaterialTheme.typography.bodySmall)
-            ClientQueueDuration(diagnostic)
-            ServerWaitDuration(diagnostic)
-            EndToEndDuration(diagnostic)
-            if (expanded) {
-                Text("job_id：${diagnostic.jobId ?: "尚未取得"}")
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                StatusDot(color)
                 Text(
-                    "计时基准：${if (diagnostic.clockBasis == AsrClockBasis.ELAPSED_REALTIME.name) "设备单调时钟" else "旧数据墙上时钟"}"
+                    buildAnnotatedString {
+                        withStyle(SpanStyle(fontFamily = FontFamily.Monospace)) { append(shortSegmentId(diagnostic.segmentId)) }
+                        append(" · ")
+                        withStyle(SpanStyle(color = color)) { append(stateName(state)) }
+                    },
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.weight(1f)
                 )
-                Text("本地入队：${formatDiagnosticTime(diagnostic.queuedLocalAt)}")
-                Text("提交开始：${formatNullableTime(diagnostic.submitStartedAt)}")
-                Text("提交结束：${formatNullableTime(diagnostic.submitCompletedAt)}")
-                Text("首次观察 queued：${formatNullableTime(diagnostic.firstServerQueuedAt)}")
-                Text("首次观察 processing：${formatNullableTime(diagnostic.firstServerProcessingAt)}")
-                Text("首次观察 completed：${formatNullableTime(diagnostic.firstServerCompletedAt)}")
-                Text("POST /transcribe：${formatNullableMs(diagnostic.postDurationMs)}")
-                Text("实际上传：${formatNullableMs(diagnostic.uploadDurationMs)}")
-                Text("等待提交响应：${formatNullableMs(diagnostic.submitResponseWaitDurationMs)}")
-                Text("服务端排队：${formatNullableMs(diagnostic.estimatedServerQueueDurationMs)}（估算）")
-                Text("模型处理：${formatNullableMs(diagnostic.estimatedProcessingDurationMs)}（估算）")
-                Text("结果返回：${formatNullableMs(diagnostic.resultResponseDurationMs)}")
-                Text("尝试次数：提交 ${diagnostic.submitAttempts} · 轮询 ${diagnostic.pollAttempts}")
-                diagnostic.lastHttpStatus?.let { Text("最近 HTTP：$it") }
-                diagnostic.serverModel?.let { Text("服务端模型：$it") }
-                diagnostic.failureStage?.let { Text("失败阶段：${failureStageName(it)}") }
-                diagnostic.exceptionClass?.let { Text("异常类型：$it") }
-                diagnostic.safeErrorMessage?.let { Text("安全错误：$it", color = MaterialTheme.colorScheme.error) }
+                EndToEndDuration(diagnostic)
+                Icon(
+                    if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                    contentDescription = if (expanded) "收起" else "展开",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+            Text(
+                "${formatClock(diagnostic.audioStartTime)} · 音频 ${formatMs(diagnostic.audioDurationMs)}" +
+                    (if (diagnostic.submitAttempts > 1) " · 提交 ${diagnostic.submitAttempts} 次" else "") +
+                    (diagnostic.lastHttpStatus?.takeIf { it >= 400 }?.let { " · HTTP $it" } ?: ""),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (active) LiveStageLine(diagnostic) else StageBreakdown(diagnostic)
+            diagnostic.safeErrorMessage?.takeIf { !expanded }?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
+            if (expanded) {
+                HorizontalDivider(Modifier.padding(vertical = 4.dp))
+                DiagSubTitle("耗时")
+                DiagRow("客户端排队") { ClientQueueDuration(diagnostic) }
+                DiagRow("POST /transcribe", formatNullableMs(diagnostic.postDurationMs))
+                DiagRow("实际上传", formatNullableMs(diagnostic.uploadDurationMs), indent = true)
+                DiagRow("等待提交响应", formatNullableMs(diagnostic.submitResponseWaitDurationMs), indent = true)
+                DiagRow("服务端等待（估算）") { ServerWaitDuration(diagnostic) }
+                DiagRow("排队（估算）", formatNullableMs(diagnostic.estimatedServerQueueDurationMs), indent = true)
+                DiagRow("模型处理（估算）", formatNullableMs(diagnostic.estimatedProcessingDurationMs), indent = true)
+                DiagRow("结果返回", formatNullableMs(diagnostic.resultResponseDurationMs))
+                DiagSubTitle("时间点 · ${formatDay(diagnostic.queuedLocalAt)}")
+                DiagRow("本地入队", formatTimeOfDay(diagnostic.queuedLocalAt))
+                DiagRow("提交开始", formatNullableTimeOfDay(diagnostic.submitStartedAt))
+                DiagRow("提交结束", formatNullableTimeOfDay(diagnostic.submitCompletedAt))
+                DiagRow("首次 queued", formatNullableTimeOfDay(diagnostic.firstServerQueuedAt))
+                DiagRow("首次 processing", formatNullableTimeOfDay(diagnostic.firstServerProcessingAt))
+                DiagRow("首次 completed", formatNullableTimeOfDay(diagnostic.firstServerCompletedAt))
+                DiagSubTitle("请求")
+                DiagRow("job_id", diagnostic.jobId?.take(18) ?: "尚未取得")
+                DiagRow("尝试次数", "提交 ${diagnostic.submitAttempts} · 轮询 ${diagnostic.pollAttempts}")
+                diagnostic.lastHttpStatus?.let { DiagRow("最近 HTTP", "$it", if (it >= 400) MaterialTheme.colorScheme.error else Color.Unspecified) }
+                diagnostic.serverModel?.let { DiagRow("服务端模型", it) }
+                DiagRow("计时基准", if (diagnostic.clockBasis == AsrClockBasis.ELAPSED_REALTIME.name) "设备单调时钟" else "旧数据墙上时钟")
+                if (diagnostic.failureStage != null || diagnostic.exceptionClass != null || diagnostic.safeErrorMessage != null) {
+                    DiagSubTitle("错误", MaterialTheme.colorScheme.error)
+                    diagnostic.failureStage?.let { DiagRow("失败阶段", failureStageName(it), MaterialTheme.colorScheme.error) }
+                    diagnostic.exceptionClass?.let { DiagRow("异常类型", it.substringAfterLast('.')) }
+                    diagnostic.safeErrorMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+                }
                 NetworkEventTimeline(events(diagnostic.segmentId))
                 if (state == AsrLifecycleState.SUBMISSION_UNKNOWN) {
                     Text("重新提交可能在服务端产生重复任务，请先确认服务端没有该任务。", style = MaterialTheme.typography.bodySmall)
@@ -296,7 +508,57 @@ private fun AsrDiagnosticCard(
                         Text(if (diagnostic.jobId == null) "已确认，重新提交" else "继续轮询已有任务")
                     }
                 }
-            } else Text("点击展开完整时间轴", style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiagSubTitle(text: String, color: Color = MaterialTheme.colorScheme.primary) {
+    Text(text, style = MaterialTheme.typography.labelLarge, color = color, modifier = Modifier.padding(top = 4.dp))
+}
+
+/** For a segment still in the pipeline: only the stage it is waiting in, ticking. */
+@Composable
+private fun LiveStageLine(diagnostic: AsrSegmentDiagnosticEntity) {
+    when (diagnostic.lifecycleState) {
+        AsrLifecycleState.QUEUED_LOCAL, AsrLifecycleState.CAPTURING -> SmoothElapsedText(
+            "客户端排队 ", diagnostic.queuedLocalElapsedMs, diagnostic.queuedLocalAt, true,
+            clockBasis = diagnostic.clockBasis
+        )
+        AsrLifecycleState.SUBMITTING -> SmoothElapsedText(
+            "正在提交 ", diagnostic.submitStartedElapsedMs, diagnostic.submitStartedAt, true,
+            clockBasis = diagnostic.clockBasis
+        )
+        AsrLifecycleState.QUEUED_SERVER, AsrLifecycleState.PROCESSING, AsrLifecycleState.RETRY_WAIT ->
+            ServerWaitDuration(diagnostic, label = "服务端等待 ")
+        else -> Unit
+    }
+}
+
+/** Finished segment: where the end-to-end time went, as one stacked bar. */
+@Composable
+private fun StageBreakdown(diagnostic: AsrSegmentDiagnosticEntity) {
+    val queue = diagnostic.clientQueueDurationMs ?: 0L
+    val submit = diagnostic.postDurationMs ?: 0L
+    val server = diagnostic.serverWaitDurationMs ?: 0L
+    val total = queue + submit + server
+    if (total <= 0L) return
+    val colors = listOf(MaterialTheme.colorScheme.outline, MaterialTheme.colorScheme.tertiary, MaterialTheme.colorScheme.primary)
+    val parts = listOf(queue, submit, server)
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)).background(MaterialTheme.colorScheme.surface)) {
+            parts.forEachIndexed { index, value ->
+                if (value > 0L) Box(Modifier.weight(value.toFloat()).fillMaxHeight().background(colors[index]))
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            listOf("排队" to queue, "提交" to submit, "服务端" to server).forEachIndexed { index, (label, value) ->
+                if (value > 0L) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    StatusDot(colors[index], 6.dp)
+                    Text("$label ${formatShortMs(value)}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
         }
     }
 }
@@ -305,9 +567,9 @@ private fun AsrDiagnosticCard(
 private fun ClientQueueDuration(diagnostic: AsrSegmentDiagnosticEntity) {
     val active = diagnostic.state in ACTIVE_ASR_STATES && diagnostic.submitStartedAt == null
     val finalValue = diagnostic.clientQueueDurationMs
-    if (finalValue != null || !active) StaticDurationText("客户端排队：", finalValue)
+    if (finalValue != null || !active) StaticDurationText("", finalValue)
     else SmoothElapsedText(
-        "客户端排队：",
+        "",
         diagnostic.queuedLocalElapsedMs,
         diagnostic.queuedLocalAt,
         true,
@@ -316,32 +578,27 @@ private fun ClientQueueDuration(diagnostic: AsrSegmentDiagnosticEntity) {
 }
 
 @Composable
-private fun ServerWaitDuration(diagnostic: AsrSegmentDiagnosticEntity) {
+private fun ServerWaitDuration(diagnostic: AsrSegmentDiagnosticEntity, label: String = "") {
     val active = diagnostic.jobId != null && diagnostic.lifecycleState in setOf(
         AsrLifecycleState.QUEUED_SERVER, AsrLifecycleState.PROCESSING, AsrLifecycleState.RETRY_WAIT
     )
     val finalValue = diagnostic.serverWaitDurationMs
-    if (finalValue != null) StaticDurationText("服务端等待：", finalValue, "（估算）")
-    else if (!active) Text("服务端等待：—（无法计算）", fontFamily = FontFamily.Monospace)
+    if (finalValue != null) StaticDurationText(label, finalValue)
+    else if (!active) StaticText("$label—（无法计算）")
     else SmoothElapsedText(
-        "服务端等待：", diagnostic.submitCompletedElapsedMs, diagnostic.submitCompletedAt, true,
-        suffix = "（估算）",
+        label, diagnostic.submitCompletedElapsedMs, diagnostic.submitCompletedAt, true,
         unavailableText = "—（估算中）",
         clockBasis = diagnostic.clockBasis
     )
 }
 
+/** Right-aligned in the row header: end-to-end when done, otherwise the task's age, ticking. */
 @Composable
 private fun EndToEndDuration(diagnostic: AsrSegmentDiagnosticEntity) {
     val finalValue = diagnostic.totalEndToEndDurationMs
-    val label = when (diagnostic.lifecycleState) {
-        AsrLifecycleState.COMPLETED -> "端到端："
-        AsrLifecycleState.FAILED, AsrLifecycleState.DROPPED -> "任务历时："
-        else -> "任务年龄："
-    }
-    if (finalValue != null || diagnostic.state !in ACTIVE_ASR_STATES) StaticDurationText(label, finalValue)
+    if (finalValue != null || diagnostic.state !in ACTIVE_ASR_STATES) StaticDurationText("", finalValue)
     else SmoothElapsedText(
-        label,
+        "",
         diagnostic.captureStartedElapsedMs,
         diagnostic.captureStartedAt,
         true,
@@ -351,8 +608,17 @@ private fun EndToEndDuration(diagnostic: AsrSegmentDiagnosticEntity) {
 
 @Composable
 private fun StaticDurationText(label: String, value: Long?, suffix: String = "") {
-    Text("$label${formatNullableMs(value)}$suffix", fontFamily = FontFamily.Monospace)
+    StaticText("$label${formatNullableMs(value)}$suffix")
 }
+
+@Composable
+private fun StaticText(text: String) {
+    Text(text, style = DiagValueStyle)
+}
+
+/** Tabular digits keep columns of times aligned without monospacing the Chinese around them. */
+private val DiagValueStyle: TextStyle
+    @Composable get() = MaterialTheme.typography.bodySmall.copy(fontFeatureSettings = "tnum")
 
 /** Its local state invalidates this Text, not the complete diagnostics list. */
 @Composable
@@ -394,7 +660,7 @@ internal fun SmoothElapsedText(
     Text(
         "$label${elapsedMs?.let { formatSmoothMs(it) + suffix } ?: unavailableText}",
         modifier = modifier,
-        fontFamily = FontFamily.Monospace
+        style = DiagValueStyle
     )
 }
 
@@ -431,20 +697,19 @@ internal fun formatSmoothMs(value: Long): String = String.format(Locale.US, "%.1
 @Composable
 private fun NetworkEventTimeline(flow: Flow<List<AsrNetworkEventEntity>>) {
     val values by flow.collectAsStateWithLifecycle(initialValue = emptyList())
-    Text("网络事件", style = MaterialTheme.typography.titleSmall)
-    if (values.isEmpty()) Text("暂无网络事件。", style = MaterialTheme.typography.bodySmall)
+    DiagSubTitle("网络事件")
+    if (values.isEmpty()) Text("暂无网络事件。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     values.groupBy { it.requestKind to it.attempt }.forEach { (request, requestEvents) ->
-        Text("${request.first}#${request.second}", style = MaterialTheme.typography.labelLarge)
+        Text("${request.first} #${request.second}", style = MaterialTheme.typography.labelMedium, fontFamily = FontFamily.Monospace)
         if (requestEvents.none { it.eventType == "CONNECT_END" } && requestEvents.any {
                 it.eventType == "REQUEST_BODY_START" || it.eventType == "RESPONSE_HEADERS_START"
             }
-        ) Text("connectEnd · 复用已有连接", style = MaterialTheme.typography.bodySmall)
+        ) Text("复用已有连接（无 connectEnd）", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         requestEvents.forEach { event ->
-            Text(
-                "${eventName(event.eventType)} · " +
-                    "${event.elapsedSinceCallStartMs?.let { "+${it}ms" } ?: "—"} · " +
-                    if (event.appInForeground) "前台" else "后台",
-                style = MaterialTheme.typography.bodySmall
+            DiagRow(
+                "  " + eventName(event.eventType) + if (event.appInForeground) "" else " · 后台",
+                event.elapsedSinceCallStartMs?.let { "+${it}ms" } ?: "—",
+                if (event.eventType == "CALL_FAILED") MaterialTheme.colorScheme.error else Color.Unspecified
             )
         }
     }
@@ -493,4 +758,8 @@ private fun shortSegmentId(id: String) = "#${id.take(8)}"
 private fun formatMs(value: Long) = String.format(Locale.US, "%.2fs", value / 1_000.0)
 private fun formatNullableMs(value: Long?) = value?.let(::formatMs) ?: "—"
 private fun formatDiagnosticTime(value: Long) = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.getDefault()).format(Date(value))
-private fun formatNullableTime(value: Long?) = value?.let(::formatDiagnosticTime) ?: "—"
+private fun formatDay(value: Long) = SimpleDateFormat("MM-dd", Locale.getDefault()).format(Date(value))
+private fun formatTimeOfDay(value: Long) = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date(value))
+private fun formatNullableTimeOfDay(value: Long?) = value?.let(::formatTimeOfDay) ?: "—"
+private fun formatClock(value: Long) = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(value))
+private fun formatShortMs(value: Long) = if (value < 1_000) "${value}ms" else String.format(Locale.US, "%.1fs", value / 1_000.0)

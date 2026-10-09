@@ -119,7 +119,7 @@ class ListeningForegroundService : Service() {
             .setContentTitle(courseName.ifBlank { "课堂录制中" })
             .setContentText("${recordName.ifBlank { "课堂记录" }} · $status")
             .setContentIntent(PendingIntent.getActivity(this, 10, openIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
-            .addAction(0, if (recordOnly) "停止录音" else "停止转写", PendingIntent.getService(this, 11, stopIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
+            .addAction(0, "结束", PendingIntent.getService(this, 11, stopIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
             .setWhen(whenWallClock)
             .setUsesChronometer(true)
             .setOngoing(true)

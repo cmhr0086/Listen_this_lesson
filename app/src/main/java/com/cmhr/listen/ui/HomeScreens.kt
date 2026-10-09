@@ -34,6 +34,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -77,7 +78,9 @@ fun RecordHomeScreen(
     start: (CaptureMode) -> Unit,
     stop: () -> Unit,
     openRecord: (SessionSummary) -> Unit,
-    openActiveRecord: () -> Unit
+    openActiveRecord: () -> Unit,
+    pause: () -> Unit = {},
+    resume: () -> Unit = {}
 ) {
     LazyColumn(
         Modifier.fillMaxSize().testTag("record-home-list"),
@@ -85,8 +88,15 @@ fun RecordHomeScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item("quick-start") {
-            if (listening.isListening) ActiveClassCard(listening, openActiveRecord, stop)
-            else StartClassCard(startCourse, suggestion, listening, processing, pickCourse, start)
+            val paused = listening.pausedClass
+            when {
+                listening.isListening -> ActiveClassCard(listening, openActiveRecord, pause, stop)
+                paused != null -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    PausedCapturePanel(paused, resume, stop, title = "已暂停「${paused.recordName ?: "当前课堂"}」")
+                    TextButton(onClick = openActiveRecord, modifier = Modifier.testTag("open-paused-record")) { Text("查看这节课") }
+                }
+                else -> StartClassCard(startCourse, suggestion, listening, processing, pickCourse, start)
+            }
         }
         item("recent-heading") { HomeSectionTitle("最近课堂") }
         if (recent.isEmpty()) item("empty-recent") {
@@ -182,7 +192,7 @@ private fun StartModeButton(modifier: Modifier, mode: CaptureMode, enabled: Bool
 }
 
 @Composable
-private fun ActiveClassCard(listening: ListeningUiState, open: () -> Unit, stop: () -> Unit) {
+private fun ActiveClassCard(listening: ListeningUiState, open: () -> Unit, pause: () -> Unit, stop: () -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Box(Modifier.clickable(onClick = open)) {
             CapturePanel(
@@ -190,7 +200,8 @@ private fun ActiveClassCard(listening: ListeningUiState, open: () -> Unit, stop:
                 listening = listening,
                 processing = OfflineRecognitionState(),
                 start = {},
-                stop = stop
+                stop = stop,
+                pause = pause
             )
         }
         TextButton(onClick = open, modifier = Modifier.testTag("open-active-record")) {
