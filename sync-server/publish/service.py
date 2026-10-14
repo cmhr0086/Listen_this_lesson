@@ -8,7 +8,7 @@ import time
 import unicodedata
 from uuid import uuid4
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .models import AuditLog, Course, Lesson, Revision, RevisionNote, RevisionSegment, Uploader
@@ -116,12 +116,16 @@ def require(value, message: str):
 
 
 def submit(db: Session, uploader: Uploader, request: SubmissionRequest) -> SubmissionResult:
+    """
+    Stores a lesson version and makes it the public one at once. Whether readers see it depends
+    on its course: lessons of a course that is not approved yet stay hidden until it is.
+    """
     retried = db.scalar(select(Revision).where(Revision.clientSubmissionId == request.clientSubmissionId))
     if retried is not None:
         lesson = db.get(Lesson, retried.lessonId)
         if lesson.uploaderId != uploader.id:
             raise ServiceError(409, "clientSubmissionId 已被使用")
-        return SubmissionResult(lessonId=lesson.id, revisionId=retried.id, revision=retried.number, status="pending")
+        return result(db, lesson, retried, "published")
 
     hour_ago = now_ms() - 3_600_000
     recent = db.scalar(
@@ -133,7 +137,7 @@ def submit(db: Session, uploader: Uploader, request: SubmissionRequest) -> Submi
         raise ServiceError(429, "提交过于频繁，请稍后再试")
 
     digest = content_hash(request)
-    course = get_or_create_course(db, request)
+    course = get_or_create_course(db, uploader, request)
     now = now_ms()
     lesson = db.scalar(
         select(Lesson).where(Lesson.uploaderId == uploader.id, Lesson.sessionId == request.session.sessionId)
@@ -153,27 +157,17 @@ def submit(db: Session, uploader: Uploader, request: SubmissionRequest) -> Submi
     else:
         published = db.get(Revision, lesson.publishedRevisionId) if lesson.publishedRevisionId else None
         if published is not None and published.contentHash == digest:
-            db.rollback()
-            return SubmissionResult(
-                lessonId=lesson.id, revisionId=published.id, revision=published.number, status="unchanged"
-            )
-        pending = db.scalar(select(Revision).where(Revision.lessonId == lesson.id, Revision.status == "pending"))
-        if pending is not None and pending.contentHash == digest:
-            db.rollback()
-            return SubmissionResult(lessonId=lesson.id, revisionId=pending.id, revision=pending.number, status="pending")
-        # One waiting version per lesson: the newest replaces the one the admin has not reached yet.
-        db.execute(
-            update(Revision)
-            .where(Revision.lessonId == lesson.id, Revision.status == "pending")
-            .values(status="superseded")
-        )
+            db.commit()  # keeps a course created by this call, so its status can be reported
+            return result(db, lesson, published, "unchanged")
+        if published is not None:
+            published.status = "superseded"
 
     number = (db.scalar(select(func.max(Revision.number)).where(Revision.lessonId == lesson.id)) or 0) + 1
     session = request.session
     revision = Revision(
         lessonId=lesson.id,
         number=number,
-        status="pending",
+        status="approved",
         clientSubmissionId=request.clientSubmissionId,
         contentHash=digest,
         courseId=course.id,
@@ -182,6 +176,7 @@ def submit(db: Session, uploader: Uploader, request: SubmissionRequest) -> Submi
         startedAt=session.startedAt,
         endedAt=session.endedAt,
         submittedAt=now,
+        reviewedAt=now,
     )
     db.add(revision)
     db.flush()
@@ -208,17 +203,33 @@ def submit(db: Session, uploader: Uploader, request: SubmissionRequest) -> Submi
         )
         for position, note in enumerate(request.notes)
     )
+    lesson.publishedRevisionId = revision.id
+    lesson.courseId = course.id
     lesson.updatedAt = now
-    audit(db, f"uploader:{uploader.id}", "revision.submit", f"lesson:{lesson.id}", f"revision {number}")
+    audit(db, f"uploader:{uploader.id}", "lesson.publish", f"lesson:{lesson.id}", f"revision {number}")
     db.commit()
-    return SubmissionResult(lessonId=lesson.id, revisionId=revision.id, revision=number, status="pending")
+    return result(db, lesson, revision, "published")
 
 
-def get_or_create_course(db: Session, request: SubmissionRequest) -> Course:
+def result(db: Session, lesson: Lesson, revision: Revision, status: str) -> SubmissionResult:
+    course = db.get(Course, lesson.courseId)
+    return SubmissionResult(
+        lessonId=lesson.id,
+        revisionId=revision.id,
+        revision=revision.number,
+        status=status,
+        courseId=course.id,
+        courseStatus=course.status,
+        courseReviewNote=course.reviewNote,
+    )
+
+
+def get_or_create_course(db: Session, uploader: Uploader, request: SubmissionRequest) -> Course:
     c = request.course
     key = course_key(c.schoolName, c.term, c.courseName, c.teacherName)
     course = db.scalar(select(Course).where(Course.normKey == key))
     if course is None:
+        now = now_ms()
         course = Course(
             id=str(uuid4()),
             schoolName=c.schoolName,
@@ -226,10 +237,29 @@ def get_or_create_course(db: Session, request: SubmissionRequest) -> Course:
             courseName=c.courseName,
             teacherName=c.teacherName,
             normKey=key,
-            createdAt=now_ms(),
+            createdAt=now,
+            status="pending",
+            requestedBy=uploader.id,
+            requestedAt=now,
         )
         db.add(course)
         db.flush()
+        audit(db, f"uploader:{uploader.id}", "course.request", f"course:{course.id}", c.courseName)
+    return course
+
+
+def request_course_review(db: Session, uploader: Uploader, course_id: str) -> Course:
+    """A rejected course goes back to the queue once the uploader has fixed what was asked."""
+    course = require(db.get(Course, course_id), "课程不存在")
+    owns = db.scalar(select(func.count()).where(Lesson.courseId == course.id, Lesson.uploaderId == uploader.id))
+    if not owns and course.requestedBy != uploader.id:
+        raise ServiceError(404, "课程不存在")
+    if course.status != "rejected":
+        raise ServiceError(409, f"课程当前状态为 {course.status}，无需重新申请")
+    course.status = "pending"
+    course.requestedAt = now_ms()
+    audit(db, f"uploader:{uploader.id}", "course.request", f"course:{course.id}", "again")
+    db.commit()
     return course
 
 
@@ -247,39 +277,21 @@ def request_withdraw(db: Session, uploader: Uploader, lesson_id: str, reason: st
 # ---- review ----------------------------------------------------------------------------
 
 
-def pending_revision(db: Session, revision_id: int) -> Revision:
-    revision = require(db.get(Revision, revision_id), "版本不存在")
-    if revision.status != "pending":
-        raise ServiceError(409, f"该版本状态为 {revision.status}，不能再审核")
-    return revision
-
-
-def approve(db: Session, revision_id: int, note: str | None) -> Revision:
-    revision = pending_revision(db, revision_id)
-    lesson = db.get(Lesson, revision.lessonId)
-    if lesson.publishedRevisionId is not None:
-        previous = db.get(Revision, lesson.publishedRevisionId)
-        previous.status = "superseded"
-    now = now_ms()
-    revision.status = "approved"
-    revision.reviewedAt = now
-    revision.reviewNote = note
-    lesson.publishedRevisionId = revision.id
-    lesson.courseId = revision.courseId
-    lesson.updatedAt = now
-    audit(db, "admin", "revision.approve", f"lesson:{lesson.id}", f"revision {revision.number}")
+def review_course(db: Session, course_id: str, status: str, note: str | None = None) -> Course:
+    allowed = {
+        "approved": {"pending", "rejected", "taken_down"},
+        "rejected": {"pending"},
+        "taken_down": {"approved"},
+    }
+    course = require(db.get(Course, course_id), "课程不存在")
+    if course.status not in allowed[status]:
+        raise ServiceError(409, f"课程当前状态为 {course.status}，不能改为 {status}")
+    course.status = status
+    course.reviewedAt = now_ms()
+    course.reviewNote = note
+    audit(db, "admin", f"course.{status}", f"course:{course.id}", note)
     db.commit()
-    return revision
-
-
-def reject(db: Session, revision_id: int, note: str | None) -> Revision:
-    revision = pending_revision(db, revision_id)
-    revision.status = "rejected"
-    revision.reviewedAt = now_ms()
-    revision.reviewNote = note
-    audit(db, "admin", "revision.reject", f"lesson:{revision.lessonId}", note)
-    db.commit()
-    return revision
+    return course
 
 
 def set_lesson_status(db: Session, lesson_id: str, status: str, reason: str | None = None) -> Lesson:

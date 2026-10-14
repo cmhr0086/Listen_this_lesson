@@ -32,6 +32,13 @@ class Course(Base):
     teacherName: Mapped[str] = mapped_column(Text, nullable=False)
     normKey: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     createdAt: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Review happens per course: once approved, its lessons go live as they are uploaded.
+    # pending | approved | rejected | taken_down
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="pending", server_default="pending")
+    requestedBy: Mapped[int | None] = mapped_column(Integer)
+    requestedAt: Mapped[int | None] = mapped_column(Integer)
+    reviewedAt: Mapped[int | None] = mapped_column(Integer)
+    reviewNote: Mapped[str | None] = mapped_column(Text)
 
 
 class Lesson(Base):

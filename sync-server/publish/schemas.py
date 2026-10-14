@@ -99,8 +99,23 @@ class SubmissionResult(BaseModel):
     lessonId: str
     revisionId: int | None
     revision: int | None
-    # pending: queued for review; unchanged: identical to what readers already see.
-    status: Literal["pending", "unchanged"]
+    # published: this version is now the lesson's public one; unchanged: identical to it already.
+    status: Literal["published", "unchanged"]
+    courseId: str
+    # Readers see the lesson only while its course is approved.
+    courseStatus: str
+    courseReviewNote: str | None = None
+
+
+class CourseStatus(BaseModel):
+    courseId: str
+    schoolName: str
+    term: str
+    courseName: str
+    teacherName: str
+    status: str
+    reviewNote: str | None
+    lessonCount: int
 
 
 class RevisionStatus(BaseModel):

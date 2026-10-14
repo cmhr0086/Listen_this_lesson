@@ -43,7 +43,8 @@
 </header>
 <main id="view"></main>
 <script>
-const TABS = { pending: "待审核", lessons: "已公开", withdraw: "撤回申请", uploaders: "上传者", audit: "日志" };
+const TABS = { pending: "待审课程", courses: "全部课程", withdraw: "撤回申请", uploaders: "上传者", audit: "日志" };
+const COURSE_STATUS = { pending: "待审核", approved: "公开中", rejected: "已驳回", taken_down: "已下架" };
 const view = document.getElementById("view");
 let token = "";
 try { token = sessionStorage.getItem("listen-admin") || ""; } catch (e) {}
@@ -95,72 +96,81 @@ async function render() {
   }
   view.innerHTML = `<p class="muted">加载中…</p>`;
   try {
-    await ({ pending: renderPending, lessons: () => renderLessons(false), withdraw: () => renderLessons(true), uploaders: renderUploaders, audit: renderAudit })[tab]();
+    await ({ pending: () => renderCourses("pending"), courses: () => renderCourses("all"), withdraw: renderWithdraw, uploaders: renderUploaders, audit: renderAudit })[tab]();
   } catch (error) {
     view.innerHTML = `<div class="card error">${esc(error.message)}</div><button onclick="render()">重试</button>`;
   }
 }
 
-async function renderPending() {
-  const { revisions } = await api("/revisions?status=pending");
-  if (!revisions.length) { view.innerHTML = `<div class="card muted">没有待审核的提交。</div>`; return; }
-  view.innerHTML = revisions.map((r) => `<div class="card">
-      <div><b>${esc(r.title)}</b> <span class="pill">第 ${r.revision} 版</span> ${r.replacesPublished ? '<span class="pill">替换已公开版本</span>' : '<span class="pill">首次提交</span>'}
-      ${r.lessonStatus === "taken_down" ? '<span class="pill">课堂已下架</span>' : ""}</div>
-      <div>${courseLine(r.course)}</div>
-      <div class="muted">${esc(r.uploader)} · ${when(r.submittedAt)} · ${r.segmentCount} 段文字 · ${r.noteCount} 份笔记</div>
-      <div class="row"><button class="primary" data-open="${r.revisionId}">查看并审核</button></div></div>`).join("");
-  view.querySelectorAll("[data-open]").forEach((b) => b.onclick = () => openRevision(b.dataset.open));
+async function renderCourses(status) {
+  const { courses } = await api("/courses?status=" + status);
+  if (!courses.length) { view.innerHTML = `<div class="card muted">${status === "pending" ? "没有等待审核的课程。" : "还没有课程。"}</div>`; return; }
+  view.innerHTML = courses.map((c) => `<div class="card">
+      <div>${courseLine(c)} <span class="pill">${COURSE_STATUS[c.status] || esc(c.status)}</span></div>
+      <div class="muted">${c.requestedBy ? esc(c.requestedBy) + " 申请于 " + when(c.requestedAt) + " · " : ""}${c.lessonCount} 节课${c.lastUploadAt ? " · 最近上传 " + when(c.lastUploadAt) : ""}</div>
+      ${c.reviewNote ? `<div class="muted">备注：${esc(c.reviewNote)}</div>` : ""}
+      <div class="row"><button class="${c.status === "pending" ? "primary" : ""}" data-open="${c.courseId}">${c.status === "pending" ? "查看并审核" : "查看"}</button></div></div>`).join("");
+  view.querySelectorAll("[data-open]").forEach((b) => b.onclick = () => openCourse(b.dataset.open));
 }
 
 function contentHtml(r) {
   const segments = r.segments.map((s) => `<div class="seg ${s.marked ? "marked" : ""}"><time>${clock(s.startTime)}</time>${s.marked ? "★ " : ""}${esc(s.displayText)}${s.corrected ? ' <span class="pill">已纠正</span>' : ""}</div>`).join("") || `<p class="muted">无转写文字</p>`;
   const notes = r.notes.map((n) => `<h4>${esc(n.title)} <span class="pill">${esc(n.format)}</span></h4><div class="note">${esc(n.content)}</div>`).join("") || `<p class="muted">无笔记</p>`;
-  return `<div class="muted">${when(r.startedAt)}${r.topic ? " · 主题：" + esc(r.topic) : ""}</div>
-    <h3>笔记（${r.notes.length}）</h3>${notes}<h3>转写文字（${r.segments.length}）</h3>${segments}`;
+  return `<h3>笔记（${r.notes.length}）</h3>${notes}<h3>转写文字（${r.segments.length}）</h3>${segments}`;
 }
 
-async function openRevision(id) {
+async function openCourse(id) {
   view.innerHTML = `<p class="muted">加载中…</p>`;
-  const { revision: r, published } = await api("/revisions/" + id);
-  view.innerHTML = `<button id="back">← 返回列表</button>
-    <div class="card"><h2 style="margin:0">${esc(r.title)}</h2><div>${courseLine(r.course)}</div>
-      <div class="muted">${esc(r.uploader)} · 第 ${r.revision} 版 · 提交于 ${when(r.submittedAt)}</div>
-      ${r.status === "pending" ? `<label class="muted" for="note">审核备注（驳回时会显示给上传者）</label><textarea id="note" rows="2"></textarea>
-      <div class="row"><button class="primary" id="approve">批准公开</button><button class="danger" id="reject">驳回</button></div>` : `<p class="pill">${esc(r.status)}</p>`}
-      <p class="error" id="msg"></p></div>
-    ${published ? `<div class="card"><details><summary>对比：当前公开的第 ${published.revision} 版（${published.segmentCount} 段 · ${published.noteCount} 份笔记）</summary>${contentHtml(published)}</details></div>` : ""}
-    <div class="card">${contentHtml(r)}</div>`;
+  const { course: c, lessons } = await api("/courses/" + id);
+  const actions = {
+    pending: `<button class="primary" data-decide="approve">批准公开</button><button class="danger" data-decide="reject">驳回</button>`,
+    approved: `<button class="danger" data-decide="takedown">下架整门课</button>`,
+    rejected: `<button data-decide="approve">改为批准</button>`,
+    taken_down: `<button data-decide="approve">恢复公开</button>`,
+  }[c.status] || "";
+  view.innerHTML = `<button id="back">← 返回</button>
+    <div class="card"><h2 style="margin:0">${esc(c.courseName)} · ${esc(c.teacherName)}</h2>
+      <div class="muted">${esc(c.schoolName)} · ${esc(c.term)} · ${COURSE_STATUS[c.status] || esc(c.status)}</div>
+      <div class="muted">${c.requestedBy ? esc(c.requestedBy) + " 申请于 " + when(c.requestedAt) : ""}</div>
+      <p class="muted">批准后，这门课已上传和之后上传的课堂都会直接对读者可见。</p>
+      <label class="muted" for="note">备注（驳回时会显示给上传者）</label><textarea id="note" rows="2"></textarea>
+      <div class="row">${actions}</div><p class="error" id="msg"></p></div>
+    <h3>课堂（${lessons.length}）</h3>` +
+    (lessons.map((l) => `<div class="card">
+      <div><b>${esc(l.title)}</b> ${l.status === "active" ? "" : '<span class="pill">已下架</span>'}</div>
+      <div class="muted">${when(l.startedAt)}${l.topic ? " · " + esc(l.topic) : ""} · ${esc(l.uploader)} · ${l.segmentCount} 段 · ${l.noteCount} 份笔记 · 第 ${l.revision} 版</div>
+      <div class="row"><button data-lesson="${l.lessonId}">预览</button>
+      <button class="${l.status === "active" ? "danger" : ""}" data-act="${l.status === "active" ? "takedown" : "restore"}" data-id="${l.lessonId}">${l.status === "active" ? "下架这节" : "恢复"}</button></div>
+      <div id="preview-${l.lessonId}"></div></div>`).join("") || `<div class="card muted">还没有课堂。</div>`);
   document.getElementById("back").onclick = render;
-  const decide = async (action) => {
+  view.querySelectorAll("[data-decide]").forEach((b) => b.onclick = async () => {
     const note = document.getElementById("note").value.trim();
-    if (action === "reject" && !note && !confirm("不填理由直接驳回？")) return;
-    try {
-      await api(`/revisions/${id}/${action}`, { method: "POST", body: JSON.stringify({ note: note || null }) });
-      render();
-    } catch (error) { document.getElementById("msg").textContent = error.message; }
-  };
-  if (r.status === "pending") {
-    document.getElementById("approve").onclick = () => decide("approve");
-    document.getElementById("reject").onclick = () => decide("reject");
-  }
+    if (b.dataset.decide === "takedown" && !confirm("下架后读者将看不到这门课的所有课堂，确定？")) return;
+    if (b.dataset.decide === "reject" && !note && !confirm("不填理由直接驳回？")) return;
+    try { await api(`/courses/${id}/${b.dataset.decide}`, { method: "POST", body: JSON.stringify({ note: note || null }) }); openCourse(id); }
+    catch (error) { document.getElementById("msg").textContent = error.message; }
+  });
+  view.querySelectorAll("[data-lesson]").forEach((b) => b.onclick = async () => {
+    const box = document.getElementById("preview-" + b.dataset.lesson);
+    if (box.innerHTML) { box.innerHTML = ""; return; }
+    box.innerHTML = contentHtml(await api("/lessons/" + b.dataset.lesson));
+  });
+  view.querySelectorAll("[data-act]").forEach((b) => b.onclick = async () => {
+    if (b.dataset.act === "takedown" && !confirm("下架这节课？")) return;
+    try { await api(`/lessons/${b.dataset.id}/${b.dataset.act}`, { method: "POST" }); openCourse(id); }
+    catch (error) { alert(error.message); }
+  });
 }
 
-async function renderLessons(withdrawOnly) {
-  const { lessons } = await api("/lessons" + (withdrawOnly ? "?withdrawRequested=true" : ""));
-  if (!lessons.length) { view.innerHTML = `<div class="card muted">${withdrawOnly ? "没有撤回申请。" : "还没有公开的课堂。"}</div>`; return; }
+async function renderWithdraw() {
+  const { lessons } = await api("/lessons?withdrawRequested=true");
+  if (!lessons.length) { view.innerHTML = `<div class="card muted">没有撤回申请。</div>`; return; }
   view.innerHTML = lessons.map((l) => `<div class="card">
-      <div><b>${esc(l.title)}</b> <span class="pill">${l.status === "active" ? "公开中" : "已下架"}</span></div>
-      <div>${courseLine(l.course)}</div>
-      <div class="muted">${esc(l.uploader)} · ${when(l.startedAt)}</div>
-      ${l.withdrawRequestedAt ? `<div>撤回申请（${when(l.withdrawRequestedAt)}）：${esc(l.withdrawReason)}</div>` : ""}
-      <div class="row">${l.status === "active"
-        ? `<button class="danger" data-act="takedown" data-id="${l.lessonId}">下架</button>`
-        : `<button data-act="restore" data-id="${l.lessonId}">恢复公开</button>`}</div></div>`).join("");
-  view.querySelectorAll("[data-act]").forEach((b) => b.onclick = async () => {
-    if (b.dataset.act === "takedown" && !confirm("下架后读者将看不到这节课，确定？")) return;
-    try { await api(`/lessons/${b.dataset.id}/${b.dataset.act}`, { method: "POST" }); render(); }
-    catch (error) { alert(error.message); }
+      <div><b>${esc(l.title)}</b></div><div>${courseLine(l.course)}</div>
+      <div class="muted">${esc(l.uploader)} · 申请于 ${when(l.withdrawRequestedAt)}：${esc(l.withdrawReason)}</div>
+      <div class="row"><button class="danger" data-id="${l.lessonId}">下架</button></div></div>`).join("");
+  view.querySelectorAll("[data-id]").forEach((b) => b.onclick = async () => {
+    try { await api(`/lessons/${b.dataset.id}/takedown`, { method: "POST" }); render(); } catch (error) { alert(error.message); }
   });
 }
 

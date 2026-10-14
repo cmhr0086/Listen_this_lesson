@@ -23,8 +23,10 @@ from app.compression import GzipRequestMiddleware
 from app.database import create_sync_engine
 
 from . import queries, service
-from .models import AuditLog, Base, Course, Lesson, Revision, RevisionNote, RevisionSegment, Uploader
+from .database import initialize_database
+from .models import AuditLog, Course, Lesson, Revision, RevisionNote, RevisionSegment, Uploader
 from .schemas import (
+    CourseStatus,
     LessonSubmissions,
     ReviewDecision,
     RevisionStatus,
@@ -44,7 +46,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        Base.metadata.create_all(engine)
+        initialize_database(engine)
         yield
         engine.dispose()
 
@@ -215,6 +217,40 @@ def create_app(database_url: str | None = None) -> FastAPI:
             revisions=[revision_status(revision) for revision in revisions],
         )
 
+    def course_status(db: Session, course: Course, uploader_id: int | None = None) -> CourseStatus:
+        lessons = select(func.count()).where(Lesson.courseId == course.id, Lesson.publishedRevisionId.is_not(None))
+        if uploader_id is not None:
+            lessons = lessons.where(Lesson.uploaderId == uploader_id)
+        return CourseStatus(**queries.course_dict(course), status=course.status, reviewNote=course.reviewNote, lessonCount=db.scalar(lessons))
+
+    @publish.get("/courses/{course_id}", response_model=CourseStatus)
+    def uploader_course(course_id: str, uploader: Uploader = Depends(require_uploader), db: Session = Depends(get_db)):
+        return course_status(db, service.require(db.get(Course, course_id), "课程不存在"), uploader.id)
+
+    @publish.get("/courses/{course_id}/lessons")
+    def uploader_course_lessons(course_id: str, uploader: Uploader = Depends(require_uploader), db: Session = Depends(get_db)):
+        # The uploader's own lessons in this course, so the app can show each one's public state.
+        service.require(db.get(Course, course_id), "课程不存在")
+        rows = db.execute(
+            select(Lesson, Revision).join(Revision, Revision.id == Lesson.publishedRevisionId)
+            .where(Lesson.courseId == course_id, Lesson.uploaderId == uploader.id)
+        ).all()
+        return {"lessons": [
+            {
+                "lessonId": lesson.id,
+                "sessionId": lesson.sessionId,
+                "status": lesson.status,
+                "revision": revision.number,
+                "updatedAt": revision.submittedAt,
+                "withdrawRequested": lesson.withdrawRequestedAt is not None,
+            }
+            for lesson, revision in rows
+        ]}
+
+    @publish.post("/courses/{course_id}/request-review", response_model=CourseStatus)
+    def request_review(course_id: str, uploader: Uploader = Depends(require_uploader), db: Session = Depends(get_db)):
+        return course_status(db, service.request_course_review(db, uploader, course_id), uploader.id)
+
     @publish.post("/lessons/{lesson_id}/withdraw-request")
     def withdraw(
         lesson_id: str, body: WithdrawRequest, uploader: Uploader = Depends(require_uploader), db: Session = Depends(get_db)
@@ -226,42 +262,78 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     admin = APIRouter(prefix="/api/admin/v1", dependencies=[Depends(require_admin)])
 
-    def revision_summary(db: Session, revision: Revision) -> dict:
-        lesson = db.get(Lesson, revision.lessonId)
+    def lesson_row(db: Session, lesson: Lesson) -> dict:
+        revision = db.get(Revision, lesson.publishedRevisionId)
         return {
-            **revision_status(revision).model_dump(),
             "lessonId": lesson.id,
+            "status": lesson.status,
             "title": revision.title,
-            "course": queries.course_dict(db.get(Course, revision.courseId)),
+            "topic": revision.topic,
+            "startedAt": revision.startedAt,
+            "endedAt": revision.endedAt,
+            "revision": revision.number,
+            "updatedAt": revision.submittedAt,
             "uploader": db.get(Uploader, lesson.uploaderId).displayName,
             "segmentCount": db.scalar(select(func.count()).where(RevisionSegment.revisionId == revision.id)),
             "noteCount": db.scalar(select(func.count()).where(RevisionNote.revisionId == revision.id)),
-            "replacesPublished": lesson.publishedRevisionId is not None,
-            "lessonStatus": lesson.status,
+            "withdrawRequestedAt": lesson.withdrawRequestedAt,
+            "withdrawReason": lesson.withdrawReason,
         }
 
-    @admin.get("/revisions")
-    def admin_revisions(status: str = "pending", db: Session = Depends(get_db)):
-        stmt = select(Revision).where(Revision.status == status).order_by(Revision.submittedAt.desc()).limit(200)
-        return {"revisions": [revision_summary(db, revision) for revision in db.scalars(stmt)]}
+    def course_row(db: Session, course: Course) -> dict:
+        requester = db.get(Uploader, course.requestedBy) if course.requestedBy else None
+        last = db.scalar(
+            select(func.max(Revision.submittedAt))
+            .join(Lesson, Lesson.publishedRevisionId == Revision.id)
+            .where(Lesson.courseId == course.id)
+        )
+        return {
+            **course_status(db, course).model_dump(),
+            "requestedBy": requester.displayName if requester else None,
+            "requestedAt": course.requestedAt,
+            "reviewedAt": course.reviewedAt,
+            "lastUploadAt": last,
+        }
 
-    @admin.get("/revisions/{revision_id}")
-    def admin_revision(revision_id: int, db: Session = Depends(get_db)):
-        revision = service.require(db.get(Revision, revision_id), "版本不存在")
-        lesson = db.get(Lesson, revision.lessonId)
-        published = None
-        if lesson.publishedRevisionId and lesson.publishedRevisionId != revision.id:
-            current = db.get(Revision, lesson.publishedRevisionId)
-            published = {**revision_summary(db, current), **queries.revision_content(db, current)}
-        return {"revision": {**revision_summary(db, revision), **queries.revision_content(db, revision)}, "published": published}
+    @admin.get("/courses")
+    def admin_courses(status: str = "pending", db: Session = Depends(get_db)):
+        stmt = select(Course)
+        if status != "all":
+            stmt = stmt.where(Course.status == status)
+        rows = db.scalars(stmt.order_by(Course.requestedAt.desc().nulls_last(), Course.createdAt.desc()).limit(200))
+        return {"courses": [course_row(db, course) for course in rows]}
 
-    @admin.post("/revisions/{revision_id}/approve")
-    def admin_approve(revision_id: int, body: ReviewDecision | None = None, db: Session = Depends(get_db)):
-        return revision_status(service.approve(db, revision_id, body.note if body else None))
+    @admin.get("/courses/{course_id}")
+    def admin_course(course_id: str, db: Session = Depends(get_db)):
+        course = service.require(db.get(Course, course_id), "课程不存在")
+        lessons = db.scalars(
+            select(Lesson).join(Revision, Revision.id == Lesson.publishedRevisionId)
+            .where(Lesson.courseId == course.id).order_by(Revision.startedAt.desc())
+        )
+        return {"course": course_row(db, course), "lessons": [lesson_row(db, lesson) for lesson in lessons]}
 
-    @admin.post("/revisions/{revision_id}/reject")
-    def admin_reject(revision_id: int, body: ReviewDecision | None = None, db: Session = Depends(get_db)):
-        return revision_status(service.reject(db, revision_id, body.note if body else None))
+    def decide(course_id: str, status: str, body: ReviewDecision | None, db: Session) -> dict:
+        return course_row(db, service.review_course(db, course_id, status, body.note if body else None))
+
+    @admin.post("/courses/{course_id}/approve")
+    def admin_course_approve(course_id: str, body: ReviewDecision | None = None, db: Session = Depends(get_db)):
+        return decide(course_id, "approved", body, db)
+
+    @admin.post("/courses/{course_id}/reject")
+    def admin_course_reject(course_id: str, body: ReviewDecision | None = None, db: Session = Depends(get_db)):
+        return decide(course_id, "rejected", body, db)
+
+    @admin.post("/courses/{course_id}/takedown")
+    def admin_course_takedown(course_id: str, body: ReviewDecision | None = None, db: Session = Depends(get_db)):
+        return decide(course_id, "taken_down", body, db)
+
+    @admin.get("/lessons/{lesson_id}")
+    def admin_lesson(lesson_id: str, db: Session = Depends(get_db)):
+        lesson = service.require(db.get(Lesson, lesson_id), "课堂不存在")
+        if lesson.publishedRevisionId is None:
+            raise HTTPException(404, "课堂还没有内容")
+        content = queries.revision_content(db, db.get(Revision, lesson.publishedRevisionId))
+        return {**lesson_row(db, lesson), **content, "course": queries.course_dict(db.get(Course, lesson.courseId))}
 
     @admin.get("/lessons")
     def admin_lessons(withdrawRequested: bool = False, db: Session = Depends(get_db)):

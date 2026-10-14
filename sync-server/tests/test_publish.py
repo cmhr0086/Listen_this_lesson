@@ -55,14 +55,15 @@ def submit(client, token, body):
     return response.json()
 
 
-def approve(client, revision_id, note=None):
-    return admin(client, "POST", f"/revisions/{revision_id}/approve", json={"note": note})
+def approve(client, course_id, note=None):
+    return admin(client, "POST", f"/courses/{course_id}/approve", json={"note": note})
 
 
 def publish_one(client, token=None, **kwargs):
     token = token or new_uploader(client)
     result = submit(client, token, submission(**kwargs))
-    approve(client, result["revisionId"])
+    if result["courseStatus"] != "approved":
+        approve(client, result["courseId"])
     return token, result
 
 
@@ -73,18 +74,18 @@ def test_upload_and_admin_need_their_own_tokens(client):
     body = submission()
     assert client.post("/api/publish/v1/submissions", json=body).status_code == 401
     assert client.post("/api/publish/v1/submissions", headers=auth("lp_wrong"), json=body).status_code == 401
-    assert client.get("/api/admin/v1/revisions").status_code == 401
+    assert client.get("/api/admin/v1/courses").status_code == 401
     token = new_uploader(client)
     # An upload token is not an admin token.
-    assert client.get("/api/admin/v1/revisions", headers=auth(token)).status_code == 401
+    assert client.get("/api/admin/v1/courses", headers=auth(token)).status_code == 401
     assert client.get("/api/publish/v1/me", headers=auth(token)).json() == {"displayName": "小林", "status": "active"}
 
 
 def test_admin_api_fails_closed_without_configured_token(tmp_path, monkeypatch):
     monkeypatch.delenv("PUBLISH_ADMIN_TOKEN", raising=False)
     with TestClient(create_app(f"sqlite:///{tmp_path / 'no-admin.db'}")) as value:
-        assert value.get("/api/admin/v1/revisions", headers=auth("")).status_code == 401
-        assert value.get("/api/admin/v1/revisions", headers=auth("anything")).status_code == 401
+        assert value.get("/api/admin/v1/courses", headers=auth("")).status_code == 401
+        assert value.get("/api/admin/v1/courses", headers=auth("anything")).status_code == 401
 
 
 def test_disabled_and_rotated_tokens_stop_working(client):
@@ -103,16 +104,18 @@ def test_disabled_and_rotated_tokens_stop_working(client):
 # ---- review flow -------------------------------------------------------------------------
 
 
-def test_submission_is_invisible_until_approved(client):
+def test_lessons_stay_hidden_until_their_course_is_approved(client):
     token = new_uploader(client)
     result = submit(client, token, submission())
-    assert result["status"] == "pending"
+    assert (result["status"], result["courseStatus"]) == ("published", "pending")
     assert client.get("/api/public/v1/courses").json() == {"courses": []}
     assert client.get(f"/api/public/v1/lessons/{result['lessonId']}").status_code == 404
     assert client.get("/api/public/v1/search", params={"q": "极限"}).json()["hits"] == []
     assert client.get(f"/api/public/v1/lessons/{result['lessonId']}/export.txt").status_code == 404
+    queue = admin(client, "GET", "/courses")["courses"]
+    assert [(c["courseName"], c["requestedBy"], c["lessonCount"]) for c in queue] == [("高等数学", "小林", 1)]
 
-    approve(client, result["revisionId"])
+    approve(client, result["courseId"])
     courses = client.get("/api/public/v1/courses").json()["courses"]
     assert [(c["courseName"], c["teacherName"], c["lessonCount"]) for c in courses] == [("高等数学", "张老师", 1)]
     detail = client.get(f"/api/public/v1/lessons/{result['lessonId']}").json()
@@ -123,62 +126,72 @@ def test_submission_is_invisible_until_approved(client):
     assert detail["notes"][0]["content"].startswith("# 极限")
 
 
-def test_rejected_first_submission_never_appears_and_reason_reaches_uploader(client):
-    token = new_uploader(client)
-    body = submission()
-    result = submit(client, token, body)
-    admin(client, "POST", f"/revisions/{result['revisionId']}/reject", json={"note": "标题请写完整"})
-    assert client.get(f"/api/public/v1/lessons/{result['lessonId']}").status_code == 404
-    status = client.get("/api/publish/v1/submissions", headers=auth(token), params={"sessionId": body["session"]["sessionId"]}).json()
-    assert status["published"] is False
-    assert status["revisions"][0]["status"] == "rejected"
-    assert status["revisions"][0]["reviewNote"] == "标题请写完整"
+def test_approved_course_takes_new_lessons_and_updates_at_once(client):
+    token, first = publish_one(client)
+    second = submit(client, token, submission(title="第二课 导数"))
+    assert second["courseStatus"] == "approved"
+    assert client.get(f"/api/public/v1/lessons/{second['lessonId']}").status_code == 200
+    session_id = client.get(f"/api/publish/v1/submissions", headers=auth(token), params={"sessionId": "x"}).json()
+    assert session_id["lessonId"] is None
 
 
-def test_new_revision_keeps_old_public_until_approved(client):
+def test_resubmitting_a_lesson_replaces_it_for_readers(client):
     session_id = str(uuid4())
     token, first = publish_one(client, session_id=session_id)
-    second = submit(client, token, submission(session_id=session_id, title="第一课 极限（修订）"))
-    assert second["lessonId"] == first["lessonId"]
-    assert second["revision"] == 2
-    assert client.get(f"/api/public/v1/lessons/{first['lessonId']}").json()["title"] == "第一课 极限"
-
-    admin(client, "POST", f"/revisions/{second['revisionId']}/reject", json={"note": "再改改"})
-    assert client.get(f"/api/public/v1/lessons/{first['lessonId']}").json()["title"] == "第一课 极限"
-
-    third = submit(client, token, submission(session_id=session_id, title="第一课 极限（终版）"))
-    detail = admin(client, "GET", f"/revisions/{third['revisionId']}")
-    assert detail["published"]["title"] == "第一课 极限"
-    approve(client, third["revisionId"])
-    assert client.get(f"/api/public/v1/lessons/{first['lessonId']}").json()["title"] == "第一课 极限（终版）"
+    again = submit(client, token, submission(session_id=session_id, title="第一课 极限（修订）"))
+    assert again["lessonId"] == first["lessonId"] and again["revision"] == 2
+    assert client.get(f"/api/public/v1/lessons/{first['lessonId']}").json()["title"] == "第一课 极限（修订）"
     statuses = [r["status"] for r in client.get(
         "/api/publish/v1/submissions", headers=auth(token), params={"sessionId": session_id}
     ).json()["revisions"]]
-    assert statuses == ["approved", "rejected", "superseded"]
+    assert statuses == ["approved", "superseded"]
 
 
-def test_newer_pending_replaces_older_pending(client):
+def test_rejected_course_reaches_uploader_and_can_be_requested_again(client):
     token = new_uploader(client)
-    session_id = str(uuid4())
-    first = submit(client, token, submission(session_id=session_id, title="草稿"))
-    second = submit(client, token, submission(session_id=session_id, title="正式"))
-    pending = admin(client, "GET", "/revisions")["revisions"]
-    assert [r["revisionId"] for r in pending] == [second["revisionId"]]
-    response = client.post(f"/api/admin/v1/revisions/{first['revisionId']}/approve", headers=auth(ADMIN_TOKEN))
-    assert response.status_code == 409
+    result = submit(client, token, submission())
+    admin(client, "POST", f"/courses/{result['courseId']}/reject", json={"note": "教师姓名请写全"})
+    status = client.get(f"/api/publish/v1/courses/{result['courseId']}", headers=auth(token)).json()
+    assert (status["status"], status["reviewNote"]) == ("rejected", "教师姓名请写全")
+    # Later uploads into a rejected course say so, and stay hidden.
+    later = submit(client, token, submission(title="第二课"))
+    assert (later["courseStatus"], later["courseReviewNote"]) == ("rejected", "教师姓名请写全")
+    assert client.get(f"/api/public/v1/lessons/{later['lessonId']}").status_code == 404
+
+    again = client.post(f"/api/publish/v1/courses/{result['courseId']}/request-review", headers=auth(token))
+    assert again.json()["status"] == "pending"
+    assert client.post(f"/api/publish/v1/courses/{result['courseId']}/request-review", headers=auth(token)).status_code == 409
+    other = new_uploader(client, "乙")
+    assert client.post(f"/api/publish/v1/courses/{result['courseId']}/request-review", headers=auth(other)).status_code == 404
 
 
-def test_retry_and_identical_content_do_not_queue_duplicates(client):
-    token = new_uploader(client)
+def test_course_takedown_hides_all_its_lessons_and_approve_restores(client):
+    _, result = publish_one(client)
+    admin(client, "POST", f"/courses/{result['courseId']}/takedown")
+    assert client.get(f"/api/public/v1/lessons/{result['lessonId']}").status_code == 404
+    assert client.get("/api/public/v1/courses").json()["courses"] == []
+    response = client.post(f"/api/admin/v1/courses/{result['courseId']}/reject", headers=auth(ADMIN_TOKEN))
+    assert response.status_code == 409  # only pending courses can be rejected
+    approve(client, result["courseId"])
+    assert client.get(f"/api/public/v1/lessons/{result['lessonId']}").status_code == 200
+
+
+def test_admin_course_detail_lists_lessons_with_content(client):
+    _, result = publish_one(client)
+    detail = admin(client, "GET", f"/courses/{result['courseId']}")
+    assert [(l["title"], l["segmentCount"], l["noteCount"]) for l in detail["lessons"]] == [("第一课 极限", 2, 1)]
+    lesson = admin(client, "GET", f"/lessons/{result['lessonId']}")
+    assert lesson["segments"][1]["displayText"] == "ε-δ 语言"
+
+
+def test_retry_and_identical_content_do_not_create_versions(client):
+    token, first = publish_one(client)
     body = submission()
-    first = submit(client, token, body)
-    assert submit(client, token, body) == first  # same clientSubmissionId: a network retry
-    again = submit(client, token, {**body, "clientSubmissionId": str(uuid4())})
-    assert again["revisionId"] == first["revisionId"]  # same content still waiting
-    approve(client, first["revisionId"])
+    body["session"]["sessionId"] = str(uuid4())
+    created = submit(client, token, body)
+    assert submit(client, token, body) == created  # same clientSubmissionId: a network retry
     unchanged = submit(client, token, {**body, "clientSubmissionId": str(uuid4())})
-    assert unchanged["status"] == "unchanged"
-    assert admin(client, "GET", "/revisions")["revisions"] == []
+    assert unchanged["status"] == "unchanged" and unchanged["revisionId"] == created["revisionId"]
 
 
 def test_same_session_from_two_uploaders_are_separate_lessons(client):
@@ -195,7 +208,7 @@ def test_submission_id_cannot_be_reused_by_another_uploader(client):
     assert response.status_code == 409
 
 
-def test_takedown_hides_everywhere_and_restore_brings_it_back(client):
+def test_lesson_takedown_hides_everywhere_and_restore_brings_it_back(client):
     token, result = publish_one(client)
     lesson_id = result["lessonId"]
     response = client.post(f"/api/publish/v1/lessons/{lesson_id}/withdraw-request", headers=auth(token), json={"reason": "录错课了"})
@@ -259,7 +272,9 @@ def test_courses_group_by_all_four_fields_after_normalizing(client):
     spaced = {**base, "courseName": " 高等数学 ", "term": "2026-2027  第一学期"}
     other_teacher = {**base, "teacherName": "李老师"}
     for course in (base, spaced, other_teacher):
-        approve(client, submit(client, token, submission(course=course))["revisionId"])
+        result = submit(client, token, submission(course=course))
+        if result["courseStatus"] == "pending":
+            approve(client, result["courseId"])
     courses = client.get("/api/public/v1/courses").json()["courses"]
     counts = sorted((c["teacherName"], c["lessonCount"]) for c in courses)
     assert counts == [("张老师", 2), ("李老师", 1)]
@@ -277,7 +292,8 @@ def test_lessons_page_newest_first_with_cursor(client):
         body = submission(title=f"第{day + 1}课")
         body["session"]["startedAt"] += day * 86_400_000
         result = submit(client, token, body)
-        approve(client, result["revisionId"])
+        if result["courseStatus"] == "pending":
+            approve(client, result["courseId"])
         ids.append(result["lessonId"])
     course_id = client.get("/api/public/v1/courses").json()["courses"][0]["courseId"]
     first = client.get(f"/api/public/v1/courses/{course_id}/lessons", params={"limit": 2}).json()
@@ -375,3 +391,34 @@ def test_snippet_offset_points_into_the_snippet_for_long_text(client):
     hit = client.get("/api/public/v1/search", params={"q": "洛必达"}).json()["hits"][0]
     assert hit["snippet"].startswith("…") and hit["snippet"].endswith("…")
     assert hit["snippet"][hit["matchOffset"]:hit["matchOffset"] + 3] == "洛必达"
+
+
+def test_upgrade_from_lesson_review_keeps_public_courses_visible(tmp_path, monkeypatch):
+    # A 0.1.0 database: no course status columns, one lesson already public.
+    import sqlite3
+    path = tmp_path / "old.db"
+    db = sqlite3.connect(path)
+    db.executescript("""
+        CREATE TABLE courses (id TEXT PRIMARY KEY, schoolName TEXT NOT NULL, term TEXT NOT NULL, courseName TEXT NOT NULL,
+            teacherName TEXT NOT NULL, normKey TEXT NOT NULL UNIQUE, createdAt INTEGER NOT NULL);
+        CREATE TABLE lessons (id TEXT PRIMARY KEY, uploaderId INTEGER NOT NULL, sessionId TEXT NOT NULL, courseId TEXT NOT NULL,
+            publishedRevisionId INTEGER, status TEXT NOT NULL, withdrawRequestedAt INTEGER, withdrawReason TEXT,
+            createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, UNIQUE (uploaderId, sessionId));
+        INSERT INTO courses VALUES ('c1', 's', 't', '公开的课', 'x', 'k1', 1), ('c2', 's', 't', '没公开的课', 'x', 'k2', 1);
+        INSERT INTO lessons VALUES ('l1', 1, 's1', 'c1', 5, 'active', NULL, NULL, 1, 1);
+    """)
+    db.commit()
+    db.close()
+    monkeypatch.setenv("PUBLISH_ADMIN_TOKEN", ADMIN_TOKEN)
+    with TestClient(create_app(f"sqlite:///{path}")) as value:
+        courses = value.get("/api/admin/v1/courses?status=all", headers=auth(ADMIN_TOKEN)).json()["courses"]
+    assert {c["courseName"]: c["status"] for c in courses} == {"公开的课": "approved", "没公开的课": "pending"}
+
+
+def test_uploader_sees_own_lessons_in_a_course(client):
+    session_id = str(uuid4())
+    token, result = publish_one(client, session_id=session_id)
+    publish_one(client, token=new_uploader(client, "乙"))  # someone else's lesson, same course
+    client.post(f"/api/publish/v1/lessons/{result['lessonId']}/withdraw-request", headers=auth(token), json={"reason": "录错了"})
+    lessons = client.get(f"/api/publish/v1/courses/{result['courseId']}/lessons", headers=auth(token)).json()["lessons"]
+    assert [(l["sessionId"], l["status"], l["withdrawRequested"]) for l in lessons] == [(session_id, "active", True)]

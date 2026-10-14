@@ -11,8 +11,8 @@ from sqlalchemy.orm import Session
 
 from .models import Course, Lesson, Revision, RevisionNote, RevisionSegment, Uploader
 
-# Everything here reads only lessons that are active and have an approved revision; the
-# helper below is the single place that rule lives.
+# Everything here reads only active lessons with a public revision in an approved course; the
+# two helpers below (and SEARCH_SQL) are the only places that rule lives.
 
 SNIPPET_CONTEXT = 30
 
@@ -30,7 +30,8 @@ def public_lessons():
     return (
         select(Lesson, Revision)
         .join(Revision, Revision.id == Lesson.publishedRevisionId)
-        .where(Lesson.status == "active")
+        .join(Course, Course.id == Lesson.courseId)
+        .where(Lesson.status == "active", Course.status == "approved")
     )
 
 
@@ -38,7 +39,8 @@ def public_lesson_rows():
     return (
         select(Lesson.id.label("lessonId"), Lesson.courseId.label("courseId"), Revision.startedAt.label("startedAt"))
         .join(Revision, Revision.id == Lesson.publishedRevisionId)
-        .where(Lesson.status == "active")
+        .join(Course, Course.id == Lesson.courseId)
+        .where(Lesson.status == "active", Course.status == "approved")
         .subquery()
     )
 
@@ -189,12 +191,14 @@ SELECT * FROM (
            NULL AS noteId, COALESCE(NULLIF(TRIM(s.correctedText), ''), s.text) AS body
     FROM lessons l
     JOIN revisions r ON r.id = l.publishedRevisionId
+    JOIN courses c ON c.id = l.courseId AND c.status = 'approved'
     JOIN revision_segments s ON s.revisionId = r.id
     WHERE l.status = 'active' {course_filter}
     UNION ALL
     SELECT l.id, r.startedAt, 'note', n.position, n.noteId, n.content
     FROM lessons l
     JOIN revisions r ON r.id = l.publishedRevisionId
+    JOIN courses c ON c.id = l.courseId AND c.status = 'approved'
     JOIN revision_notes n ON n.revisionId = r.id
     WHERE l.status = 'active' {course_filter}
 )
