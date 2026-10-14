@@ -730,6 +730,19 @@ class AsrQueueRuntime private constructor(private val context: Context) {
         observedElapsed: Long
     ) {
         val text = response.result?.text?.trim().orEmpty()
+        if (text.isEmpty() && response.result?.finishReason == SttApiClient.NO_SPEECH) {
+            dao.updateSegment(
+                segment.copy(
+                    state = AsrLifecycleState.DROPPED.name,
+                    pollAttempts = pollAttempt,
+                    finishedAt = observedAt,
+                    finishedElapsedMs = observedElapsed,
+                    nextAttemptAt = null,
+                    safeErrorMessage = "识别服务未检测到语音。"
+                )
+            )
+            return
+        }
         if (text.isEmpty()) {
             fail(segment, AsrFailureStage.RESULT_PARSE, "EmptyTranscription", "识别服务没有返回文本。")
             return
@@ -793,7 +806,7 @@ class AsrQueueRuntime private constructor(private val context: Context) {
         when (code) {
             408, 429, 500, 502, 503, 504 -> retry(segment, stage, "HttpException", "识别服务暂时不可用（HTTP $code），将自动重试。", outcome.retryAfterMs)
             401, 403 -> retry(segment, stage, "HttpException", "识别服务鉴权失败，请检查 API Key。", 30_000)
-            else -> fail(segment, stage, "HttpException", "识别服务请求失败（HTTP $code）。")
+            else -> fail(segment, stage, "HttpException", "识别服务请求失败（HTTP $code）" + (outcome.errorDetail?.let { "：$it" } ?: "。"))
         }
     }
 

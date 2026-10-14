@@ -113,4 +113,13 @@ class ServerConnectionTesterTest {
             assertEquals(ConnectionTestResult.Failure("识别接口拒绝了请求（HTTP 400）：model not found"), rejected)
         }
     }
+
+    @Test
+    fun verifyOpenAiTreatsNoSpeechInSilenceAsSuccess() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(400).setBody("{\"error\":{\"message\":\"No speech found\"}}"))
+            val result = ServerConnectionTester(OkHttpClient()).verifyOpenAi(server.url("/v1").toString(), "secret", "stepaudio-2.5-asr")
+            assertEquals(ConnectionTestResult.Success(400), result)
+        }
+    }
 }

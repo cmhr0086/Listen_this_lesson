@@ -170,6 +170,49 @@ class SttApiClientTest {
         }
     }
 
+    @Test
+    fun `no speech reply becomes an empty result instead of a failure`() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setResponseCode(400).setBody("""{"error":{"message":"No speech found","type":"invalid_request_error"}}"""))
+        server.start()
+        try {
+            val client = openAiClient(server)
+            val submitted = client.submit("segment-11", 1, byteArrayOf(1))
+            assertTrue(submitted is SttCallOutcome.Success)
+            val job = (client.poll("segment-11", 1, (submitted as SttCallOutcome.Success).value.jobId) as SttCallOutcome.Success).value
+            assertEquals("completed", job.status)
+            assertEquals("", job.result?.text)
+            assertEquals(SttApiClient.NO_SPEECH, job.result?.finishReason)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `other http errors keep the server reason`() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setResponseCode(400).setBody("""{"error":{"message":"model x not supported"}}"""))
+        server.start()
+        try {
+            val outcome = openAiClient(server).submit("segment-12", 1, byteArrayOf(1))
+            assertTrue(outcome is SttCallOutcome.HttpError)
+            assertEquals("model x not supported", (outcome as SttCallOutcome.HttpError).errorDetail)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `stepfun gets terms as a hotwords array`() {
+        assertTrue(SttApiClient.usesHotwords("https://api.stepfun.com/v1"))
+        assertFalse(SttApiClient.usesHotwords("https://sharellm.net/v1"))
+        assertFalse(SttApiClient.usesHotwords("https://notstepfun.com/v1"))
+        assertEquals("""["极限","导数","ε-δ"]""", SttApiClient.hotwordsJson("极限，导数、ε-δ 极限"))
+        assertTrue(SttApiClient.isNoSpeech("No speech found"))
+        assertTrue(SttApiClient.isNoSpeech("音频中未检测到有效语音"))
+        assertFalse(SttApiClient.isNoSpeech("model not found"))
+    }
+
     private fun openAiClient(server: MockWebServer) = SttApiClient(
         credentialsProvider = {
             SttCredentials(server.url("/v1").toString().trimEnd('/'), "test-key", com.cmhr.listen.data.settings.SttProvider.OPENAI_COMPATIBLE, "stepaudio-2.5-asr")
