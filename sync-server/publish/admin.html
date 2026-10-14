@@ -1,0 +1,620 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>听这节课 · 公开后台</title>
+<style>
+  :root {
+    --ground:#f2f3ef; --surface:#fff; --sunk:#f7f8f5; --ink:#1b1f1d; --ink-2:#3d4441; --muted:#5b635f;
+    --line:#dcdfda; --line-soft:#eef0ec; --field:#fafbf9; --field-line:#c9cec7;
+    --bar:#1b1f1d; --bar-ink:#f2f3ef; --bar-muted:#c4c9c3; --bar-line:#4a514d; --brand:#9cc9a8;
+    --primary:#1e5a80; --primary-ink:#fff; --primary-soft:#eaf2f7;
+    --danger:#a1281c; --danger-line:#d9a39c; --danger-soft:#fbe9e7;
+    --wait:#8f4307; --wait-soft:#fcefdf; --wait-solid:#b4530a;
+    --ok:#22562f; --ok-soft:#e3f0e6; --ok-line:#9dbfa5; --ok-box:#eef5ef;
+    --off:#3d4441; --off-soft:#eceeeb; --mark:#fff3c4;
+    --shadow:0 8px 24px rgba(27,31,29,.10);
+    --mono:"IBM Plex Mono","SF Mono",ui-monospace,Menlo,monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground:#141615; --surface:#1d201f; --sunk:#232726; --ink:#e8ebe7; --ink-2:#c6cbc6; --muted:#9aa29d;
+      --line:#343a37; --line-soft:#2a2f2d; --field:#171a19; --field-line:#454c48;
+      --bar:#0d0f0e; --bar-line:#3a403d;
+      --primary:#7db7dc; --primary-ink:#0d1a24; --primary-soft:#1d2d38;
+      --danger:#f0968b; --danger-line:#6b3a34; --danger-soft:#3a2220;
+      --wait:#f2b16f; --wait-soft:#3a2a18; --wait-solid:#c9681a;
+      --ok:#9fd3ad; --ok-soft:#1f3326; --ok-line:#3f6a4b; --ok-box:#18261d;
+      --off:#c6cbc6; --off-soft:#2a2f2d; --mark:#4a4222;
+      --shadow:0 8px 24px rgba(0,0,0,.4);
+    }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--ground); color:var(--ink); font:15px/1.55 "Noto Sans SC","PingFang SC","Hiragino Sans GB",system-ui,sans-serif; }
+  a { color:var(--primary); }
+  button, input, textarea { font:inherit; color:inherit; }
+  button { cursor:pointer; }
+  button:disabled { opacity:.55; cursor:default; }
+  :focus-visible { outline:3px solid var(--primary); outline-offset:2px; }
+  .mono { font-family:var(--mono); }
+  .muted { color:var(--muted); }
+  [hidden] { display:none !important; }
+
+  /* top bar */
+  header { background:var(--bar); color:var(--bar-ink); position:sticky; top:0; z-index:5; }
+  .bar { max-width:1440px; margin:0 auto; padding:0 32px; display:flex; flex-wrap:wrap; align-items:center; gap:0 32px; min-height:64px; }
+  .brand { display:flex; align-items:center; gap:10px; font-weight:700; font-size:16px; letter-spacing:.02em; white-space:nowrap; }
+  .brand .short { display:none; }
+  nav { display:flex; gap:4px; overflow-x:auto; flex:1 1 auto; scrollbar-width:none; }
+  nav::-webkit-scrollbar { display:none; }
+  nav button { display:flex; align-items:center; gap:8px; padding:0 14px; min-height:44px; border-radius:8px; border:0; background:transparent; color:var(--bar-muted); white-space:nowrap; }
+  nav button[aria-current="page"] { background:var(--ground); color:var(--ink); font-weight:500; }
+  .count { font-family:var(--mono); font-size:12px; border-radius:10px; padding:0 7px; background:#3a403d; color:#f2f3ef; line-height:20px; }
+  .count.hot { background:var(--wait-solid); color:#fff; }
+  .logout { min-height:40px; padding:0 14px; border-radius:8px; border:1px solid var(--bar-line); background:transparent; color:var(--bar-muted); font-size:14px; }
+
+  main { max-width:1440px; margin:0 auto; padding:28px 32px 48px; }
+  h1 { margin:0; font-size:22px; font-weight:700; }
+  .lede { margin:4px 0 0; font-size:14px; color:var(--muted); }
+  .card { background:var(--surface); border:1px solid var(--line); border-radius:14px; }
+  .empty { padding:28px 20px; text-align:center; color:var(--muted); border:1px dashed var(--field-line); border-radius:12px; }
+  .error { color:var(--danger); }
+  .banner { padding:12px 16px; border-radius:10px; background:var(--danger-soft); color:var(--danger); margin-bottom:16px; }
+  .notice { padding:12px 16px; border-radius:10px; background:var(--ok-box); color:var(--ok); margin-bottom:16px; }
+
+  /* buttons */
+  .btn { min-height:44px; padding:0 18px; border-radius:8px; border:1px solid var(--line); background:var(--surface); color:var(--ink); display:inline-flex; align-items:center; justify-content:center; gap:8px; }
+  .btn.small { min-height:40px; padding:0 14px; font-size:14px; }
+  .btn.primary { background:var(--primary); border-color:var(--primary); color:var(--primary-ink); font-weight:700; }
+  .btn.danger { color:var(--danger); border-color:var(--danger-line); }
+  .btn.danger-solid { background:var(--danger); border-color:var(--danger); color:#fff; font-weight:700; }
+  @media (prefers-color-scheme: dark) { .btn.danger-solid { color:#1d0f0d; } }
+  .btn.plain-danger { color:var(--danger); }
+
+  /* status pills */
+  .pill { display:inline-flex; align-items:center; gap:6px; padding:2px 10px; border-radius:999px; font-size:13px; font-weight:500; white-space:nowrap; }
+  .pill::before { content:""; width:7px; height:7px; border-radius:50%; background:currentColor; }
+  .pill.pending { background:var(--wait-soft); color:var(--wait); }
+  .pill.approved, .pill.active { background:var(--ok-soft); color:var(--ok); }
+  .pill.rejected { background:var(--danger-soft); color:var(--danger); }
+  .pill.taken_down, .pill.disabled { background:var(--off-soft); color:var(--off); }
+  .pill.taken_down::before, .pill.disabled::before { background:transparent; border:1.5px solid currentColor; }
+
+  /* course split view */
+  .split { display:flex; flex-wrap:wrap; gap:24px; align-items:flex-start; }
+  .list { flex:1 1 320px; max-width:400px; min-width:0; display:flex; flex-direction:column; gap:12px; }
+  .list-head { display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
+  .filters { display:flex; gap:6px; flex-wrap:wrap; }
+  .filters button { min-height:36px; padding:0 12px; border-radius:999px; border:1px solid var(--line); background:var(--surface); font-size:14px; }
+  .filters button[aria-pressed="true"] { background:var(--ink); color:var(--ground); border-color:var(--ink); }
+  .course-card { display:flex; flex-direction:column; gap:6px; padding:16px 18px; border-radius:12px; background:var(--surface); border:1px solid var(--line); text-align:left; width:100%; }
+  .course-card[aria-current="true"] { border:2px solid var(--primary); padding:15px 17px; box-shadow:0 1px 2px rgba(27,31,29,.06); }
+  .course-card .top { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; }
+  .course-card .name { font-size:17px; font-weight:700; }
+  .course-card .ago { font-family:var(--mono); font-size:12px; color:var(--muted); white-space:nowrap; padding-top:3px; }
+  .course-card .who { font-size:14px; color:var(--ink-2); }
+  .course-card .facts { display:flex; flex-wrap:wrap; gap:6px 14px; font-size:13px; color:var(--muted); }
+  .again { font-size:13px; color:var(--wait); background:var(--wait-soft); border-radius:8px; padding:8px 10px; }
+
+  .detail { flex:999 1 560px; min-width:0; display:flex; flex-direction:column; gap:20px; }
+  .back { display:none; align-self:flex-start; }
+  .head { padding:24px 28px; display:flex; flex-direction:column; gap:18px; }
+  .head .title { display:flex; flex-wrap:wrap; justify-content:space-between; gap:12px; align-items:flex-start; }
+  .head h2 { margin:0; font-size:26px; font-weight:700; line-height:1.3; }
+  .head .sub { font-size:15px; color:var(--ink-2); }
+  dl.facts { margin:0; display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px 24px; padding-top:16px; border-top:1px solid var(--line-soft); }
+  dl.facts dt { font-size:13px; color:var(--muted); }
+  dl.facts dd { margin:2px 0 0; font-weight:500; }
+  dl.facts dd.mono { font-size:14px; font-weight:400; }
+
+  .lessons-row { display:flex; flex-wrap:wrap; gap:20px; align-items:flex-start; }
+  .lessons { flex:1 1 300px; min-width:0; overflow:hidden; }
+  .box-head { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:12px; padding:16px 20px; border-bottom:1px solid var(--line-soft); }
+  .box-head h3 { margin:0; font-size:16px; font-weight:700; }
+  .lessons ul { list-style:none; margin:0; padding:0; }
+  .lessons li + li { border-top:1px solid var(--line-soft); }
+  .lesson { display:flex; align-items:center; gap:12px; width:100%; padding:12px 20px; min-height:56px; border:0; background:transparent; text-align:left; }
+  .lesson[aria-current="true"] { background:var(--primary-soft); }
+  .lesson .t { display:block; font-weight:500; }
+  .lesson[aria-current="true"] .t { font-weight:700; }
+  .lesson .m { display:block; font-size:13px; color:var(--muted); }
+  .lesson .grow { flex:1 1 auto; min-width:0; }
+  .chev { flex:none; color:var(--muted); }
+  .lesson[aria-current="true"] .chev { color:var(--primary); }
+
+  .preview { flex:2 1 420px; min-width:0; display:flex; flex-direction:column; }
+  .seg-tabs { display:flex; gap:4px; background:var(--ground); border-radius:10px; padding:4px; }
+  .seg-tabs button { min-height:36px; padding:0 14px; border:0; border-radius:7px; background:transparent; color:var(--ink-2); font-size:14px; }
+  .seg-tabs button[aria-selected="true"] { background:var(--surface); color:var(--ink); font-weight:500; box-shadow:0 1px 2px rgba(27,31,29,.1); }
+  .body { padding:8px 22px 20px; max-height:480px; overflow-y:auto; }
+  .seg { display:grid; grid-template-columns:72px minmax(0,1fr); gap:12px; padding:10px 0; border-bottom:1px solid var(--line-soft); }
+  .seg time { font-family:var(--mono); font-size:13px; color:var(--muted); padding-top:2px; }
+  .seg p { margin:0; line-height:1.7; }
+  .seg.marked p { background:var(--mark); border-radius:4px; padding:0 4px; }
+  .tag { font-size:12px; color:var(--muted); border:1px solid var(--line); border-radius:99px; padding:0 6px; margin-left:4px; white-space:nowrap; }
+  .note-body { white-space:pre-wrap; line-height:1.75; padding-top:12px; }
+  .note-body h4 { margin:0 0 8px; }
+  .box-foot { display:flex; justify-content:flex-end; gap:8px; padding:12px 22px; border-top:1px solid var(--line-soft); }
+
+  .decide { position:sticky; bottom:16px; border-color:var(--field-line); padding:18px 22px; display:flex; flex-wrap:wrap; gap:14px 20px; align-items:flex-end; box-shadow:var(--shadow); }
+  .decide .field { flex:1 1 360px; min-width:0; display:flex; flex-direction:column; gap:6px; }
+  .decide .actions { display:flex; gap:10px; flex-wrap:wrap; }
+  .decide .hint { flex:1 1 100%; margin:0; font-size:13px; color:var(--muted); }
+  label { font-size:14px; font-weight:500; }
+  label .muted { font-weight:400; }
+  .input { min-height:44px; padding:0 14px; border-radius:8px; border:1px solid var(--field-line); background:var(--field); width:100%; }
+  textarea.input { padding:10px 14px; resize:vertical; }
+
+  /* withdraw */
+  .grid-cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:16px; margin-top:20px; }
+  .wd { padding:16px 18px; display:flex; flex-direction:column; gap:10px; }
+  .wd blockquote { margin:0; padding:10px 12px; background:var(--sunk); border-radius:8px; font-size:14px; color:var(--ink-2); }
+  .wd .by { display:block; font-size:12px; color:var(--muted); margin-top:2px; }
+  .wd .actions { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; padding-top:4px; }
+
+  /* uploaders */
+  .stack { display:flex; flex-direction:column; gap:20px; }
+  .create { padding:20px 24px; display:flex; flex-direction:column; gap:16px; }
+  .create form { display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end; }
+  .create .field { flex:1 1 280px; display:flex; flex-direction:column; gap:6px; }
+  .issued { background:var(--ok-box); border:1px solid var(--ok-line); border-radius:12px; padding:16px 18px; display:flex; flex-direction:column; gap:10px; color:var(--ok); }
+  .issued strong { display:flex; align-items:center; gap:8px; }
+  .issued .row { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+  .issued code { flex:1 1 360px; min-width:0; font-family:var(--mono); font-size:15px; background:var(--surface); color:var(--ink); border:1px dashed var(--ok-line); border-radius:8px; padding:10px 14px; overflow-wrap:anywhere; }
+  .issued p { margin:0; font-size:13px; }
+  .scroll { overflow-x:auto; }
+  table { width:100%; border-collapse:collapse; }
+  th { background:var(--sunk); text-align:left; color:var(--ink-2); font-size:13px; font-weight:500; padding:12px 16px; white-space:nowrap; }
+  td { padding:14px 16px; border-top:1px solid var(--line-soft); vertical-align:middle; }
+  th:first-child, td:first-child { padding-left:24px; }
+  th:last-child, td:last-child { padding-right:24px; text-align:right; }
+  td.actions { white-space:nowrap; padding-top:8px; padding-bottom:8px; }
+  td.actions .btn + .btn { margin-left:6px; }
+  .table-foot { margin:0; padding:14px 24px; border-top:1px solid var(--line-soft); font-size:13px; color:var(--muted); }
+
+  /* log */
+  .log td { font-size:14px; }
+  .log th:last-child, .log td:last-child { text-align:left; }
+
+  /* login */
+  .login { max-width:420px; margin:64px auto; padding:28px; display:flex; flex-direction:column; gap:16px; }
+  .login form { display:flex; flex-direction:column; gap:12px; }
+
+  @media (max-width: 899px) {
+    .bar { padding:8px 16px 0; gap:0 12px; }
+    .brand .long { display:none; }
+    .brand .short { display:inline; }
+    .brand { flex:1 1 auto; }
+    nav { order:3; flex:1 1 100%; margin:0 -16px; padding:0 12px; gap:2px; }
+    nav button { border-radius:0; border-bottom:3px solid transparent; padding:0 12px; }
+    nav button[aria-current="page"] { background:transparent; color:#fff; border-bottom-color:var(--brand); }
+    .logout { border:0; }
+    main { padding:16px 16px 32px; }
+    .list { max-width:none; }
+    .split.open .list { display:none; }
+    .split:not(.open) .detail { display:none; }
+    .back { display:inline-flex; }
+    .head { padding:16px; gap:12px; }
+    .head h2 { font-size:22px; }
+    dl.facts { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .body { max-height:none; }
+    .decide { position:sticky; bottom:0; margin:0 -16px -32px; border-radius:14px 14px 0 0; padding:12px 16px 20px; }
+    .decide .actions { flex:1 1 100%; display:grid; grid-template-columns:1fr 2fr; }
+    .decide .actions .btn { min-height:48px; }
+    .decide .actions .btn:only-child { grid-column:1 / -1; }
+    .decide .hint { text-align:center; font-size:12px; }
+    .grid-cards { grid-template-columns:minmax(0,1fr); }
+    .create { padding:16px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <div class="brand">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#9cc9a8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h11a5 5 0 0 1 5 5v9H9a5 5 0 0 1-5-5z"/><path d="M8 10h8M8 14h5"/></svg>
+      <span class="long">听这节课 · 公开后台</span><span class="short">公开后台</span>
+    </div>
+    <nav id="tabs" aria-label="后台分区"></nav>
+    <button class="logout" id="logout" type="button" hidden>退出</button>
+  </div>
+</header>
+<main id="view"></main>
+<script>
+"use strict";
+const TABS = [
+  { key: "pending", label: "待审课程", short: "待审", badge: "pendingCourses", hot: true },
+  { key: "courses", label: "全部课程", short: "全部课程" },
+  { key: "withdraw", label: "撤回申请", short: "撤回", badge: "withdrawRequests" },
+  { key: "uploaders", label: "上传者", short: "上传者" },
+  { key: "audit", label: "操作日志", short: "日志" },
+];
+const COURSE_STATUS = { pending: "等待审核", approved: "已公开", rejected: "已驳回", taken_down: "已下架" };
+const FILTERS = [["all", "全部"], ["approved", "已公开"], ["rejected", "已驳回"], ["taken_down", "已下架"]];
+const ACTIONS = {
+  "course.request": "申请公开课程", "course.approved": "批准课程", "course.rejected": "驳回课程", "course.taken_down": "下架课程",
+  "lesson.publish": "上传课堂", "lesson.withdraw_request": "申请撤回课堂", "lesson.taken_down": "下架课堂", "lesson.active": "恢复课堂",
+  "uploader.create": "新建上传者", "uploader.rotate": "更换 Token", "uploader.disabled": "停用上传者", "uploader.active": "启用上传者",
+};
+const ICON = {
+  check: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+  chev: '<svg class="chev" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>',
+  back: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>',
+  plus: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
+  copy: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg>',
+};
+
+const view = document.getElementById("view");
+const state = {
+  token: "", tab: "pending", filter: "all", summary: {},
+  courseId: null, lessonId: null, mode: "text", issued: null, flash: null,
+};
+try { state.token = sessionStorage.getItem("listen-admin") || ""; } catch (e) {}
+
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const pad = (n) => String(n).padStart(2, "0");
+function short(ms) {
+  if (!ms) return "—";
+  const d = new Date(ms), now = new Date();
+  const time = `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return d.getFullYear() === now.getFullYear() ? time : `${d.getFullYear()}-${time}`;
+}
+function ago(ms) {
+  if (!ms) return "";
+  const minutes = Math.round((Date.now() - ms) / 60000);
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes} 分钟前`;
+  if (minutes < 24 * 60) return `${Math.round(minutes / 60)} 小时前`;
+  const days = Math.round(minutes / 1440);
+  return days === 1 ? "昨天" : days < 30 ? `${days} 天前` : short(ms).slice(0, 5);
+}
+function offset(ms, base) {
+  const total = Math.max(0, Math.round((ms - base) / 1000));
+  const h = Math.floor(total / 3600), m = Math.floor(total / 60) % 60, s = total % 60;
+  return h ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
+}
+const day = (ms) => { const d = new Date(ms); return `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+const clockRange = (a, b) => { const f = (ms) => { const d = new Date(ms); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; }; return b ? `${f(a)}–${f(b)}` : f(a); };
+const pill = (status, label) => `<span class="pill ${esc(status)}">${esc(label || COURSE_STATUS[status] || status)}</span>`;
+
+async function api(path, options = {}) {
+  const response = await fetch("/api/admin/v1" + path, {
+    ...options,
+    headers: { "Authorization": "Bearer " + state.token, "Content-Type": "application/json" },
+  });
+  if (response.status === 401) { setToken(""); throw new Error("管理员 Token 无效，请重新输入。"); }
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(typeof body.detail === "string" ? body.detail : `请求失败（HTTP ${response.status}）`);
+  return body;
+}
+const post = (path, body) => api(path, { method: "POST", body: JSON.stringify(body ?? {}) });
+
+function setToken(value) {
+  state.token = value;
+  try { value ? sessionStorage.setItem("listen-admin", value) : sessionStorage.removeItem("listen-admin"); } catch (e) {}
+  render();
+}
+
+function go(tab, extra = {}) {
+  Object.assign(state, { tab, courseId: null, lessonId: null, mode: "text", issued: null, flash: null }, extra);
+  render();
+}
+
+async function refreshSummary() {
+  try { state.summary = await api("/summary"); } catch (e) { state.summary = {}; }
+  renderTabs();
+}
+
+function renderTabs() {
+  const nav = document.getElementById("tabs");
+  document.getElementById("logout").hidden = !state.token;
+  const narrow = matchMedia("(max-width: 899px)").matches;
+  nav.innerHTML = state.token ? TABS.map((t) => {
+    const n = t.badge ? state.summary[t.badge] : 0;
+    const badge = n ? ` <span class="count${t.hot ? " hot" : ""}">${n}</span>` : "";
+    return `<button type="button" data-tab="${t.key}"${t.key === state.tab ? ' aria-current="page"' : ""}>${narrow ? t.short : t.label}${badge}</button>`;
+  }).join("") : "";
+}
+
+async function render() {
+  renderTabs();
+  if (!state.token) return renderLogin();
+  view.innerHTML = `<p class="muted">加载中…</p>`;
+  refreshSummary();
+  try {
+    await ({ pending: renderCourses, courses: renderCourses, withdraw: renderWithdraw, uploaders: renderUploaders, audit: renderAudit })[state.tab]();
+  } catch (error) {
+    view.innerHTML = `<div class="banner">${esc(error.message)}</div><button class="btn" type="button" data-act="retry">重试</button>`;
+  }
+}
+
+function renderLogin() {
+  view.innerHTML = `<div class="card login">
+    <h1>公开后台</h1>
+    <p class="lede">输入管理员 Token。它只保存在这个标签页里，关掉就要重新输入。</p>
+    <form id="login">
+      <label for="tokenInput">管理员 Token</label>
+      <input class="input" type="password" id="tokenInput" autocomplete="off" required>
+      <button class="btn primary" type="submit">进入</button>
+    </form></div>`;
+  document.getElementById("login").onsubmit = (e) => { e.preventDefault(); setToken(document.getElementById("tokenInput").value.trim()); };
+  document.getElementById("tokenInput").focus();
+}
+
+// ---- courses -----------------------------------------------------------------------------
+
+async function renderCourses() {
+  const pending = state.tab === "pending";
+  const status = pending ? "pending" : state.filter;
+  const [{ courses }, detail] = await Promise.all([
+    api("/courses?status=" + status),
+    state.courseId ? api("/courses/" + state.courseId).catch(() => null) : null,
+  ]);
+  // Wide screens open the first course right away; phones start on the list.
+  let open = detail;
+  if (!open && courses.length && !matchMedia("(max-width: 899px)").matches) {
+    state.courseId = courses[0].courseId;
+    open = await api("/courses/" + state.courseId);
+  }
+  if (!open) state.courseId = null;
+  let lesson = null;
+  if (open && open.lessons.length) {
+    if (!open.lessons.some((l) => l.lessonId === state.lessonId)) state.lessonId = open.lessons[0].lessonId;
+    lesson = await api("/lessons/" + state.lessonId).catch(() => null);
+  }
+
+  const list = `<aside class="list" aria-label="${pending ? "待审课程列表" : "课程列表"}">
+    <div class="list-head"><h1>${pending ? "待审课程" : "全部课程"}</h1>${pending ? `<span class="muted" style="font-size:13px">早申请的在前</span>` : ""}</div>
+    ${pending ? "" : `<div class="filters" role="group" aria-label="按状态筛选">${FILTERS.map(([key, label]) =>
+      `<button type="button" data-filter="${key}" aria-pressed="${key === state.filter}">${label}</button>`).join("")}</div>`}
+    ${courses.map((c) => courseCard(c, pending)).join("") || `<div class="empty">${pending ? "没有等待审核的课程。" : "没有这类课程。"}</div>`}
+  </aside>`;
+  view.innerHTML = `${flash()}<div class="split${open ? " open" : ""}">${list}${open ? courseDetail(open, lesson) : `<section class="detail"></section>`}</div>`;
+}
+
+function courseCard(c, pending) {
+  const when = pending ? ago(c.requestedAt) : ago(c.lastUploadAt || c.requestedAt);
+  return `<button type="button" class="course-card" data-course="${esc(c.courseId)}"${c.courseId === state.courseId ? ' aria-current="true"' : ""}>
+    <span class="top"><span class="name">${esc(c.courseName)}</span><span class="ago">${esc(when)}</span></span>
+    <span class="who">${esc(c.teacherName)} · ${esc(c.schoolName)}</span>
+    <span class="facts"><span>${esc(c.term)}</span><span>${c.lessonCount} 节</span>${c.requestedBy ? `<span>上传者 ${esc(c.requestedBy)}</span>` : ""}${pending ? "" : pill(c.status)}</span>
+    ${c.reRequested ? `<span class="again">重新申请 · 上次驳回：${esc(c.reviewNote)}</span>` : ""}
+  </button>`;
+}
+
+function courseDetail({ course: c, lessons }, lesson) {
+  const head = `<div class="card head">
+    <div class="title"><div><h2>${esc(c.courseName)}</h2><div class="sub">${esc(c.teacherName)} · ${esc(c.schoolName)} · ${esc(c.term)}</div></div>${pill(c.status)}</div>
+    ${c.reRequested ? `<div class="again">上传者已按要求修改后重新申请。上次驳回理由：${esc(c.reviewNote)}</div>` : ""}
+    ${c.status === "rejected" && c.reviewNote ? `<div class="again">驳回理由：${esc(c.reviewNote)}</div>` : ""}
+    <dl class="facts">
+      <div><dt>上传者</dt><dd>${esc(c.requestedBy || "—")}</dd></div>
+      <div><dt>申请时间</dt><dd class="mono">${short(c.requestedAt)}</dd></div>
+      <div><dt>已上传</dt><dd>${c.lessonCount} 节课堂</dd></div>
+      <div><dt>最近上传</dt><dd class="mono">${short(c.lastUploadAt)}</dd></div>
+    </dl></div>`;
+  const items = lessons.map((l) => `<li><button type="button" class="lesson" data-lesson="${esc(l.lessonId)}"${l.lessonId === state.lessonId ? ' aria-current="true"' : ""}>
+      <span class="grow"><span class="t">${esc(l.title)}</span><span class="m">${day(l.startedAt)} · ${l.segmentCount} 段${l.noteCount ? " · 有笔记" : ""}${l.status === "taken_down" ? " · 已下架" : ""}${l.withdrawRequestedAt ? " · 申请撤回" : ""}</span></span>${ICON.chev}
+    </button></li>`).join("");
+  const lessonsBox = `<div class="card lessons"><div class="box-head"><h3>${lessons.length} 节课堂</h3><span class="muted" style="font-size:13px">点一节看内容</span></div>
+    ${items ? `<ul>${items}</ul>` : `<div class="empty" style="margin:16px">还没有课堂。</div>`}</div>`;
+  return `<section class="detail" aria-label="课程详情">
+    <button type="button" class="btn small back" data-act="back">${ICON.back}返回列表</button>
+    ${head}
+    <div class="lessons-row">${lessonsBox}${lesson ? lessonPreview(lesson) : ""}</div>
+    ${decision(c)}
+  </section>`;
+}
+
+function lessonPreview(l) {
+  const text = l.segments.map((s) => `<div class="seg${s.marked ? " marked" : ""}"><time>${offset(s.startTime, l.startedAt)}</time><p>${esc(s.displayText)}${s.corrected ? '<span class="tag">已纠正</span>' : ""}${s.marked ? '<span class="tag">重点</span>' : ""}</p></div>`).join("")
+    || `<div class="empty" style="margin-top:12px">这节课没有转写文字。</div>`;
+  const notes = l.notes.map((n) => `<div class="note-body"><h4>${esc(n.title)}</h4>${esc(n.content)}</div>`).join("")
+    || `<div class="empty" style="margin-top:12px">这节课没有课堂笔记。</div>`;
+  const active = l.status === "active";
+  return `<article class="card preview" id="preview" aria-label="课堂预览">
+    <div class="box-head">
+      <div><h3>${esc(l.title)}${l.topic ? ` · ${esc(l.topic)}` : ""}</h3><div class="muted" style="font-size:13px">${day(l.startedAt)} ${clockRange(l.startedAt, l.endedAt)} · 第 ${l.revision} 版 · ${esc(l.uploader)}</div></div>
+      <div class="seg-tabs" role="tablist" aria-label="预览内容">
+        <button type="button" role="tab" data-mode="text" aria-selected="${state.mode === "text"}">原文 ${l.segments.length}</button>
+        <button type="button" role="tab" data-mode="notes" aria-selected="${state.mode === "notes"}">课堂笔记 ${l.notes.length}</button>
+      </div>
+    </div>
+    <div class="body">${state.mode === "notes" ? notes : text}</div>
+    <div class="box-foot">
+      ${active ? `<button type="button" class="btn small plain-danger" data-lesson-act="takedown" data-id="${esc(l.lessonId)}">只下架这一节</button>`
+        : `<span class="muted" style="margin-right:auto;align-self:center;font-size:14px">这一节已下架，读者看不到。</span><button type="button" class="btn small" data-lesson-act="restore" data-id="${esc(l.lessonId)}">恢复这一节</button>`}
+    </div>
+  </article>`;
+}
+
+function decision(c) {
+  const n = c.lessonCount;
+  const forms = {
+    pending: { buttons: `<button type="button" class="btn danger" data-decide="reject">驳回</button><button type="button" class="btn primary" data-decide="approve">${ICON.check}批准公开</button>`,
+      hint: `批准后，这门课已上传的 ${n} 节立即对读者可见；以后上传的新课堂也会直接上线，不再逐节审核。`, note: true },
+    approved: { buttons: `<button type="button" class="btn danger" data-decide="takedown">下架整门课</button>`,
+      hint: "下架后读者看不到这门课的任何课堂，上传者 App 里会显示「已被管理员下架」。可以随时恢复。", note: true },
+    rejected: { buttons: `<button type="button" class="btn primary" data-decide="approve">${ICON.check}改为批准</button>`,
+      hint: "也可以等上传者修改后重新申请，那时它会回到待审课程。", note: false },
+    taken_down: { buttons: `<button type="button" class="btn primary" data-decide="approve">${ICON.check}恢复公开</button>`,
+      hint: `恢复后这门课的 ${n} 节重新对读者可见（单独下架的课堂除外）。`, note: false },
+  }[c.status];
+  if (!forms) return "";
+  const label = c.status === "pending" ? "给上传者的说明" : "下架原因";
+  return `<form class="card decide" id="decide" data-course-id="${esc(c.courseId)}">
+    ${forms.note ? `<div class="field"><label for="review-note">${label} <span class="muted">（${c.status === "pending" ? "驳回时必填，" : ""}会显示在对方 App 里）</span></label>
+      <input id="review-note" class="input" type="text" maxlength="1000" placeholder="${c.status === "pending" ? "例如：课程名请写全称" : "例如：内容与课程不符"}"></div>` : ""}
+    <div class="actions">${forms.buttons}</div>
+    <p class="hint">${forms.hint}</p>
+    <p class="hint error" id="decide-error" role="alert"></p>
+  </form>`;
+}
+
+async function decide(button) {
+  const form = document.getElementById("decide");
+  const id = form.dataset.courseId;
+  const input = document.getElementById("review-note");
+  const note = input ? input.value.trim() : "";
+  const action = button.dataset.decide;
+  const error = document.getElementById("decide-error");
+  if (action === "reject" && !note) { error.textContent = "驳回时请写明原因，上传者才知道要改什么。"; input.focus(); return; }
+  if (action === "takedown" && !confirm("下架整门课？读者将看不到它的所有课堂。")) return;
+  form.querySelectorAll("button").forEach((b) => b.disabled = true);
+  try {
+    const c = await post(`/courses/${id}/${action}`, { note: note || null });
+    const done = { approve: "已批准，这门课已对读者公开。", reject: "已驳回，上传者会在 App 里看到你的说明。", takedown: "已下架整门课。" }[action];
+    // Leaving the queue: the decided course moves on to the next one waiting.
+    if (state.tab === "pending") state.courseId = null;
+    state.flash = `「${c.courseName}」${done}`;
+    render();
+  } catch (e) {
+    error.textContent = e.message;
+    form.querySelectorAll("button").forEach((b) => b.disabled = false);
+  }
+}
+
+function flash() {
+  const message = state.flash;
+  state.flash = null;
+  return message ? `<div class="notice" role="status">${esc(message)}</div>` : "";
+}
+
+// ---- withdraw requests ---------------------------------------------------------------------
+
+async function renderWithdraw() {
+  const { lessons } = await api("/lessons?withdrawRequested=true");
+  view.innerHTML = `${flash()}<h1>撤回申请</h1>
+    <p class="lede">上传者在 App 里关掉某节课的公开后会出现在这里。处理前，读者仍然看得到这节课。</p>
+    <div class="grid-cards">${lessons.map((l) => `<article class="card wd">
+      <div class="list-head"><span style="font-size:17px;font-weight:700">${esc(l.title)}</span><span class="mono muted" style="font-size:12px">${ago(l.withdrawRequestedAt)}</span></div>
+      <div style="font-size:14px;color:var(--ink-2)">${esc(l.course.courseName)} · ${esc(l.course.teacherName)}</div>
+      <blockquote>${esc(l.withdrawReason)}<span class="by">— ${esc(l.uploader)}</span></blockquote>
+      <div class="actions">
+        <button type="button" class="btn" data-peek="${esc(l.course.courseId)}" data-id="${esc(l.lessonId)}">先看内容</button>
+        <button type="button" class="btn danger-solid" data-lesson-act="takedown" data-id="${esc(l.lessonId)}" data-title="${esc(l.title)}">下架这一节</button>
+      </div></article>`).join("")}</div>
+    ${lessons.length ? "" : `<div class="empty" style="margin-top:20px">没有待处理的撤回申请。</div>`}`;
+}
+
+async function lessonAct(button) {
+  const action = button.dataset.lessonAct;
+  if (action === "takedown" && !confirm("下架这一节？读者将看不到它。")) return;
+  button.disabled = true;
+  try {
+    await post(`/lessons/${button.dataset.id}/${action}`);
+    state.flash = action === "takedown" ? `${button.dataset.title ? `「${button.dataset.title}」` : "这一节"}已下架。` : "这一节已恢复公开。";
+    render();
+  } catch (e) { button.disabled = false; alert(e.message); }
+}
+
+// ---- uploaders -----------------------------------------------------------------------------
+
+async function renderUploaders() {
+  const { uploaders } = await api("/uploaders");
+  const issued = state.issued ? `<div class="issued" role="status">
+      <strong>${ICON.check}${state.issued.rotated ? "已为" : "已创建"}「${esc(state.issued.displayName)}」${state.issued.rotated ? "更换 Token" : ""}</strong>
+      <div class="row"><code id="issued-token">${esc(state.issued.token)}</code><button type="button" class="btn small" data-act="copy" style="color:var(--ok);border-color:var(--ok-line)">${ICON.copy}<span>复制</span></button></div>
+      <p>把它填进 App 的「设置 › 公开发布 › 上传 Token」。离开这个页面后就再也看不到它了；丢了的话，在下面的列表里更换。</p>
+    </div>` : "";
+  const rows = uploaders.map((u) => `<tr>
+      <td style="font-weight:700;white-space:nowrap">${esc(u.displayName)}</td>
+      <td>${pill(u.status, u.status === "active" ? "可上传" : "已停用")}</td>
+      <td style="color:var(--ink-2)">${esc(u.courseNames.join("、") || "—")}</td>
+      <td class="mono" style="font-size:14px;color:var(--ink-2)">${short(u.lastUploadAt)}</td>
+      <td class="mono" style="font-size:14px" ><span class="muted">${short(u.createdAt)}</span></td>
+      <td class="actions">
+        <button type="button" class="btn small" data-uploader="rotate-token" data-id="${u.id}" data-name="${esc(u.displayName)}">更换 Token</button>
+        ${u.status === "active"
+          ? `<button type="button" class="btn small plain-danger" data-uploader="disable" data-id="${u.id}" data-name="${esc(u.displayName)}">停用</button>`
+          : `<button type="button" class="btn small" style="color:var(--primary)" data-uploader="enable" data-id="${u.id}">重新启用</button>`}
+      </td></tr>`).join("");
+  view.innerHTML = `<div class="stack">
+    <div><h1>上传者</h1><p class="lede">每台发布课程的手机一个上传者。Token 只在创建或更换时显示一次。</p></div>
+    ${flash()}
+    <section class="card create" aria-label="新建上传者">
+      <form id="create">
+        <div class="field"><label for="uploader-name">名称 <span class="muted">（读者会在课堂页看到它，例如「数学课代表」）</span></label>
+          <input id="uploader-name" class="input" maxlength="50" required></div>
+        <button class="btn primary" type="submit">${ICON.plus}新建并生成 Token</button>
+      </form>
+      ${issued}
+    </section>
+    <section class="card" aria-label="上传者列表" style="overflow:hidden">
+      ${uploaders.length ? `<div class="scroll"><table style="min-width:760px">
+        <thead><tr><th scope="col">名称</th><th scope="col">状态</th><th scope="col">课程</th><th scope="col">最近上传</th><th scope="col">创建于</th><th scope="col">操作</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>` : `<div class="empty" style="margin:16px">还没有上传者。</div>`}
+      <p class="table-foot">停用后这台手机不能再上传，已经公开的课堂不受影响；要下架请到「全部课程」里操作。</p>
+    </section></div>`;
+  document.getElementById("create").onsubmit = async (e) => {
+    e.preventDefault();
+    const name = document.getElementById("uploader-name").value.trim();
+    if (!name) return;
+    try { state.issued = await post("/uploaders", { displayName: name }); renderUploaders(); }
+    catch (error) { alert(error.message); }
+  };
+}
+
+async function uploaderAct(button) {
+  const action = button.dataset.uploader;
+  const name = button.dataset.name;
+  if (action === "rotate-token" && !confirm(`更换「${name}」的 Token？旧 Token 会立即失效，需要在那台手机上重新填写。`)) return;
+  if (action === "disable" && !confirm(`停用「${name}」？这台手机将不能再上传。`)) return;
+  try {
+    const u = await post(`/uploaders/${button.dataset.id}/${action}`);
+    state.issued = u.token ? { ...u, rotated: true } : null;
+    renderUploaders();
+  } catch (e) { alert(e.message); }
+}
+
+// ---- audit ---------------------------------------------------------------------------------
+
+async function renderAudit() {
+  const { entries } = await api("/audit");
+  const actor = (a) => a === "admin" ? "管理员" : a.startsWith("uploader:") ? `上传者 #${a.slice(9)}` : a;
+  view.innerHTML = `<div class="stack"><div><h1>操作日志</h1><p class="lede">最近 100 条。</p></div>
+    <section class="card log" style="overflow:hidden">${entries.length ? `<div class="scroll"><table style="min-width:640px">
+      <thead><tr><th scope="col">时间</th><th scope="col">谁</th><th scope="col">操作</th><th scope="col">对象 / 说明</th></tr></thead>
+      <tbody>${entries.map((e) => `<tr><td class="mono" style="white-space:nowrap">${short(e.at)}</td><td>${esc(actor(e.actor))}</td>
+        <td>${esc(ACTIONS[e.action] || e.action)}</td><td style="text-align:left;color:var(--ink-2)">${esc(e.detail || "")} <span class="muted mono" style="font-size:12px">${esc(e.target)}</span></td></tr>`).join("")}</tbody>
+    </table></div>` : `<div class="empty" style="margin:16px">暂无记录。</div>`}</section></div>`;
+}
+
+// ---- events --------------------------------------------------------------------------------
+
+document.getElementById("tabs").addEventListener("click", (e) => {
+  const button = e.target.closest("[data-tab]");
+  if (button) go(button.dataset.tab);
+});
+document.getElementById("logout").onclick = () => setToken("");
+view.addEventListener("click", (e) => {
+  const t = e.target.closest("button");
+  if (!t || t.disabled) return;
+  if (t.dataset.course) { state.courseId = t.dataset.course; state.lessonId = null; state.mode = "text"; render().then(() => scrollTo(0, 0)); }
+  else if (t.dataset.lesson) {
+    state.lessonId = t.dataset.lesson; state.mode = "text";
+    render().then(() => { if (matchMedia("(max-width: 899px)").matches) document.getElementById("preview")?.scrollIntoView({ block: "start" }); });
+  }
+  else if (t.dataset.mode) { state.mode = t.dataset.mode; render(); }
+  else if (t.dataset.filter) { state.filter = t.dataset.filter; state.courseId = null; render(); }
+  else if (t.dataset.decide) decide(t);
+  else if (t.dataset.lessonAct) lessonAct(t);
+  else if (t.dataset.uploader) uploaderAct(t);
+  else if (t.dataset.peek) go("courses", { filter: "all", courseId: t.dataset.peek, lessonId: t.dataset.id });
+  else if (t.dataset.act === "back") { state.courseId = null; render(); }
+  else if (t.dataset.act === "retry") render();
+  else if (t.dataset.act === "copy") {
+    navigator.clipboard?.writeText(document.getElementById("issued-token").textContent)
+      .then(() => { t.querySelector("span").textContent = "已复制"; })
+      .catch(() => { getSelection().selectAllChildren(document.getElementById("issued-token")); });
+  }
+});
+view.addEventListener("submit", (e) => { if (e.target.id === "decide") e.preventDefault(); });
+matchMedia("(max-width: 899px)").addEventListener("change", renderTabs);
+
+render();
+</script>
+</body>
+</html>

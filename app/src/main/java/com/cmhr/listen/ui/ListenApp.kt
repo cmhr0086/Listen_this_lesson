@@ -90,6 +90,7 @@ import com.cmhr.listen.CourseViewModel
 import com.cmhr.listen.SettingsViewModel
 import com.cmhr.listen.AiPromptKind
 import com.cmhr.listen.SttViewModel
+import com.cmhr.listen.PublishViewModel
 import com.cmhr.listen.RecordingViewModel
 import com.cmhr.listen.recording.CaptureMode
 import com.cmhr.listen.data.ai.AiActionType
@@ -180,6 +181,8 @@ private fun routeTitle(route: String?): String = when (route) {
     "settings/ai-service/models" -> "选择模型"
     "settings/asr-prompt-policy/thresholds" -> "自动模式门槛"
     "settings/cloud-sync" -> "云同步"
+    "settings/publish" -> "公开发布"
+    "course/{courseId}/publish" -> "公开发布"
     "settings/appearance" -> "外观"
     "settings/ai-prompts" -> "AI 提示词"
     "settings/asr-prompt-policy" -> "专业词提示"
@@ -204,7 +207,8 @@ fun ListenApp(
     courses: CourseViewModel = viewModel(),
     settings: SettingsViewModel = viewModel(),
     ai: AiViewModel = viewModel(),
-    recordings: RecordingViewModel = viewModel()
+    recordings: RecordingViewModel = viewModel(),
+    publish: PublishViewModel = viewModel()
 ) {
     val nav = rememberNavController()
     val backStackEntry by nav.currentBackStackEntryAsState()
@@ -799,7 +803,12 @@ fun ListenApp(
             }
             composable("course/{courseId}") { entry ->
                 val id = entry.arguments?.getString("courseId")?.toLongOrNull() ?: return@composable
-                CourseRecordsScreen(id, courseState, sttState, courses, recordingState.pendingCounts, startClass = { mode -> quickStart(id, mode) }) { record ->
+                val publishInfo = settingsState.publish.courses[id]
+                CourseRecordsScreen(
+                    id, courseState, sttState, courses, recordingState.pendingCounts, startClass = { mode -> quickStart(id, mode) },
+                    publishSummary = coursePublishSummary(settingsState.publish.hasToken, publishInfo?.remoteStatus.orEmpty(), publishInfo?.teacherName.orEmpty()),
+                    openPublish = { nav.navigate("course/$id/publish") }
+                ) { record ->
                     courses.selectRecord(id, record)
                     nav.navigate("record/$record")
                 }
@@ -852,6 +861,7 @@ fun ListenApp(
                     onCloudSync = { nav.navigate("settings/cloud-sync") },
                     onAsrDiagnostics = { nav.navigate("settings/asr-diagnostics") },
                     onAppearance = { nav.navigate("settings/appearance") },
+                    onPublish = { nav.navigate("settings/publish") },
                     vadSummary = sttState.selectedVadPreset?.displayName ?: "自定义（基于「${nearestVadPreset(sttState.configuredVadConfig).displayName}」）"
                 )
             }
@@ -863,6 +873,11 @@ fun ListenApp(
             }
             composable("settings/ai-service/models") { AiModelsScreen(settingsState, settings, done = { nav.popBackStack() }) }
             composable("settings/cloud-sync") { CloudSyncSettingsScreen(settingsState, settings) }
+            composable("settings/publish") { PublishSettingsScreen(settingsState, settings) }
+            composable("course/{courseId}/publish") { entry ->
+                val id = entry.arguments?.getString("courseId")?.toLongOrNull() ?: return@composable
+                CoursePublishScreen(id, publish, openSettings = { nav.navigate("settings/publish") })
+            }
             composable("settings/appearance") { AppearanceSettingsScreen(settingsState, settings) }
             composable("settings/ai-prompts") {
                 AiPromptsSettingsScreen(settingsState, settings, open = { nav.navigate("settings/ai-prompts/${it.name}") })

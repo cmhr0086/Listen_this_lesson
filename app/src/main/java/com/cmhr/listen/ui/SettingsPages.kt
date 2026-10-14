@@ -32,6 +32,7 @@ import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.CloudDone
 import androidx.compose.material.icons.outlined.CloudOff
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Remove
@@ -160,7 +161,7 @@ internal fun StatusCard(
 }
 
 @Composable
-private fun SettingsPage(content: androidx.compose.foundation.lazy.LazyListScope.() -> Unit) = LazyColumn(
+internal fun SettingsPage(content: androidx.compose.foundation.lazy.LazyListScope.() -> Unit) = LazyColumn(
     Modifier.fillMaxSize(),
     contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 32.dp),
     verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -168,12 +169,12 @@ private fun SettingsPage(content: androidx.compose.foundation.lazy.LazyListScope
 )
 
 @Composable
-private fun Note(text: String, modifier: Modifier = Modifier, color: Color = MaterialTheme.colorScheme.onSurfaceVariant) =
+internal fun Note(text: String, modifier: Modifier = Modifier, color: Color = MaterialTheme.colorScheme.onSurfaceVariant) =
     Text(text, style = MaterialTheme.typography.bodySmall, color = color, modifier = modifier.padding(horizontal = 4.dp))
 
 /** A setting shown as its current value; tapping edits it. */
 @Composable
-private fun ValueRow(title: String, value: String?, onClick: () -> Unit, modifier: Modifier = Modifier, subtitle: String? = null) = ListRow(
+internal fun ValueRow(title: String, value: String?, onClick: () -> Unit, modifier: Modifier = Modifier, subtitle: String? = null) = ListRow(
     title = title,
     subtitle = subtitle,
     trailing = {
@@ -192,10 +193,10 @@ private fun ValueRow(title: String, value: String?, onClick: () -> Unit, modifie
 )
 
 
-private const val SECRET_DOTS = "••••••"
+internal const val SECRET_DOTS = "••••••"
 
 @Composable
-private fun DangerRow(title: String, subtitle: String?, onClick: () -> Unit, modifier: Modifier = Modifier) = ListGroup(modifier.padding(top = 12.dp)) {
+internal fun DangerRow(title: String, subtitle: String?, onClick: () -> Unit, modifier: Modifier = Modifier) = ListGroup(modifier.padding(top = 12.dp)) {
     Column(
         Modifier.fillMaxWidth().heightIn(min = 56.dp).clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 14.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp)
@@ -206,7 +207,7 @@ private fun DangerRow(title: String, subtitle: String?, onClick: () -> Unit, mod
 }
 
 @Composable
-private fun ConfirmDialog(title: String, text: String, confirm: String, onConfirm: () -> Unit, dismiss: () -> Unit) = AlertDialog(
+internal fun ConfirmDialog(title: String, text: String, confirm: String, onConfirm: () -> Unit, dismiss: () -> Unit) = AlertDialog(
     onDismissRequest = dismiss,
     title = { Text(title) },
     text = { Text(text) },
@@ -305,7 +306,7 @@ internal fun checkTime(at: Long, now: Long = System.currentTimeMillis()): String
 }
 
 @Composable
-private fun TestButton(testing: Boolean, label: String, onClick: () -> Unit) =
+internal fun TestButton(testing: Boolean, label: String, onClick: () -> Unit) =
     OutlinedButton(onClick = onClick, enabled = !testing, modifier = Modifier.testTag("status-test")) { Text(if (testing) "测试中" else label) }
 
 private enum class EditTarget { URL, KEY, MODEL }
@@ -631,6 +632,67 @@ private fun SyncTile(label: String, value: String, modifier: Modifier = Modifier
 ) {
     Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     Text(value, style = MaterialTheme.typography.titleSmall)
+}
+
+// ---------- 公开发布 ----------
+
+@Composable
+fun PublishSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
+    var editing by rememberSaveable { mutableStateOf<EditTarget?>(null) }
+    var confirmClear by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { model.checkPublishIfUnknown() }
+    val publish = state.publish
+    val check = state.publishCheck
+    SettingsPage {
+        item("status") {
+            when {
+                !publish.hasToken -> StatusCard(
+                    CardTone.NEUTRAL, Icons.Outlined.Public, "还没设置",
+                    "向管理员要一个上传 Token，就能把课堂文字和笔记提交给同学们看。"
+                )
+                check is ServiceCheck.Testing -> StatusCard(CardTone.BUSY, Icons.Outlined.Sync, "正在测试…", "连接发布服务并检查 Token")
+                check is ServiceCheck.Passed -> StatusCard(
+                    CardTone.OK, Icons.Outlined.Check, "可以发布",
+                    "${checkTime(check.at)} 测试 · 上传者「${state.publishUploader.orEmpty()}」 · ${check.latencyMs} ms",
+                    action = { TestButton(false, "重新测试", model::checkPublish) }
+                )
+                check is ServiceCheck.Failed -> StatusCard(
+                    CardTone.PROBLEM, Icons.Outlined.ErrorOutline, "连接失败", "${checkTime(check.at)} · ${check.message}",
+                    action = { TestButton(false, "重试", model::checkPublish) }
+                )
+                else -> StatusCard(CardTone.NEUTRAL, Icons.Outlined.Settings, "已配置", "还没测试", action = { TestButton(false, "测试", model::checkPublish) })
+            }
+        }
+        item("server-heading") { SectionHeader("发布信息", Modifier.padding(top = 12.dp)) }
+        item("server") {
+            ListGroup {
+                ValueRow("学校", publish.schoolName.ifBlank { "未填写" }, { editing = EditTarget.URL }, Modifier.testTag("publish-school-setting"), subtitle = "所有公开的课程共用")
+                ListDivider(16.dp)
+                ValueRow(
+                    "上传 Token", if (publish.hasToken) SECRET_DOTS else "未填写", { editing = EditTarget.KEY }, Modifier.testTag("publish-token"),
+                    subtitle = if (publish.hasToken) "已加密保存在本机" else null
+                )
+            }
+        }
+        item("note") {
+            Note("和云同步是两套系统：同步只给你自己的设备，发布的课程经管理员审核后对所有人公开。在课程页点「公开发布」，填好教师就能申请。")
+        }
+        if (publish.hasToken) item("clear") { DangerRow("清除上传 Token", "已公开的课堂不受影响", { confirmClear = true }) }
+    }
+    when (editing) {
+        EditTarget.URL -> TextEditSheet(
+            title = "学校", description = "所有公开的课程都归在这所学校下。", label = "学校",
+            initial = publish.schoolName, secret = false, confirmLabel = "保存", placeholder = "例如 西安建筑科技大学",
+            keyboardType = KeyboardType.Text, onConfirm = model::savePublishSchool, dismiss = { editing = null }
+        )
+        EditTarget.KEY -> TextEditSheet(
+            title = "上传 Token", description = "管理员开通上传资格时给你的 Token，只保存在本机。", label = "新的 Token",
+            initial = "", secret = true, confirmLabel = "保存并测试",
+            onConfirm = model::savePublishToken, dismiss = { editing = null }
+        )
+        else -> Unit
+    }
+    if (confirmClear) ConfirmDialog("清除上传 Token？", "清除后不能再提交新的课堂，已公开的内容不受影响。", "清除", model::clearPublishToken) { confirmClear = false }
 }
 
 // ---------- 专业词提示 ----------

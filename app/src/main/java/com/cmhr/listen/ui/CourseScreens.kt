@@ -3,6 +3,7 @@ package com.cmhr.listen.ui
 import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.FiberManualRecord
 import androidx.compose.material.icons.outlined.Translate
+import androidx.compose.material.icons.outlined.Public
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.BorderStroke
@@ -76,6 +77,8 @@ fun CourseRecordsScreen(
     model: CourseViewModel,
     pendingRecordingCounts: Map<Long, Int> = emptyMap(),
     startClass: (CaptureMode) -> Unit = {},
+    publishSummary: Pair<String, Pair<String, StatusTone>?>? = null,
+    openPublish: () -> Unit = {},
     now: Long = System.currentTimeMillis(),
     openRecord: (Long) -> Unit
 ) {
@@ -130,6 +133,17 @@ fun CourseRecordsScreen(
                         onClick = { editingPrompt = true },
                         modifier = Modifier.testTag("course-asr-prompt")
                     )
+                    publishSummary?.let { (subtitle, status) ->
+                        ListDivider(52.dp)
+                        ListRow(
+                            title = "公开发布",
+                            subtitle = subtitle,
+                            leading = { Icon(Icons.Outlined.Public, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                            status = status?.let { (text, tone) -> { StatusPill(text, tone) } },
+                            onClick = openPublish,
+                            modifier = Modifier.testTag("course-publish")
+                        )
+                    }
                 }
             }
         }

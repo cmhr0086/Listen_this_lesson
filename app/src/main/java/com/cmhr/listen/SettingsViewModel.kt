@@ -5,6 +5,9 @@ import com.cmhr.listen.ui.theme.DarkModePreference
 import com.cmhr.listen.ui.theme.ThemePalette
 
 import android.app.Application
+import com.cmhr.listen.data.publish.PublishApiClient
+import com.cmhr.listen.data.publish.PUBLISH_BASE_URL
+import com.cmhr.listen.data.settings.PublishSettings
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.cmhr.listen.data.settings.AppSettingsRepository
@@ -55,7 +58,11 @@ data class SettingsUiState(
     val aiModelsError: String? = null,
     val sttCheck: ServiceCheck = ServiceCheck.Unknown,
     val aiCheck: ServiceCheck = ServiceCheck.Unknown,
-    val autoNotes: Boolean = true
+    val autoNotes: Boolean = true,
+    val publish: PublishSettings = PublishSettings(),
+    val publishCheck: ServiceCheck = ServiceCheck.Unknown,
+    /** Nickname the publish service knows this token by, from the last successful check. */
+    val publishUploader: String? = null
 )
 
 /** The latest connection test of a service, kept on its page instead of a passing snackbar. */
@@ -125,6 +132,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val syncRepository = SyncRepository(ListenDatabase.get(application), repository)
     private var sttCheckJob: Job? = null
     private var aiCheckJob: Job? = null
+    private var publishCheckJob: Job? = null
+    private val publishClient = PublishApiClient()
 
     init { viewModelScope.launch { repository.settings.collect { settings ->
         _uiState.update { it.copy(
@@ -137,7 +146,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             globalAsrPromptMode = settings.globalAsrPromptMode,
             asrPromptAutoConfig = settings.asrPromptAutoConfig,
             cloudSync = settings.cloudSync,
-            autoNotes = settings.autoNotes
+            autoNotes = settings.autoNotes,
+            publish = settings.publish
         ) }
     } } }
 
@@ -299,5 +309,35 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 _uiState.update { it.copy(cloudSyncState = CloudSyncRunState.Error(error.message ?: "云同步失败。")) }
             }
         )
+    }
+
+    // 公开发布
+
+    fun savePublishSchool(name: String) = viewModelScope.launch {
+        if (attempt("学校不能为空。") { repository.savePublishSchool(name) }) messageFlow.emit(UiMessage("学校已保存。"))
+    }
+    fun savePublishToken(token: String) = viewModelScope.launch {
+        if (attempt("Token 无效。") { repository.savePublishToken(token) }) checkPublish()
+    }
+    fun clearPublishToken() = viewModelScope.launch {
+        repository.clearPublishToken()
+        _uiState.update { it.copy(publishCheck = ServiceCheck.Unknown, publishUploader = null) }
+        messageFlow.emit(UiMessage("已清除上传 Token。"))
+    }
+    fun checkPublishIfUnknown() { if (_uiState.value.publishCheck == ServiceCheck.Unknown && _uiState.value.publish.hasToken) checkPublish() }
+    fun checkPublish() {
+        publishCheckJob?.cancel()
+        publishCheckJob = viewModelScope.launch {
+            _uiState.update { it.copy(publishCheck = ServiceCheck.Testing) }
+            val started = SystemClock.elapsedRealtime()
+            val result = runCatching {
+                publishClient.me(PUBLISH_BASE_URL, repository.readPublishToken().orEmpty())
+            }
+            val now = System.currentTimeMillis()
+            result.fold(
+                onSuccess = { me -> _uiState.update { it.copy(publishCheck = ServiceCheck.Passed(now, SystemClock.elapsedRealtime() - started), publishUploader = me.displayName) } },
+                onFailure = { error -> _uiState.update { it.copy(publishCheck = ServiceCheck.Failed(now, error.message ?: "连接失败。"), publishUploader = null) } }
+            )
+        }
     }
 }
