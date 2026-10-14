@@ -77,6 +77,10 @@ class ServerConnectionTester(private val client: OkHttpClient) {
                     else -> {
                         // 400/422 usually name the problem (unknown model, unsupported format): show it.
                         val detail = serverMessage(response.body?.string().orEmpty())
+                        // Silence correctly has no speech: the address, key and model were all accepted.
+                        if (response.code in setOf(400, 422) && com.cmhr.listen.data.stt.SttApiClient.isNoSpeech(detail)) {
+                            return@use ConnectionTestResult.Success(response.code)
+                        }
                         ConnectionTestResult.Failure("识别接口拒绝了请求（HTTP ${response.code}）" + (detail?.let { "：$it" } ?: "。"))
                     }
                 }

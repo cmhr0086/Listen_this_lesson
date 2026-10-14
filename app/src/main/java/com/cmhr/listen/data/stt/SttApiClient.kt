@@ -90,7 +90,13 @@ sealed interface SttCallOutcome<out T> {
     val trace: List<SttNetworkEvent>
 
     data class Success<T>(val value: T, val httpCode: Int, val retryAfterMs: Long?, override val trace: List<SttNetworkEvent>) : SttCallOutcome<T>
-    data class HttpError(val httpCode: Int, val retryAfterMs: Long?, override val trace: List<SttNetworkEvent>) : SttCallOutcome<Nothing>
+    /** [errorDetail]: the server's short error message, when it gave one (never the whole body). */
+    data class HttpError(
+        val httpCode: Int,
+        val retryAfterMs: Long?,
+        override val trace: List<SttNetworkEvent>,
+        val errorDetail: String? = null
+    ) : SttCallOutcome<Nothing>
     data class TransportError(val exceptionClass: String, val safeMessage: String, override val trace: List<SttNetworkEvent>) : SttCallOutcome<Nothing>
     data class ParseError(val exceptionClass: String, val safeMessage: String, override val trace: List<SttNetworkEvent>) : SttCallOutcome<Nothing>
 }
@@ -196,7 +202,11 @@ class SttApiClient(
             .addFormDataPart("file", "recording.wav", wavAudio.toRequestBody("audio/wav".toMediaType()))
             .addFormDataPart("model", credentials.model.trim())
             .addFormDataPart("response_format", "json")
-        context?.trim()?.takeIf(String::isNotEmpty)?.let { multipart.addFormDataPart("prompt", it) }
+        context?.trim()?.takeIf(String::isNotEmpty)?.let { terms ->
+            // StepFun takes terms as `hotwords` (a JSON array); other OpenAI-format services take `prompt`.
+            if (usesHotwords(credentials.baseUrl)) multipart.addFormDataPart("hotwords", hotwordsJson(terms))
+            else multipart.addFormDataPart("prompt", terms)
+        }
         val tag = traceTag(segmentId, AsrRequestKind.SUBMIT, attempt, onNetworkEvent)
         val request = runCatching {
             Request.Builder()
@@ -212,7 +222,14 @@ class SttApiClient(
                 syncResults[jobId] = SttJobResult(text = outcome.value.text)
                 SttCallOutcome.Success(SttSubmitResponse(jobId, "processing"), outcome.httpCode, outcome.retryAfterMs, outcome.trace)
             }
-            is SttCallOutcome.HttpError -> outcome
+            is SttCallOutcome.HttpError -> {
+                // "No speech found": the segment was noise. That is an empty result, not a failure.
+                if (outcome.httpCode in setOf(400, 422) && isNoSpeech(outcome.errorDetail)) {
+                    val jobId = "$SYNC_JOB_PREFIX$segmentId-$attempt"
+                    syncResults[jobId] = SttJobResult(text = "", finishReason = NO_SPEECH)
+                    SttCallOutcome.Success(SttSubmitResponse(jobId, "processing"), outcome.httpCode, null, outcome.trace)
+                } else outcome
+            }
             is SttCallOutcome.TransportError -> outcome
             is SttCallOutcome.ParseError -> outcome
         }
@@ -269,7 +286,7 @@ class SttApiClient(
                     val retryAfter = response.retryAfterMs()
                     val body = response.body?.string().orEmpty()
                     val trace = tag.trace.snapshot()
-                    if (!response.isSuccessful) return@withContext SttCallOutcome.HttpError(response.code, retryAfter, trace)
+                    if (!response.isSuccessful) return@withContext SttCallOutcome.HttpError(response.code, retryAfter, trace, errorMessage(body))
                     try {
                         SttCallOutcome.Success(json.decodeFromString(serializer, body), response.code, retryAfter, trace)
                     } catch (error: SerializationException) {
@@ -284,6 +301,26 @@ class SttApiClient(
     companion object {
         private const val LANGUAGE = "Chinese"
         internal const val SYNC_JOB_PREFIX = "sync-"
+        internal const val NO_SPEECH = "no_speech"
+        private val NO_SPEECH_PATTERN = Regex("no speech|no voice|speech not (found|detected)|empty audio|audio (is )?too short|未检测到|没有检测到|无语音|无有效语音", RegexOption.IGNORE_CASE)
+
+        internal fun isNoSpeech(message: String?): Boolean = message != null && NO_SPEECH_PATTERN.containsMatchIn(message)
+
+        internal fun usesHotwords(baseUrl: String): Boolean =
+            runCatching { java.net.URI(baseUrl.trim()).host.orEmpty() }.getOrDefault("").let { it == "stepfun.com" || it.endsWith(".stepfun.com") }
+
+        /** Terms as typed for a course ("极限，导数、ε-δ") → `["极限","导数","ε-δ"]`. */
+        internal fun hotwordsJson(terms: String): String =
+            kotlinx.serialization.json.JsonArray(
+                terms.split(Regex("[，,、；;\\s]+")).map(String::trim).filter(String::isNotEmpty).distinct()
+                    .map { kotlinx.serialization.json.JsonPrimitive(it) }
+            ).toString()
+
+        /** The `message` / `detail` of a JSON error body, trimmed for display. */
+        internal fun errorMessage(body: String): String? {
+            val match = Regex("\"(?:message|detail)\"\\s*:\\s*\"([^\"]{1,200})\"").find(body) ?: return null
+            return match.groupValues[1].take(120)
+        }
         /** Texts of synchronous transcriptions waiting for their poll; process-wide, like the queue. */
         private val syncResults = ConcurrentHashMap<String, SttJobResult>()
         private const val TAG = "AsrNetwork"

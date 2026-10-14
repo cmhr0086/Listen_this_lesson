@@ -106,6 +106,10 @@ enum class AiPromptKind(val label: String, val usage: String) {
 }
 
 const val DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+
+/** "https://x/v1/audio/transcriptions/" → "https://x/v1". */
+internal fun openAiBaseUrl(value: String): String =
+    value.trim().trimEnd('/').removeSuffix("/audio/transcriptions").trimEnd('/')
 const val DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash"
 const val OPENAI_BASE_URL = "https://api.openai.com/v1"
 
@@ -149,7 +153,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     // 语音识别
 
     fun saveSttUrl(baseUrl: String) = viewModelScope.launch {
-        if (attempt("服务器地址无效。") { repository.saveServer(baseUrl, null) }) checkStt()
+        // The App adds /audio/transcriptions itself; a pasted full endpoint would double it.
+        val url = if (_uiState.value.server.provider == SttProvider.OPENAI_COMPATIBLE) openAiBaseUrl(baseUrl) else baseUrl
+        if (attempt("服务器地址无效。") { repository.saveServer(url, null) }) checkStt()
     }
     fun saveSttKey(apiKey: String) = viewModelScope.launch {
         if (attempt("API Key 无效。") { repository.saveSttApiKey(apiKey) }) checkStt()

@@ -59,4 +59,11 @@ class SettingsPagesHelpersTest {
             AiPromptKind.entries.filter { it != kind }.forEach { other -> assertTrue(other.isDefault(edited)) }
         }
     }
+
+    @Test
+    fun pastedFullEndpointIsCutBackToTheBase() {
+        assertEquals("https://api.stepfun.com/v1", com.cmhr.listen.openAiBaseUrl("https://api.stepfun.com/v1/audio/transcriptions"))
+        assertEquals("https://api.stepfun.com/v1", com.cmhr.listen.openAiBaseUrl(" https://api.stepfun.com/v1/audio/transcriptions/ "))
+        assertEquals("https://sharellm.net/v1", com.cmhr.listen.openAiBaseUrl("https://sharellm.net/v1/"))
+    }
 }
