@@ -39,6 +39,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 data class AiUiState(
     val selectionRecordId: Long? = null,
@@ -432,6 +433,13 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
             val settings = settingsRepository.settings.first()
             if (!settings.autoNotes || settings.ai.baseUrl.isBlank() || settings.ai.model.isBlank()) return@launch
             if (runCatching { settingsRepository.readAiApiKey() }.getOrNull().isNullOrBlank()) return@launch
+            // Right after class the last few segments are still being recognized; let them land
+            // (up to 3 minutes) so the notes cover the whole lesson.
+            withTimeoutOrNull(AUTO_NOTES_ASR_WAIT_MS) {
+                database.asrDiagnosticsDao().observeActiveForRecord(recordId).first { active ->
+                    active.none { it.state in RECOGNIZING_STATES }
+                }
+            }
             val segments = database.transcriptDao().segments(recordId).first()
             if (segments.isEmpty()) return@launch
             val newestText = segments.maxOf { it.endTime }
@@ -440,6 +448,9 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
                     it.status != AiRequestStatus.ERROR.name && it.createdAt >= newestText
             }
             if (covered || aiJob?.isActive == true) return@launch
+            // A long class does not fit one request; skip quietly instead of showing an error
+            // the user did not ask for. Notes can still be made from a selection.
+            if (!isSourceWithinLimit(buildSourceSnapshot(orderTranscriptSegments(segments)), MAX_FULL_CLASS_CODE_POINTS)) return@launch
             runAction(recordId, AiActionType.ORGANIZE_NOTES, segments, emptyList(), clearSelectionAfterCreate = false, onCreated = {}, extractTopic = true)
         }
     }
@@ -940,11 +951,12 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun validateSnapshot(snapshot: String, selectedOnly: Boolean = true): Boolean {
-        if (isSourceWithinLimit(snapshot)) return true
+        val limit = if (selectedOnly) MAX_SOURCE_CODE_POINTS else MAX_FULL_CLASS_CODE_POINTS
+        if (isSourceWithinLimit(snapshot, limit)) return true
         val message = if (selectedOnly) {
             "选中内容超过 20,000 个字符，请减少选择后重试。"
         } else {
-            "整条记录超过 20,000 个字符，请使用“选择”缩小范围。"
+            "这节课超过 60,000 个字符，请先选择一部分文字再整理。"
         }
         _uiState.update { it.copy(error = message) }
         return false
@@ -1053,8 +1065,19 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
         const val DEFAULT_CLASSROOM_CONTEXT_CODE_POINTS = 10_000
         const val MIN_CLASSROOM_CONTEXT_CODE_POINTS = 1_000
         const val MAX_SOURCE_CODE_POINTS = 20_000
-        fun isSourceWithinLimit(value: String): Boolean =
-            value.codePointCount(0, value.length) <= MAX_SOURCE_CODE_POINTS
+        /** Whole-class requests (notes, auto notes): a 90-minute class runs 25–40k characters. */
+        const val MAX_FULL_CLASS_CODE_POINTS = 60_000
+        private const val AUTO_NOTES_ASR_WAIT_MS = 180_000L
+        private val RECOGNIZING_STATES = setOf(
+            com.cmhr.listen.data.stt.AsrLifecycleState.CAPTURING.name,
+            com.cmhr.listen.data.stt.AsrLifecycleState.QUEUED_LOCAL.name,
+            com.cmhr.listen.data.stt.AsrLifecycleState.SUBMITTING.name,
+            com.cmhr.listen.data.stt.AsrLifecycleState.QUEUED_SERVER.name,
+            com.cmhr.listen.data.stt.AsrLifecycleState.PROCESSING.name,
+            com.cmhr.listen.data.stt.AsrLifecycleState.RETRY_WAIT.name
+        )
+        fun isSourceWithinLimit(value: String, limit: Int = MAX_SOURCE_CODE_POINTS): Boolean =
+            value.codePointCount(0, value.length) <= limit
 
         fun conversationTitle(question: String, fallback: String = "新对话"): String {
             val normalized = question.trim().replace(Regex("\\s+"), " ")

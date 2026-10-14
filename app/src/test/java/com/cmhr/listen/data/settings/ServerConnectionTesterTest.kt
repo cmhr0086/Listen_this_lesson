@@ -84,4 +84,33 @@ class ServerConnectionTesterTest {
             assertEquals(1, server.requestCount)
         }
     }
+
+    @Test
+    fun verifyOpenAiSendsSilenceAndAcceptsATranscript() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(200).setBody("{\"text\":\"\"}"))
+            val result = ServerConnectionTester(OkHttpClient()).verifyOpenAi(server.url("/v1").toString(), "secret", "stepaudio-2.5-asr")
+
+            assertEquals(ConnectionTestResult.Success(200), result)
+            val request = server.takeRequest()
+            assertEquals("/v1/audio/transcriptions", request.path)
+            assertEquals("Bearer secret", request.getHeader("Authorization"))
+            val body = request.body.readUtf8()
+            assertTrue(body.contains("filename=\"silence.wav\""))
+            assertTrue(body.contains("stepaudio-2.5-asr"))
+        }
+    }
+
+    @Test
+    fun verifyOpenAiExplainsWrongAddressAndShowsServerReason() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(404))
+            server.enqueue(MockResponse().setResponseCode(400).setBody("{\"error\":{\"message\":\"model not found\"}}"))
+            val tester = ServerConnectionTester(OkHttpClient())
+            val notFound = tester.verifyOpenAi(server.url("/").toString(), "secret", "m")
+            assertTrue(notFound is ConnectionTestResult.Failure && notFound.message.contains("/audio/transcriptions"))
+            val rejected = tester.verifyOpenAi(server.url("/v1").toString(), "secret", "m")
+            assertEquals(ConnectionTestResult.Failure("识别接口拒绝了请求（HTTP 400）：model not found"), rejected)
+        }
+    }
 }

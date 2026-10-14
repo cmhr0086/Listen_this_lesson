@@ -28,8 +28,15 @@ import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import com.cmhr.listen.data.settings.SttProvider
+import java.util.concurrent.ConcurrentHashMap
 
-data class SttCredentials(val baseUrl: String, val apiKey: String)
+data class SttCredentials(
+    val baseUrl: String,
+    val apiKey: String,
+    val provider: SttProvider = SttProvider.SELF_HOSTED,
+    val model: String = ""
+)
 
 data class SttNetworkEvent(
     val eventType: AsrNetworkEventType,
@@ -99,6 +106,7 @@ class SttApiClient(
     suspend fun health(segmentId: String? = null): SttCallOutcome<SttHealthResponse> {
         val credentials = credentialsProvider()
         if (credentials.baseUrl.isBlank()) return configurationError("请先在设置中填写服务器地址。")
+        if (credentials.provider == SttProvider.OPENAI_COMPATIBLE) return openAiHealth(credentials, segmentId)
         val tag = traceTag(segmentId, AsrRequestKind.HEALTH, 1)
         val request = runCatching {
             Request.Builder()
@@ -120,6 +128,9 @@ class SttApiClient(
     ): SttCallOutcome<SttSubmitResponse> {
         val credentials = credentialsProvider()
         validateCredentials(credentials)?.let { return it }
+        if (credentials.provider == SttProvider.OPENAI_COMPATIBLE) {
+            return openAiTranscribe(credentials, segmentId, attempt, wavAudio, context, onNetworkEvent)
+        }
         val multipart = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
             .addFormDataPart("audio", "recording.wav", wavAudio.toRequestBody("audio/wav".toMediaType()))
@@ -138,6 +149,12 @@ class SttApiClient(
     }
 
     suspend fun poll(segmentId: String, attempt: Int, jobId: String): SttCallOutcome<SttJobResponse> {
+        // A synchronous transcription already holds its text; hand it to the queue as a finished job.
+        // After an app restart the text is gone and a 404 makes the queue resubmit the kept audio.
+        if (jobId.startsWith(SYNC_JOB_PREFIX)) {
+            val result = syncResults.remove(jobId) ?: return SttCallOutcome.HttpError(404, null, emptyList())
+            return SttCallOutcome.Success(SttJobResponse(jobId, "completed", result = result), 200, null, emptyList())
+        }
         val credentials = credentialsProvider()
         validateCredentials(credentials)?.let { return it }
         val tag = traceTag(segmentId, AsrRequestKind.POLL, attempt)
@@ -155,7 +172,68 @@ class SttApiClient(
     private fun validateCredentials(value: SttCredentials): SttCallOutcome.ParseError? = when {
         value.baseUrl.isBlank() -> configurationError("请先在设置中填写服务器地址。")
         value.apiKey.isBlank() -> configurationError("请先在设置中填写 API Key。")
+        value.provider == SttProvider.OPENAI_COMPATIBLE && value.model.isBlank() -> configurationError("请先在设置中填写识别模型名称。")
         else -> null
+    }
+
+    /** POST {base}/audio/transcriptions (OpenAI format). Returns a job id whose result [poll] serves at once. */
+    private suspend fun openAiTranscribe(
+        credentials: SttCredentials,
+        segmentId: String,
+        attempt: Int,
+        wavAudio: ByteArray,
+        context: String?,
+        onNetworkEvent: (AsrNetworkEventType) -> Unit
+    ): SttCallOutcome<SttSubmitResponse> {
+        val multipart = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart("file", "recording.wav", wavAudio.toRequestBody("audio/wav".toMediaType()))
+            .addFormDataPart("model", credentials.model.trim())
+            .addFormDataPart("response_format", "json")
+        context?.trim()?.takeIf(String::isNotEmpty)?.let { multipart.addFormDataPart("prompt", it) }
+        val tag = traceTag(segmentId, AsrRequestKind.SUBMIT, attempt, onNetworkEvent)
+        val request = runCatching {
+            Request.Builder()
+                .url("${credentials.baseUrl.trimEnd('/')}/audio/transcriptions")
+                .header("Authorization", "Bearer ${credentials.apiKey}")
+                .tag(SttCallTraceTag::class.java, tag)
+                .post(multipart.build())
+                .build()
+        }.getOrElse { return configurationError("识别服务器地址无效。") }
+        return when (val outcome = executeJson(request, tag, TranscriptionResponse.serializer())) {
+            is SttCallOutcome.Success -> {
+                val jobId = "$SYNC_JOB_PREFIX$segmentId-$attempt"
+                syncResults[jobId] = SttJobResult(text = outcome.value.text)
+                SttCallOutcome.Success(SttSubmitResponse(jobId, "processing"), outcome.httpCode, outcome.retryAfterMs, outcome.trace)
+            }
+            is SttCallOutcome.HttpError -> outcome
+            is SttCallOutcome.TransportError -> outcome
+            is SttCallOutcome.ParseError -> outcome
+        }
+    }
+
+    /** OpenAI endpoints have no health route; listing models proves the address and key. */
+    private suspend fun openAiHealth(credentials: SttCredentials, segmentId: String?): SttCallOutcome<SttHealthResponse> {
+        val tag = traceTag(segmentId, AsrRequestKind.HEALTH, 1)
+        val request = runCatching {
+            Request.Builder()
+                .url("${credentials.baseUrl.trimEnd('/')}/models")
+                .header("Authorization", "Bearer ${credentials.apiKey}")
+                .tag(SttCallTraceTag::class.java, tag)
+                .get()
+                .build()
+        }.getOrElse { return configurationError("识别服务器地址无效。") }
+        return withContext(Dispatchers.IO) {
+            try {
+                httpClient.newCall(request).execute().use { response ->
+                    val trace = tag.trace.snapshot()
+                    if (!response.isSuccessful) SttCallOutcome.HttpError(response.code, response.retryAfterMs(), trace)
+                    else SttCallOutcome.Success(SttHealthResponse(status = "ok", model = credentials.model), response.code, null, trace)
+                }
+            } catch (error: IOException) {
+                SttCallOutcome.TransportError(error::class.java.simpleName, safeNetworkMessage(error), tag.trace.snapshot())
+            }
+        }
     }
 
     private fun configurationError(message: String) = SttCallOutcome.ParseError("IllegalStateException", message, emptyList())
@@ -194,6 +272,9 @@ class SttApiClient(
 
     companion object {
         private const val LANGUAGE = "Chinese"
+        internal const val SYNC_JOB_PREFIX = "sync-"
+        /** Texts of synchronous transcriptions waiting for their poll; process-wide, like the queue. */
+        private val syncResults = ConcurrentHashMap<String, SttJobResult>()
         private const val TAG = "AsrNetwork"
         private val json = Json { ignoreUnknownKeys = true }
         private val defaultHttpClient = OkHttpClient.Builder()

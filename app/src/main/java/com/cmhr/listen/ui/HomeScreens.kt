@@ -232,7 +232,7 @@ private fun StartClassCard(
                 StartModeButton(Modifier.weight(1f), CaptureMode.RECORD_ONLY, blocked == null, start)
             }
             Text(
-                blocked ?: listening.error ?: "录完会再确认保存到哪门课。",
+                blocked ?: listening.error ?: "录完自动保存到这门课，之后也能再换。",
                 style = MaterialTheme.typography.bodySmall,
                 color = if (blocked == null && listening.error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
             )

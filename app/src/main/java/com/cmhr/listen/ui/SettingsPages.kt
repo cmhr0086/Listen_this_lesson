@@ -98,6 +98,7 @@ import com.cmhr.listen.data.settings.AiPromptSettings
 import com.cmhr.listen.data.settings.AiProvider
 import com.cmhr.listen.data.settings.AiReasoningEffort
 import com.cmhr.listen.data.settings.AiThinkingMode
+import com.cmhr.listen.data.settings.SttProvider
 import com.cmhr.listen.data.stt.AsrPromptAutoConfig
 import com.cmhr.listen.data.stt.AsrPromptMode
 import com.cmhr.listen.ui.theme.DarkModePreference
@@ -307,7 +308,7 @@ internal fun checkTime(at: Long, now: Long = System.currentTimeMillis()): String
 private fun TestButton(testing: Boolean, label: String, onClick: () -> Unit) =
     OutlinedButton(onClick = onClick, enabled = !testing, modifier = Modifier.testTag("status-test")) { Text(if (testing) "测试中" else label) }
 
-private enum class EditTarget { URL, KEY }
+private enum class EditTarget { URL, KEY, MODEL }
 
 // ---------- 语音识别 ----------
 
@@ -317,6 +318,7 @@ fun SttServiceSettingsScreen(state: SettingsUiState, model: SettingsViewModel, o
     var confirmClear by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { model.checkSttIfUnknown() }
     val server = state.server
+    val openAi = server.provider == SttProvider.OPENAI_COMPATIBLE
     val check = state.sttCheck
     SettingsPage {
         item("status") {
@@ -336,10 +338,21 @@ fun SttServiceSettingsScreen(state: SettingsUiState, model: SettingsViewModel, o
                 else -> StatusCard(CardTone.NEUTRAL, Icons.Outlined.Settings, "已配置", "还没测试", action = { TestButton(false, "测试", model::checkStt) })
             }
         }
+        item("type-heading") { SectionHeader("服务类型", Modifier.padding(top = 12.dp)) }
+        item("type") {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                ProviderCard("自建服务", "Qwen3-ASR 等自己部署的服务", openAi.not(), { model.chooseSttProvider(SttProvider.SELF_HOSTED) }, Modifier.weight(1f).testTag("stt-provider-self"))
+                ProviderCard("OpenAI 兼容", "第三方识别服务，填模型名", openAi, { model.chooseSttProvider(SttProvider.OPENAI_COMPATIBLE) }, Modifier.weight(1f).testTag("stt-provider-openai"))
+            }
+        }
         item("server-heading") { SectionHeader("服务器", Modifier.padding(top = 12.dp)) }
         item("server") {
             ListGroup {
                 ValueRow("地址", null, { editing = EditTarget.URL }, Modifier.testTag("stt-url"), subtitle = server.baseUrl.ifBlank { "未填写" })
+                if (openAi) {
+                    ListDivider(16.dp)
+                    ValueRow("模型", server.model.ifBlank { "未填写" }, { editing = EditTarget.MODEL }, Modifier.testTag("stt-model"))
+                }
                 ListDivider(16.dp)
                 ValueRow(
                     "API Key", if (server.hasApiKey) SECRET_DOTS else "未填写", { editing = EditTarget.KEY }, Modifier.testTag("stt-key"),
@@ -347,7 +360,12 @@ fun SttServiceSettingsScreen(state: SettingsUiState, model: SettingsViewModel, o
                 )
             }
         }
-        item("server-note") { Note("改完地址或 Key 会立即保存，并自动测试一次。") }
+        item("server-note") {
+            Note(
+                if (openAi) "地址填到 /v1 为止（例如 https://api.example.com/v1）。测试会发送 1 秒静音，几乎不消耗额度。改动会立即保存并自动测试。"
+                else "改完地址或 Key 会立即保存，并自动测试一次。"
+            )
+        }
         item("related-heading") { SectionHeader("相关", Modifier.padding(top = 12.dp)) }
         item("related") {
             ListGroup { ValueRow("专业词提示", state.globalAsrPromptMode.displayName, openAsrPrompt) }
@@ -356,9 +374,17 @@ fun SttServiceSettingsScreen(state: SettingsUiState, model: SettingsViewModel, o
     }
     when (editing) {
         EditTarget.URL -> TextEditSheet(
-            title = "服务器地址", description = "识别服务的地址，以 http:// 或 https:// 开头。", label = "地址",
-            initial = server.baseUrl, secret = false, confirmLabel = "保存并测试", placeholder = "https://asr.example.com",
+            title = "服务器地址",
+            description = if (openAi) "OpenAI 兼容接口的地址，通常以 /v1 结尾。" else "识别服务的地址，以 http:// 或 https:// 开头。",
+            label = "地址",
+            initial = server.baseUrl, secret = false, confirmLabel = "保存并测试",
+            placeholder = if (openAi) "https://api.example.com/v1" else "https://asr.example.com",
             onConfirm = model::saveSttUrl, dismiss = { editing = null }
+        )
+        EditTarget.MODEL -> TextEditSheet(
+            title = "识别模型", description = "按服务商文档填写模型名称。", label = "模型名称",
+            initial = server.model, secret = false, confirmLabel = "保存并测试", keyboardType = KeyboardType.Ascii,
+            onConfirm = model::saveSttModel, dismiss = { editing = null }
         )
         EditTarget.KEY -> TextEditSheet(
             title = "API Key", description = "粘贴识别服务给你的 Key。只保存在本机，不会同步到其他设备。", label = "新的 API Key",
@@ -445,7 +471,7 @@ fun AiServiceSettingsScreen(state: SettingsUiState, model: SettingsViewModel, op
             initial = "", secret = true, confirmLabel = "保存并测试",
             onConfirm = model::saveAiKey, dismiss = { editing = null }
         )
-        null -> Unit
+        else -> Unit
     }
     if (confirmClear) ConfirmDialog("清除 API Key？", "清除后 AI 整理和问答都不能用，直到重新填写。", "清除", model::clearAiApiKey) { confirmClear = false }
 }
@@ -593,7 +619,7 @@ fun CloudSyncSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
             initial = "", secret = true, confirmLabel = "保存",
             onConfirm = model::saveCloudSyncToken, dismiss = { editing = null }
         )
-        null -> Unit
+        else -> Unit
     }
     if (confirmStop) ConfirmDialog("停用云同步？", "会清除本机的 Token，服务器上的数据不受影响。", "停用", model::clearCloudSyncApiToken) { confirmStop = false }
 }
