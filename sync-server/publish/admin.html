@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Listen 审核</title>
+<style>
+  :root { --bg:#f6f6f3; --card:#fff; --ink:#1d1d1b; --muted:#6b6b66; --line:#e3e2dc; --accent:#2f6f5e; --danger:#b3392f; --mark:#fff3c4; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#151514; --card:#1f1f1d; --ink:#ecebe6; --muted:#9d9c95; --line:#33332f; --accent:#7fc2ad; --danger:#ef8a80; --mark:#4a4222; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.6 system-ui,-apple-system,"PingFang SC",sans-serif; }
+  header { position:sticky; top:0; background:var(--bg); border-bottom:1px solid var(--line); padding:10px 16px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; z-index:1; }
+  header h1 { font-size:16px; margin:0 auto 0 0; }
+  header nav { order:3; width:100%; display:flex; gap:6px; overflow-x:auto; scrollbar-width:none; }
+  header nav button { flex:none; padding:4px 10px; min-height:32px; }
+  main { max-width:860px; margin:0 auto; padding:16px; }
+  button { font:inherit; border:1px solid var(--line); background:var(--card); color:var(--ink); border-radius:8px; padding:6px 12px; cursor:pointer; min-height:36px; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.danger { color:var(--danger); }
+  button[aria-pressed="true"] { border-color:var(--accent); color:var(--accent); font-weight:600; }
+  input, textarea { font:inherit; width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:var(--card); color:var(--ink); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; margin-bottom:12px; }
+  .muted { color:var(--muted); font-size:13px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:10px; }
+  .seg { padding:4px 0; border-bottom:1px dashed var(--line); }
+  .seg.marked { background:var(--mark); }
+  .seg time { color:var(--muted); font-size:12px; margin-right:6px; font-variant-numeric:tabular-nums; }
+  .note { white-space:pre-wrap; border-left:3px solid var(--accent); padding-left:10px; }
+  .pill { font-size:12px; border:1px solid var(--line); border-radius:99px; padding:1px 8px; }
+  .token { font-family:ui-monospace,monospace; word-break:break-all; background:var(--mark); padding:8px; border-radius:8px; }
+  .error { color:var(--danger); }
+  details summary { cursor:pointer; color:var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Listen 审核</h1>
+  <button id="logout" hidden>退出</button>
+  <nav id="tabs"></nav>
+</header>
+<main id="view"></main>
+<script>
+const TABS = { pending: "待审核", lessons: "已公开", withdraw: "撤回申请", uploaders: "上传者", audit: "日志" };
+const view = document.getElementById("view");
+let token = "";
+try { token = sessionStorage.getItem("listen-admin") || ""; } catch (e) {}
+let tab = "pending";
+
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+const when = (ms) => ms ? new Date(ms).toLocaleString("zh-CN", { hour12:false }) : "";
+const clock = (ms) => new Date(ms).toLocaleTimeString("zh-CN", { hour12:false });
+const courseLine = (c) => `${esc(c.courseName)} · ${esc(c.teacherName)} <span class="muted">${esc(c.schoolName)} · ${esc(c.term)}</span>`;
+
+async function api(path, options = {}) {
+  const response = await fetch("/api/admin/v1" + path, {
+    ...options,
+    headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+  });
+  if (response.status === 401) { setToken(""); throw new Error("管理员 Token 无效"); }
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(typeof body.detail === "string" ? body.detail : "请求失败（HTTP " + response.status + "）");
+  return body;
+}
+
+function setToken(value) {
+  token = value;
+  try { value ? sessionStorage.setItem("listen-admin", value) : sessionStorage.removeItem("listen-admin"); } catch (e) {}
+  render();
+}
+
+function renderTabs() {
+  const nav = document.getElementById("tabs");
+  document.getElementById("logout").hidden = !token;
+  nav.innerHTML = token ? Object.entries(TABS).map(([key, label]) =>
+    `<button data-tab="${key}" aria-pressed="${key === tab}">${label}</button>`).join("") : "";
+}
+
+document.getElementById("tabs").addEventListener("click", (e) => {
+  const key = e.target.dataset.tab;
+  if (key) { tab = key; render(); }
+});
+document.getElementById("logout").onclick = () => setToken("");
+
+async function render() {
+  renderTabs();
+  if (!token) {
+    view.innerHTML = `<div class="card"><p>输入管理员 Token（只保存在本标签页）。</p>
+      <form id="login"><input type="password" id="tokenInput" autocomplete="off" placeholder="PUBLISH_ADMIN_TOKEN">
+      <div class="row"><button class="primary">进入</button></div></form></div>`;
+    document.getElementById("login").onsubmit = (e) => { e.preventDefault(); setToken(document.getElementById("tokenInput").value.trim()); };
+    return;
+  }
+  view.innerHTML = `<p class="muted">加载中…</p>`;
+  try {
+    await ({ pending: renderPending, lessons: () => renderLessons(false), withdraw: () => renderLessons(true), uploaders: renderUploaders, audit: renderAudit })[tab]();
+  } catch (error) {
+    view.innerHTML = `<div class="card error">${esc(error.message)}</div><button onclick="render()">重试</button>`;
+  }
+}
+
+async function renderPending() {
+  const { revisions } = await api("/revisions?status=pending");
+  if (!revisions.length) { view.innerHTML = `<div class="card muted">没有待审核的提交。</div>`; return; }
+  view.innerHTML = revisions.map((r) => `<div class="card">
+      <div><b>${esc(r.title)}</b> <span class="pill">第 ${r.revision} 版</span> ${r.replacesPublished ? '<span class="pill">替换已公开版本</span>' : '<span class="pill">首次提交</span>'}
+      ${r.lessonStatus === "taken_down" ? '<span class="pill">课堂已下架</span>' : ""}</div>
+      <div>${courseLine(r.course)}</div>
+      <div class="muted">${esc(r.uploader)} · ${when(r.submittedAt)} · ${r.segmentCount} 段文字 · ${r.noteCount} 份笔记</div>
+      <div class="row"><button class="primary" data-open="${r.revisionId}">查看并审核</button></div></div>`).join("");
+  view.querySelectorAll("[data-open]").forEach((b) => b.onclick = () => openRevision(b.dataset.open));
+}
+
+function contentHtml(r) {
+  const segments = r.segments.map((s) => `<div class="seg ${s.marked ? "marked" : ""}"><time>${clock(s.startTime)}</time>${s.marked ? "★ " : ""}${esc(s.displayText)}${s.corrected ? ' <span class="pill">已纠正</span>' : ""}</div>`).join("") || `<p class="muted">无转写文字</p>`;
+  const notes = r.notes.map((n) => `<h4>${esc(n.title)} <span class="pill">${esc(n.format)}</span></h4><div class="note">${esc(n.content)}</div>`).join("") || `<p class="muted">无笔记</p>`;
+  return `<div class="muted">${when(r.startedAt)}${r.topic ? " · 主题：" + esc(r.topic) : ""}</div>
+    <h3>笔记（${r.notes.length}）</h3>${notes}<h3>转写文字（${r.segments.length}）</h3>${segments}`;
+}
+
+async function openRevision(id) {
+  view.innerHTML = `<p class="muted">加载中…</p>`;
+  const { revision: r, published } = await api("/revisions/" + id);
+  view.innerHTML = `<button id="back">← 返回列表</button>
+    <div class="card"><h2 style="margin:0">${esc(r.title)}</h2><div>${courseLine(r.course)}</div>
+      <div class="muted">${esc(r.uploader)} · 第 ${r.revision} 版 · 提交于 ${when(r.submittedAt)}</div>
+      ${r.status === "pending" ? `<label class="muted" for="note">审核备注（驳回时会显示给上传者）</label><textarea id="note" rows="2"></textarea>
+      <div class="row"><button class="primary" id="approve">批准公开</button><button class="danger" id="reject">驳回</button></div>` : `<p class="pill">${esc(r.status)}</p>`}
+      <p class="error" id="msg"></p></div>
+    ${published ? `<div class="card"><details><summary>对比：当前公开的第 ${published.revision} 版（${published.segmentCount} 段 · ${published.noteCount} 份笔记）</summary>${contentHtml(published)}</details></div>` : ""}
+    <div class="card">${contentHtml(r)}</div>`;
+  document.getElementById("back").onclick = render;
+  const decide = async (action) => {
+    const note = document.getElementById("note").value.trim();
+    if (action === "reject" && !note && !confirm("不填理由直接驳回？")) return;
+    try {
+      await api(`/revisions/${id}/${action}`, { method: "POST", body: JSON.stringify({ note: note || null }) });
+      render();
+    } catch (error) { document.getElementById("msg").textContent = error.message; }
+  };
+  if (r.status === "pending") {
+    document.getElementById("approve").onclick = () => decide("approve");
+    document.getElementById("reject").onclick = () => decide("reject");
+  }
+}
+
+async function renderLessons(withdrawOnly) {
+  const { lessons } = await api("/lessons" + (withdrawOnly ? "?withdrawRequested=true" : ""));
+  if (!lessons.length) { view.innerHTML = `<div class="card muted">${withdrawOnly ? "没有撤回申请。" : "还没有公开的课堂。"}</div>`; return; }
+  view.innerHTML = lessons.map((l) => `<div class="card">
+      <div><b>${esc(l.title)}</b> <span class="pill">${l.status === "active" ? "公开中" : "已下架"}</span></div>
+      <div>${courseLine(l.course)}</div>
+      <div class="muted">${esc(l.uploader)} · ${when(l.startedAt)}</div>
+      ${l.withdrawRequestedAt ? `<div>撤回申请（${when(l.withdrawRequestedAt)}）：${esc(l.withdrawReason)}</div>` : ""}
+      <div class="row">${l.status === "active"
+        ? `<button class="danger" data-act="takedown" data-id="${l.lessonId}">下架</button>`
+        : `<button data-act="restore" data-id="${l.lessonId}">恢复公开</button>`}</div></div>`).join("");
+  view.querySelectorAll("[data-act]").forEach((b) => b.onclick = async () => {
+    if (b.dataset.act === "takedown" && !confirm("下架后读者将看不到这节课，确定？")) return;
+    try { await api(`/lessons/${b.dataset.id}/${b.dataset.act}`, { method: "POST" }); render(); }
+    catch (error) { alert(error.message); }
+  });
+}
+
+async function renderUploaders() {
+  const { uploaders } = await api("/uploaders");
+  view.innerHTML = `<div class="card"><form id="create"><label for="name">开通上传者（昵称会公开显示）</label>
+      <div class="row"><input id="name" maxlength="50" style="flex:1"><button class="primary">开通</button></div></form><div id="issued"></div></div>` +
+    uploaders.map((u) => `<div class="card"><b>${esc(u.displayName)}</b> <span class="pill">${u.status === "active" ? "可上传" : "已停用"}</span>
+      <div class="muted">Token 末四位 ${esc(u.tokenHint)} · 开通于 ${when(u.createdAt)}</div>
+      <div class="row"><button data-act="rotate-token" data-id="${u.id}">重置 Token</button>
+      <button class="${u.status === "active" ? "danger" : ""}" data-act="${u.status === "active" ? "disable" : "enable"}" data-id="${u.id}">${u.status === "active" ? "停用" : "启用"}</button></div></div>`).join("");
+  const showToken = (u) => {
+    document.getElementById("issued").innerHTML = `<p>「${esc(u.displayName)}」的上传 Token，<b>只显示这一次</b>，请交给对方填入 Android：</p><div class="token">${esc(u.token)}</div>`;
+  };
+  document.getElementById("create").onsubmit = async (e) => {
+    e.preventDefault();
+    const name = document.getElementById("name").value.trim();
+    if (!name) return;
+    try { const u = await api("/uploaders", { method: "POST", body: JSON.stringify({ displayName: name }) }); await renderUploaders(); showToken(u); }
+    catch (error) { alert(error.message); }
+  };
+  view.querySelectorAll("[data-act]").forEach((b) => b.onclick = async () => {
+    if (b.dataset.act === "rotate-token" && !confirm("旧 Token 会立即失效，确定重置？")) return;
+    try { const u = await api(`/uploaders/${b.dataset.id}/${b.dataset.act}`, { method: "POST" }); await renderUploaders(); if (u.token) showToken(u); }
+    catch (error) { alert(error.message); }
+  });
+}
+
+async function renderAudit() {
+  const { entries } = await api("/audit");
+  view.innerHTML = `<div class="card">` + (entries.map((e) => `<div class="seg"><time>${when(e.at)}</time>${esc(e.actor)} · ${esc(e.action)} · <span class="muted">${esc(e.target)} ${esc(e.detail)}</span></div>`).join("") || `<p class="muted">暂无记录</p>`) + `</div>`;
+}
+
+render();
+</script>
+</body>
+</html>

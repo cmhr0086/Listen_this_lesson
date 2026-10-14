@@ -52,3 +52,28 @@ docker run -d --name listen-sync \
 ```bash
 pytest -q
 ```
+
+## 公开发布服务（listen-publish）
+
+同一镜像里的第二个服务，入口 `publish.main:app`，使用独立的数据库文件，从不打开个人同步库。设计见 [docs/PUBLIC_READER_BACKEND.md](../docs/PUBLIC_READER_BACKEND.md)。
+
+| 前缀 | 鉴权 | 用途 |
+|---|---|---|
+| `/api/public/v1` | 无（只读） | 课程、课堂、详情、搜索、TXT 导出，只返回已批准且未下架的版本 |
+| `/api/publish/v1` | 上传者 Token | Android 提交版本、查询审核状态、申请撤回 |
+| `/api/admin/v1`、`/admin` | `PUBLISH_ADMIN_TOKEN` | 审核、下架/恢复、开通上传者；`/admin` 是适配手机的审核页 |
+
+```bash
+docker run -d --name listen-publish \
+  --restart unless-stopped \
+  -p 127.0.0.1:8781:8000 \
+  -e PUBLISH_ADMIN_TOKEN='replace-with-a-long-random-token' \
+  -e PUBLISH_CORS_ORIGINS='https://reader.example.com' \
+  -v /opt/listen-publish-data:/data \
+  listen-sync \
+  uvicorn publish.main:app --host 0.0.0.0 --port 8000 --workers 1
+```
+
+- `PUBLISH_ADMIN_TOKEN` 未配置时管理接口一律 401。上传者 Token 在 `/admin` 开通或重置时只显示一次，服务端只存 SHA-256。
+- `PUBLISH_CORS_ORIGINS` 仅网页阅读端需要（逗号分隔）；小程序不受 CORS 限制，但要在小程序后台配置 request / downloadFile 合法域名。
+- `PUBLISH_TIMEZONE` 控制 TXT 中的时间显示，默认 `Asia/Shanghai`。
