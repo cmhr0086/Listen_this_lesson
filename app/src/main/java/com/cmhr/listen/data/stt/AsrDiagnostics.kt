@@ -438,6 +438,23 @@ interface AsrDiagnosticsDao {
         serverReadyState: String = "QUEUED_SERVER"
     ): Int
 
+    @Query(
+        """
+        UPDATE asr_segment_diagnostics
+        SET state = CASE WHEN jobId IS NULL THEN :readyState ELSE :serverReadyState END,
+            failureStage = NULL,
+            exceptionClass = NULL,
+            safeErrorMessage = NULL,
+            nextAttemptAt = NULL
+        WHERE state = :unknownState
+        """
+    )
+    suspend fun confirmRetryAllUnknown(
+        unknownState: String = "SUBMISSION_UNKNOWN",
+        readyState: String = "QUEUED_LOCAL",
+        serverReadyState: String = "QUEUED_SERVER"
+    ): Int
+
     @Query("SELECT * FROM asr_network_events WHERE segmentId = :segmentId ORDER BY id ASC")
     fun observeEvents(segmentId: String): Flow<List<AsrNetworkEventEntity>>
 

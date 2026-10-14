@@ -102,6 +102,12 @@ class SttApiClient(
     private val wallTime: () -> Long = System::currentTimeMillis
 ) {
     private val httpClient = httpClient.newBuilder().eventListenerFactory(SttEventListenerFactory).build()
+    /** Synchronous transcription answers only when the text is ready; third-party services can take a minute. */
+    private val syncHttpClient = this.httpClient.newBuilder()
+        .readTimeout(120, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
+        .callTimeout(180, TimeUnit.SECONDS)
+        .build()
 
     suspend fun health(segmentId: String? = null): SttCallOutcome<SttHealthResponse> {
         val credentials = credentialsProvider()
@@ -200,7 +206,7 @@ class SttApiClient(
                 .post(multipart.build())
                 .build()
         }.getOrElse { return configurationError("识别服务器地址无效。") }
-        return when (val outcome = executeJson(request, tag, TranscriptionResponse.serializer())) {
+        return when (val outcome = executeJson(request, tag, TranscriptionResponse.serializer(), syncHttpClient)) {
             is SttCallOutcome.Success -> {
                 val jobId = "$SYNC_JOB_PREFIX$segmentId-$attempt"
                 syncResults[jobId] = SttJobResult(text = outcome.value.text)
@@ -251,10 +257,15 @@ class SttApiClient(
             trace = SttCallTrace(elapsedRealtime, wallTime, onNetworkEvent)
         )
 
-    private suspend fun <T> executeJson(request: Request, tag: SttCallTraceTag, serializer: KSerializer<T>): SttCallOutcome<T> =
+    private suspend fun <T> executeJson(
+        request: Request,
+        tag: SttCallTraceTag,
+        serializer: KSerializer<T>,
+        client: OkHttpClient = httpClient
+    ): SttCallOutcome<T> =
         withContext(Dispatchers.IO) {
             try {
-                httpClient.newCall(request).execute().use { response ->
+                client.newCall(request).execute().use { response ->
                     val retryAfter = response.retryAfterMs()
                     val body = response.body?.string().orEmpty()
                     val trace = tag.trace.snapshot()

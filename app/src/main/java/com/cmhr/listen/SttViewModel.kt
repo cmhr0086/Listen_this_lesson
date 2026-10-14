@@ -521,6 +521,10 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun confirmRetryAllUnknown() {
+        viewModelScope.launch { asrRuntime.confirmRetryAllUnknown() }
+    }
+
     fun confirmRetryUnknown(segmentId: String) {
         viewModelScope.launch { asrRuntime.confirmRetryUnknown(segmentId) }
     }
