@@ -9,6 +9,8 @@ import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 
 sealed interface ConnectionTestResult {
     data class Success(val statusCode: Int) : ConnectionTestResult
@@ -48,6 +50,48 @@ class ServerConnectionTester(private val client: OkHttpClient) {
         }
     }
 
+    /**
+     * OpenAI-format speech endpoint: POST {base}/audio/transcriptions with one second of silence.
+     * A real (tiny) transcription is the only check that every server answers the same way:
+     * some validate fields before the key, so a request without audio can pass with a bad key.
+     */
+    suspend fun verifyOpenAi(baseUrl: String, apiKey: String, model: String): ConnectionTestResult = withContext(Dispatchers.IO) {
+        val root = (baseUrl.trim().trimEnd('/') + "/").toHttpUrlOrNull()
+            ?: return@withContext ConnectionTestResult.Failure("服务器地址格式无效。")
+        if (apiKey.isBlank()) return@withContext ConnectionTestResult.Failure("还没填 API Key。")
+        if (model.isBlank()) return@withContext ConnectionTestResult.Failure("还没填识别模型名称。")
+        val url = root.resolve("audio/transcriptions")
+            ?: return@withContext ConnectionTestResult.Failure("无法生成识别接口地址。")
+        val body = okhttp3.MultipartBody.Builder().setType(okhttp3.MultipartBody.FORM)
+            .addFormDataPart("file", "silence.wav", SILENT_WAV.toRequestBody("audio/wav".toMediaType()))
+            .addFormDataPart("model", model.trim())
+            .addFormDataPart("response_format", "json")
+            .build()
+        try {
+            val request = Request.Builder().url(url).header("Authorization", "Bearer ${apiKey.trim()}").post(body).build()
+            client.newCall(request).execute().use { response ->
+                when (response.code) {
+                    in 200..299 -> ConnectionTestResult.Success(response.code)
+                    401, 403 -> ConnectionTestResult.Failure("API Key 无效（HTTP ${response.code}）。")
+                    404 -> ConnectionTestResult.Failure("地址下没有 /audio/transcriptions 接口（HTTP 404），请检查地址，通常以 /v1 结尾。")
+                    else -> {
+                        // 400/422 usually name the problem (unknown model, unsupported format): show it.
+                        val detail = serverMessage(response.body?.string().orEmpty())
+                        ConnectionTestResult.Failure("识别接口拒绝了请求（HTTP ${response.code}）" + (detail?.let { "：$it" } ?: "。"))
+                    }
+                }
+            }
+        } catch (_: UnknownHostException) {
+            ConnectionTestResult.Failure("无法解析服务器地址。")
+        } catch (_: SocketTimeoutException) {
+            ConnectionTestResult.Failure("连接服务器超时。")
+        } catch (_: ConnectException) {
+            ConnectionTestResult.Failure("服务器拒绝连接或当前网络不可达。")
+        } catch (_: Exception) {
+            ConnectionTestResult.Failure("识别接口检查失败。")
+        }
+    }
+
     suspend fun test(baseUrl: String): ConnectionTestResult = withContext(Dispatchers.IO) {
         val root = (baseUrl.trim().trimEnd('/') + "/").toHttpUrlOrNull()
             ?: return@withContext ConnectionTestResult.Failure("服务器地址格式无效。")
@@ -77,5 +121,13 @@ class ServerConnectionTester(private val client: OkHttpClient) {
 
     private companion object {
         const val KEY_PROBE_JOB_ID = "listen-key-probe"
+        /** One second of 16 kHz mono silence. */
+        val SILENT_WAV: ByteArray = com.cmhr.listen.audio.WavEncoder.encodePcm16Mono(ByteArray(32_000), 16_000)
+
+        /** The `message` or `detail` of an error body, trimmed for display; never the whole body. */
+        fun serverMessage(body: String): String? {
+            val match = Regex("\"(?:message|detail)\"\\s*:\\s*\"([^\"]{1,200})\"").find(body) ?: return null
+            return match.groupValues[1].take(80)
+        }
     }
 }

@@ -272,6 +272,8 @@ fun ListenApp(
     val courseColors by courses.courseColors.collectAsStateWithLifecycle(initialValue = emptyMap())
     // Notes are made once a class is over: after it is filed, or after its recordings are recognized.
     var autoNotesFor by remember { mutableStateOf<Long?>(null) }
+    // An AI error belongs to the class it happened in; don't carry it into the next one.
+    LaunchedEffect(recordId) { ai.clearError() }
     LaunchedEffect(recordingState.recognizingAllRecordId) {
         val finished = autoNotesFor
         if (recordingState.recognizingAllRecordId == null && finished != null) ai.autoOrganizeNotes(finished)
@@ -384,9 +386,19 @@ fun ListenApp(
         val resumingIt = sttState.resumingRecordId == awaiting
         if (capturingIt) filingCaptureSeen = true
         else if (filingCaptureSeen && !pausedIt && !resumingIt) {
-            filingRecordId = awaiting
             awaitingFilingRecordId = null
             filingCaptureSeen = false
+            // The course was chosen before class; no dialog. Say where it went and offer a change.
+            ai.autoOrganizeNotes(awaiting)
+            val courseName = courseState.recentSessions.firstOrNull { it.session.id == awaiting }?.courseName
+            scope.launch {
+                val result = snackbarHostState.showSnackbar(
+                    courseName?.let { "已保存到「$it」" } ?: "这节课已保存",
+                    actionLabel = "换课程",
+                    duration = SnackbarDuration.Short
+                )
+                if (result == androidx.compose.material3.SnackbarResult.ActionPerformed) filingRecordId = awaiting
+            }
         }
     }
 
@@ -447,9 +459,9 @@ fun ListenApp(
                 filingRecordId = null
                 ai.autoOrganizeNotes(filing)
             },
-            createNew = { filingRecordId = null; newName = ""; courseCreation = CourseCreation.ThenFile(filing); ai.autoOrganizeNotes(filing) },
-            dismiss = { filingRecordId = null; ai.autoOrganizeNotes(filing) },
-            dismissLabel = "保持不变"
+            createNew = { filingRecordId = null; newName = ""; courseCreation = CourseCreation.ThenFile(filing) },
+            dismiss = { filingRecordId = null },
+            dismissLabel = "取消"
         )
     }
     creatingRecordForCourse?.let { courseId ->

@@ -49,6 +49,9 @@ class AiSourceSnapshotTest {
         assertTrue(AiViewModel.isSourceWithinLimit("问".repeat(20_000)))
         assertTrue(AiViewModel.isSourceWithinLimit("😀".repeat(20_000)))
         assertFalse(AiViewModel.isSourceWithinLimit("😀".repeat(20_001)))
+        // Whole-class requests get room for a full 90-minute lesson.
+        assertTrue(AiViewModel.isSourceWithinLimit("问".repeat(45_000), AiViewModel.MAX_FULL_CLASS_CODE_POINTS))
+        assertFalse(AiViewModel.isSourceWithinLimit("问".repeat(60_001), AiViewModel.MAX_FULL_CLASS_CODE_POINTS))
     }
 
     @Test

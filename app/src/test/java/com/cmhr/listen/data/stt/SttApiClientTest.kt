@@ -122,6 +122,63 @@ class SttApiClientTest {
         }
     }
 
+    @Test
+    fun `openai provider posts to audio transcriptions and serves the text on poll`() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"text":"同学们好"}"""))
+        server.start()
+        try {
+            val client = openAiClient(server)
+            val submitted = client.submit("segment-9", 1, byteArrayOf(1, 2), context = "导数")
+            assertTrue(submitted is SttCallOutcome.Success)
+            val jobId = (submitted as SttCallOutcome.Success).value.jobId
+            assertTrue(jobId.startsWith("sync-"))
+            val request = server.takeRequest()
+            val body = request.body.readUtf8()
+            assertEquals("/v1/audio/transcriptions", request.path)
+            assertEquals("Bearer test-key", request.getHeader("Authorization"))
+            assertTrue(body.contains("name=\"file\""))
+            assertTrue(body.contains("name=\"model\""))
+            assertTrue(body.contains("stepaudio-2.5-asr"))
+            assertTrue(body.contains("name=\"prompt\""))
+            assertFalse(body.contains("name=\"audio\""))
+
+            val polled = client.poll("segment-9", 1, jobId)
+            assertTrue(polled is SttCallOutcome.Success)
+            val job = (polled as SttCallOutcome.Success).value
+            assertEquals("completed", job.status)
+            assertEquals("同学们好", job.result?.text)
+            assertEquals(1, server.requestCount)
+            // The text is handed over once; a second poll (e.g. after a restart) asks for a resubmit.
+            val again = client.poll("segment-9", 1, jobId)
+            assertTrue(again is SttCallOutcome.HttpError && again.httpCode == 404)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `openai provider surfaces http errors from the transcription call`() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setResponseCode(401).setBody("""{"error":{"message":"Invalid token"}}"""))
+        server.start()
+        try {
+            val outcome = openAiClient(server).submit("segment-10", 1, byteArrayOf(1))
+            assertTrue(outcome is SttCallOutcome.HttpError && outcome.httpCode == 401)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    private fun openAiClient(server: MockWebServer) = SttApiClient(
+        credentialsProvider = {
+            SttCredentials(server.url("/v1").toString().trimEnd('/'), "test-key", com.cmhr.listen.data.settings.SttProvider.OPENAI_COMPATIBLE, "stepaudio-2.5-asr")
+        },
+        httpClient = OkHttpClient(),
+        elapsedRealtime = { 10_000L },
+        wallTime = { 1_780_000_000_000L }
+    )
+
     private fun client(server: MockWebServer): SttApiClient {
         var elapsed = 10_000L
         var wall = 1_780_000_000_000L

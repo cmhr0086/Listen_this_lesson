@@ -86,7 +86,7 @@ class AsrQueueRuntime private constructor(private val context: Context) {
     private val settings = AppSettingsRepository(context)
     private val client = SttApiClient(credentialsProvider = {
         val server = settings.settings.first().server
-        SttCredentials(server.baseUrl, settings.readApiKey().orEmpty())
+        SttCredentials(server.baseUrl, settings.readApiKey().orEmpty(), server.provider, server.model)
     })
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val persistenceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))

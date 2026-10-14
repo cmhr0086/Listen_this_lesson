@@ -21,7 +21,7 @@
 ## 安装
 
 1. 打开 [GitHub Releases](https://github.com/cmhr0086/Listen_this_lesson/releases)。
-2. 下载 `Listen_this_lesson-v1.3.1-arm64-v8a.apk`。
+2. 下载 `Listen_this_lesson-v1.3.2-arm64-v8a.apk`。
 3. 在 Android 设备上允许当前安装来源，然后安装 APK。
 
 当前正式安装包仅支持 `arm64-v8a`，最低系统版本为 Android 8.0（API 26）。
@@ -30,7 +30,7 @@
 
 ### 1. 配置语音识别服务
 
-进入“设置 → 语音识别”，点地址和 API Key 分别填写；确认后立即保存并自动测试，顶部状态卡显示是否可用、上次测试时间和失败原因。测试会真正校验 API Key。客户端使用异步任务式 STT 服务（`/transcribe` + `/jobs/{jobId}`），请确保服务端版本兼容。
+进入“设置 → 语音识别”，点地址和 API Key 分别填写；确认后立即保存并自动测试，顶部状态卡显示是否可用、上次测试时间和失败原因。测试会真正校验 API Key。也可以在“服务类型”中选择“OpenAI 兼容”，使用 `/v1/audio/transcriptions` 格式的第三方识别服务：地址填到 `/v1` 为止，再填模型名称和 API Key。客户端使用异步任务式 STT 服务（`/transcribe` + `/jobs/{jobId}`），请确保服务端版本兼容。
 
 ### 2. 配置 AI 服务（可选）
 

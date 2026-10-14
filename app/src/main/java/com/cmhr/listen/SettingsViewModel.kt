@@ -16,6 +16,7 @@ import com.cmhr.listen.data.stt.AsrPromptAutoConfig
 import com.cmhr.listen.data.stt.AsrPromptMode
 import com.cmhr.listen.data.settings.ConnectionTestResult
 import com.cmhr.listen.data.settings.ServerSettings
+import com.cmhr.listen.data.settings.SttProvider
 import com.cmhr.listen.data.settings.CloudSyncSettings
 import com.cmhr.listen.data.settings.ServerConnectionTester
 import com.cmhr.listen.data.ai.AiConnectionResult
@@ -153,6 +154,14 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun saveSttKey(apiKey: String) = viewModelScope.launch {
         if (attempt("API Key 无效。") { repository.saveSttApiKey(apiKey) }) checkStt()
     }
+    fun chooseSttProvider(provider: SttProvider) = viewModelScope.launch {
+        if (_uiState.value.server.provider == provider) return@launch
+        repository.saveSttProvider(provider)
+        checkStt()
+    }
+    fun saveSttModel(model: String) = viewModelScope.launch {
+        if (attempt("请填写识别模型名称。") { repository.saveSttModel(model) }) checkStt()
+    }
     fun clearApiKey() = viewModelScope.launch {
         repository.clearApiKey()
         _uiState.update { it.copy(sttCheck = ServiceCheck.Unknown) }
@@ -167,7 +176,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             val settings = repository.settings.first().server
             val key = runCatching { repository.readApiKey().orEmpty() }.getOrDefault("")
             val started = SystemClock.elapsedRealtime()
-            val result = connectionTester.verify(settings.baseUrl, key)
+            val result = if (settings.provider == SttProvider.OPENAI_COMPATIBLE) connectionTester.verifyOpenAi(settings.baseUrl, key, settings.model)
+                else connectionTester.verify(settings.baseUrl, key)
             val check = when (result) {
                 is ConnectionTestResult.Success -> ServiceCheck.Passed(System.currentTimeMillis(), SystemClock.elapsedRealtime() - started)
                 is ConnectionTestResult.Failure -> ServiceCheck.Failed(System.currentTimeMillis(), result.message)

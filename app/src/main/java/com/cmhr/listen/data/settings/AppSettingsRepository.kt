@@ -22,7 +22,15 @@ import java.util.UUID
 
 private val Context.appSettingsDataStore by preferencesDataStore(name = "app_settings")
 
-data class ServerSettings(val baseUrl: String = "http://10.0.0.195:8765", val hasApiKey: Boolean = false)
+/** How the speech service is called: the self-hosted async job API, or a standard OpenAI transcription endpoint. */
+enum class SttProvider { SELF_HOSTED, OPENAI_COMPATIBLE }
+
+data class ServerSettings(
+    val baseUrl: String = "http://10.0.0.195:8765",
+    val hasApiKey: Boolean = false,
+    val provider: SttProvider = SttProvider.SELF_HOSTED,
+    val model: String = ""
+)
 data class CloudSyncSettings(
     val baseUrl: String = "",
     val hasApiToken: Boolean = false,
@@ -100,7 +108,9 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
             ),
             server = ServerSettings(
                 baseUrl = preferences[BASE_URL] ?: ServerSettings().baseUrl,
-                hasApiKey = preferences[API_KEY] != null
+                hasApiKey = preferences[API_KEY] != null,
+                provider = preferences[STT_PROVIDER]?.let { runCatching { SttProvider.valueOf(it) }.getOrNull() } ?: SttProvider.SELF_HOSTED,
+                model = preferences[STT_MODEL].orEmpty()
             ),
             ai = AiServiceSettings(
                 provider = preferences[AI_PROVIDER]?.let { runCatching { AiProvider.valueOf(it) }.getOrNull() }
@@ -172,6 +182,13 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
     }
 
     suspend fun clearApiKey() = context.appSettingsDataStore.edit { it.remove(API_KEY) }
+
+    suspend fun saveSttProvider(provider: SttProvider) = context.appSettingsDataStore.edit { it[STT_PROVIDER] = provider.name }
+
+    suspend fun saveSttModel(model: String) {
+        require(model.isNotBlank()) { "请填写识别模型名称。" }
+        context.appSettingsDataStore.edit { it[STT_MODEL] = model.trim() }
+    }
 
     /** Saves only the ASR key, so it can be set before the address. */
     suspend fun saveSttApiKey(apiKey: String) {
@@ -340,6 +357,8 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
         val AUTO_NOTES = booleanPreferencesKey("auto_notes")
         val COURSE_COLORS = stringPreferencesKey("course_colors")
         val BASE_URL = stringPreferencesKey("server_base_url")
+        val STT_PROVIDER = stringPreferencesKey("stt_provider")
+        val STT_MODEL = stringPreferencesKey("stt_model")
         val API_KEY = stringPreferencesKey("encrypted_api_key")
         val AI_PROVIDER = stringPreferencesKey("ai_provider")
         val AI_BASE_URL = stringPreferencesKey("ai_base_url")
