@@ -18,6 +18,7 @@ import com.cmhr.listen.data.settings.AppSettingsRepository
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -60,9 +61,11 @@ class PublishViewModel(application: Application) : AndroidViewModel(application)
     private var session: SessionEntity? = null
     private var courseId: Long? = null
     private var statusJob: Job? = null
+    private var contentJob: Job? = null
 
     fun load(recordId: Long) {
         if (_uiState.value.recordId == recordId && _uiState.value.loaded) { refreshStatus(); return }
+        contentJob?.cancel()
         _uiState.value = PublishUiState(recordId = recordId)
         viewModelScope.launch {
             val record = database.recordDao().recordNow(recordId) ?: run {
@@ -71,8 +74,6 @@ class PublishViewModel(application: Application) : AndroidViewModel(application)
             }
             val course = database.courseDao().courseNow(record.courseId)
             val summary = database.recordDao().summary(recordId).first()
-            val segments = database.transcriptDao().segments(recordId).first().filter { it.effectiveText.isNotBlank() }
-            val candidates = noteCandidates(database.aiDao().results(recordId).first())
             val stored = settings.settings.first().publish.courseInfo
             // A course seen before keeps its labels; a new one inherits school and term from the last one used.
             val previous = stored[record.courseId]
@@ -89,15 +90,31 @@ class PublishViewModel(application: Application) : AndroidViewModel(application)
                         term = latest?.term?.takeIf { term -> term in terms } ?: terms.first(),
                         courseName = course?.name.orEmpty()
                     ),
-                    termSuggestions = terms,
-                    segmentCount = segments.size,
-                    markedCount = segments.count { s -> s.marked },
-                    correctedCount = segments.count { s -> !s.correctedText.isNullOrBlank() },
-                    notes = candidates,
-                    selectedNotes = defaultNoteSelection(candidates)
+                    termSuggestions = terms
                 )
             }
             refreshStatus()
+        }
+        // Text and notes keep arriving after a class (recognition, auto notes), so follow them live
+        // instead of reading once: this state outlives the page while the app is open.
+        contentJob = viewModelScope.launch {
+            combine(database.transcriptDao().segments(recordId), database.aiDao().results(recordId)) { segments, results ->
+                segments.filter { it.effectiveText.isNotBlank() } to noteCandidates(results)
+            }.collect { (segments, candidates) ->
+                _uiState.update { state ->
+                    val known = state.notes.mapTo(hashSetOf()) { it.resultId }
+                    val kept = state.selectedNotes.filterTo(hashSetOf()) { id -> candidates.any { it.resultId == id } }
+                    // Notes that appear later get the same default as on first open.
+                    val fresh = defaultNoteSelection(candidates).filterNot { it in known }
+                    state.copy(
+                        segmentCount = segments.size,
+                        markedCount = segments.count { it.marked },
+                        correctedCount = segments.count { !it.correctedText.isNullOrBlank() },
+                        notes = candidates,
+                        selectedNotes = if (state.notes.isEmpty() && known.isEmpty()) defaultNoteSelection(candidates) else kept + fresh
+                    )
+                }
+            }
         }
     }
 
@@ -123,7 +140,11 @@ class PublishViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun setTitle(value: String) = _uiState.update { it.copy(title = value) }
-    fun setCourse(value: PublishCourseInfo) = _uiState.update { it.copy(course = value) }
+    fun setCourse(value: PublishCourseInfo) {
+        _uiState.update { it.copy(course = value) }
+        // Saved right away, so labels typed once survive leaving the page before submitting.
+        courseId?.let { id -> viewModelScope.launch { settings.savePublishCourseInfo(id, value) } }
+    }
     fun toggleNote(resultId: Long) = _uiState.update {
         it.copy(selectedNotes = if (resultId in it.selectedNotes) it.selectedNotes - resultId else it.selectedNotes + resultId)
     }
