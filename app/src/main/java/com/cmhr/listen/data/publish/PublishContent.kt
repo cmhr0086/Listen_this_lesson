@@ -6,18 +6,29 @@ import com.cmhr.listen.data.ai.AiResultEntity
 import com.cmhr.listen.data.course.RecordNameGenerator
 import com.cmhr.listen.data.course.SegmentEntity
 import com.cmhr.listen.data.course.SessionEntity
+import java.security.MessageDigest
 import java.util.Calendar
 import java.util.UUID
+import kotlinx.serialization.json.Json
 
-/** School, term and teacher a local course is published under; remembered per course. */
-data class PublishCourseInfo(
-    val schoolName: String = "",
-    val term: String = "",
-    val courseName: String = "",
-    val teacherName: String = ""
-) {
-    val complete: Boolean get() = listOf(schoolName, term, courseName, teacherName).all { it.isNotBlank() }
-}
+/**
+ * Everything this device remembers about publishing one local course. School is global (set once
+ * in settings) and the term follows each class's date, so a course only needs its teacher.
+ */
+data class PublishCourseState(
+    /** Name readers see; blank means the local course name. */
+    val publicName: String = "",
+    val teacherName: String = "",
+    /** Term → public course id, filled in by the first upload of a class in that term. */
+    val remoteCourses: Map<String, String> = emptyMap(),
+    /** Term → last known review status, so the course page can show it without a request. */
+    val remoteStatus: Map<String, String> = emptyMap(),
+    /** Local record id → fingerprint of what was last uploaded, to tell changed classes apart. */
+    val synced: Map<Long, String> = emptyMap(),
+    /** Classes the user chose to keep off the public reader. */
+    val excluded: Set<Long> = emptySet(),
+    val lastSyncAt: Long = 0
+)
 
 /** An AI result that can go out as a public note. Corrections are applied to the text instead. */
 data class PublishNoteCandidate(val resultId: Long, val title: String, val createdAt: Long, val content: String)
@@ -34,9 +45,9 @@ internal fun noteCandidates(results: List<AiResultEntity>): List<PublishNoteCand
     .sortedByDescending { it.finishedAt ?: it.createdAt }
     .map { PublishNoteCandidate(it.id, NOTE_TITLES.getValue(it.actionType), it.finishedAt ?: it.createdAt, it.output!!.trim()) }
 
-/** The newest whole-class notes are what most readers want; everything else is opt-in. */
-internal fun defaultNoteSelection(candidates: List<PublishNoteCandidate>): Set<Long> =
-    candidates.firstOrNull { it.title == NOTE_TITLES[AiActionType.ORGANIZE_NOTES.name] }?.let { setOf(it.resultId) } ?: emptySet()
+/** The newest whole-class notes go out with a class; other AI results stay private. */
+internal fun publicNotes(candidates: List<PublishNoteCandidate>): List<PublishNoteCandidate> =
+    listOfNotNull(candidates.firstOrNull { it.title == NOTE_TITLES[AiActionType.ORGANIZE_NOTES.name] })
 
 /**
  * Readers already see the course, so an auto-generated "高数-10-14" becomes "第 3 节"; a name the
@@ -50,7 +61,7 @@ internal fun defaultPublishTitle(recordName: String, courseName: String?, starte
 internal fun buildSubmission(
     session: SessionEntity,
     title: String,
-    course: PublishCourseInfo,
+    course: PublishCourse,
     segments: List<SegmentEntity>,
     notes: List<PublishNoteCandidate>,
     submissionId: String = UUID.randomUUID().toString()
@@ -71,22 +82,25 @@ internal fun buildSubmission(
     notes = notes.map { PublishNote("${session.sessionId}:${it.resultId}", it.title, it.content) }
 )
 
+private val fingerprintJson = Json { encodeDefaults = true }
+
+/** Same content → same fingerprint; the per-upload submission id is left out on purpose. */
+internal fun fingerprint(submission: PublishSubmission): String {
+    val bytes = fingerprintJson.encodeToString(PublishSubmission.serializer(), submission.copy(clientSubmissionId = "")).toByteArray()
+    return MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+}
+
 /**
- * Terms near [now] in the "2026-2027 第一学期" form most Chinese universities use: the first term
- * runs from August to January, the second from February to July.
+ * The term a class belongs to, in the "2026-2027 第一学期" form most Chinese universities use: the
+ * first term runs from August to January, the second from February to July.
  */
-internal fun termSuggestions(now: Long): List<String> {
-    val calendar = Calendar.getInstance().apply { timeInMillis = now }
+internal fun termOf(at: Long): String {
+    val calendar = Calendar.getInstance().apply { timeInMillis = at }
     val year = calendar.get(Calendar.YEAR)
     val month = calendar.get(Calendar.MONTH) + 1
-    val (startYear, first) = when {
-        month >= 8 -> year to true
-        month == 1 -> year - 1 to true
-        else -> year - 1 to false
+    return when {
+        month >= 8 -> "$year-${year + 1} 第一学期"
+        month == 1 -> "${year - 1}-$year 第一学期"
+        else -> "${year - 1}-$year 第二学期"
     }
-    fun term(start: Int, isFirst: Boolean) = "$start-${start + 1} ${if (isFirst) "第一学期" else "第二学期"}"
-    val current = term(startYear, first)
-    val previous = if (first) term(startYear - 1, false) else term(startYear, true)
-    val next = if (first) term(startYear, false) else term(startYear + 1, true)
-    return listOf(current, previous, next)
 }

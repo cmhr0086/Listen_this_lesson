@@ -182,7 +182,7 @@ private fun routeTitle(route: String?): String = when (route) {
     "settings/asr-prompt-policy/thresholds" -> "自动模式门槛"
     "settings/cloud-sync" -> "云同步"
     "settings/publish" -> "公开发布"
-    "record/{recordId}/publish" -> "公开发布"
+    "course/{courseId}/publish" -> "公开发布"
     "settings/appearance" -> "外观"
     "settings/ai-prompts" -> "AI 提示词"
     "settings/asr-prompt-policy" -> "专业词提示"
@@ -588,7 +588,6 @@ fun ListenApp(
                         }
                     },
                     select = { recordMenuExpanded = false; ai.beginSelection(recordId) },
-                    publish = { recordMenuExpanded = false; nav.navigate("record/$recordId/publish") },
                     editAsrPrompt = {
                         recordMenuExpanded = false
                         promptDraft = currentCourse?.asrPrompt.orEmpty()
@@ -804,7 +803,12 @@ fun ListenApp(
             }
             composable("course/{courseId}") { entry ->
                 val id = entry.arguments?.getString("courseId")?.toLongOrNull() ?: return@composable
-                CourseRecordsScreen(id, courseState, sttState, courses, recordingState.pendingCounts, startClass = { mode -> quickStart(id, mode) }) { record ->
+                val publishInfo = settingsState.publish.courses[id]
+                CourseRecordsScreen(
+                    id, courseState, sttState, courses, recordingState.pendingCounts, startClass = { mode -> quickStart(id, mode) },
+                    publishSummary = coursePublishSummary(settingsState.publish.hasToken, publishInfo?.remoteStatus.orEmpty(), publishInfo?.teacherName.orEmpty()),
+                    openPublish = { nav.navigate("course/$id/publish") }
+                ) { record ->
                     courses.selectRecord(id, record)
                     nav.navigate("record/$record")
                 }
@@ -870,9 +874,9 @@ fun ListenApp(
             composable("settings/ai-service/models") { AiModelsScreen(settingsState, settings, done = { nav.popBackStack() }) }
             composable("settings/cloud-sync") { CloudSyncSettingsScreen(settingsState, settings) }
             composable("settings/publish") { PublishSettingsScreen(settingsState, settings) }
-            composable("record/{recordId}/publish") { entry ->
-                val id = entry.arguments?.getString("recordId")?.toLongOrNull() ?: return@composable
-                PublishLessonScreen(id, publish, openSettings = { nav.navigate("settings/publish") })
+            composable("course/{courseId}/publish") { entry ->
+                val id = entry.arguments?.getString("courseId")?.toLongOrNull() ?: return@composable
+                CoursePublishScreen(id, publish, openSettings = { nav.navigate("settings/publish") })
             }
             composable("settings/appearance") { AppearanceSettingsScreen(settingsState, settings) }
             composable("settings/ai-prompts") {
@@ -1068,8 +1072,7 @@ internal fun RecordNormalTopBar(
     back: () -> Unit,
     exportTxt: () -> Unit,
     select: () -> Unit,
-    editAsrPrompt: () -> Unit,
-    publish: () -> Unit = {}
+    editAsrPrompt: () -> Unit
 ) = TopAppBar(
     title = {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1097,7 +1100,6 @@ internal fun RecordNormalTopBar(
         ) {
             DropdownMenuItem(text = { Text("选择片段") }, onClick = select)
             DropdownMenuItem(text = { Text("导出 TXT") }, onClick = exportTxt)
-            DropdownMenuItem(text = { Text("公开发布") }, onClick = publish, modifier = Modifier.testTag("record-menu-publish"))
             HorizontalDivider()
             DropdownMenuItem(text = { Text("专业词提示") }, onClick = editAsrPrompt)
         }

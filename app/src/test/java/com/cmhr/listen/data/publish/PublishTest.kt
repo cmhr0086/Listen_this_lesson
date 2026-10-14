@@ -5,8 +5,8 @@ import com.cmhr.listen.data.ai.AiRequestStatus
 import com.cmhr.listen.data.ai.AiResultEntity
 import com.cmhr.listen.data.course.SegmentEntity
 import com.cmhr.listen.data.course.SessionEntity
-import com.cmhr.listen.data.settings.decodePublishCourseInfo
-import com.cmhr.listen.data.settings.encodePublishCourseInfo
+import com.cmhr.listen.data.settings.decodePublishCourses
+import com.cmhr.listen.data.settings.encodePublishCourses
 import java.util.Calendar
 import java.util.zip.GZIPInputStream
 import kotlinx.coroutines.runBlocking
@@ -39,7 +39,7 @@ class PublishTest {
     @Test
     fun `submission carries only reader facing fields`() {
         val submission = buildSubmission(
-            session, " 第 3 节 极限 ", PublishCourseInfo(" 某某大学 ", "2026-2027 第一学期", "高数", "张老师"),
+            session, " 第 3 节 极限 ", PublishCourse(" 某某大学 ", "2026-2027 第一学期", "高数", "张老师"),
             listOf(segment("原文", corrected = "纠正", marked = true), segment("  "), segment("删掉", deleted = true)),
             listOf(PublishNoteCandidate(42, "课堂笔记", 5, "# 笔记")),
             submissionId = "id"
@@ -61,9 +61,9 @@ class PublishTest {
             result(5, AiActionType.SUMMARY, "总结", at = 30)
         ))
         assertEquals(listOf(5L, 2L, 1L), candidates.map { it.resultId })
-        // Only the newest whole-class notes are ticked by default.
-        assertEquals(setOf(2L), defaultNoteSelection(candidates))
-        assertEquals(emptySet<Long>(), defaultNoteSelection(candidates.filter { it.resultId == 5L }))
+        // Only the newest whole-class notes go public.
+        assertEquals(listOf(2L), publicNotes(candidates).map { it.resultId })
+        assertEquals(emptyList<PublishNoteCandidate>(), publicNotes(candidates.filter { it.resultId == 5L }))
     }
 
     @Test
@@ -78,29 +78,43 @@ class PublishTest {
     private fun at(year: Int, month: Int): Long = Calendar.getInstance().apply { set(year, month - 1, 15, 12, 0) }.timeInMillis
 
     @Test
-    fun `term suggestions follow the academic calendar`() {
-        assertEquals(listOf("2026-2027 第一学期", "2025-2026 第二学期", "2026-2027 第二学期"), termSuggestions(at(2026, 10)))
-        assertEquals("2026-2027 第一学期", termSuggestions(at(2027, 1)).first())
-        assertEquals(listOf("2026-2027 第二学期", "2026-2027 第一学期", "2027-2028 第一学期"), termSuggestions(at(2027, 4)))
+    fun `terms follow the academic calendar`() {
+        assertEquals("2026-2027 第一学期", termOf(at(2026, 10)))
+        assertEquals("2026-2027 第一学期", termOf(at(2027, 1)))
+        assertEquals("2026-2027 第二学期", termOf(at(2027, 4)))
+        assertEquals("2027-2028 第一学期", termOf(at(2027, 8)))
     }
 
     @Test
-    fun `course labels round trip and tolerate junk`() {
-        val info = mapOf(3L to PublishCourseInfo("某某大学", "2026-2027 第一学期", "高数", "张老师"))
-        assertEquals(info, decodePublishCourseInfo(encodePublishCourseInfo(info)))
-        assertEquals(emptyMap<Long, PublishCourseInfo>(), decodePublishCourseInfo("not json"))
-        assertEquals(emptyMap<Long, PublishCourseInfo>(), decodePublishCourseInfo(null))
+    fun `fingerprint ignores the submission id but sees content`() {
+        val course = PublishCourse("a", "b", "c", "d")
+        val one = buildSubmission(session, "t", course, listOf(segment("x")), emptyList(), submissionId = "1")
+        val two = buildSubmission(session, "t", course, listOf(segment("x")), emptyList(), submissionId = "2")
+        assertEquals(fingerprint(one), fingerprint(two))
+        assertFalse(fingerprint(one) == fingerprint(buildSubmission(session, "t", course, listOf(segment("x", corrected = "y")), emptyList())))
+        assertFalse(fingerprint(one) == fingerprint(buildSubmission(session, "t", course.copy(teacherName = "e"), listOf(segment("x")), emptyList())))
+    }
+
+    @Test
+    fun `course publish state round trips and tolerates junk`() {
+        val info = mapOf(3L to PublishCourseState(
+            "高数", "张老师", mapOf("2026-2027 第一学期" to "c1"), mapOf("2026-2027 第一学期" to "approved"),
+            mapOf(7L to "abc"), setOf(8L), 99
+        ))
+        assertEquals(info, decodePublishCourses(encodePublishCourses(info)))
+        assertEquals(emptyMap<Long, PublishCourseState>(), decodePublishCourses("not json"))
+        assertEquals(emptyMap<Long, PublishCourseState>(), decodePublishCourses(null))
     }
 
     @Test
     fun `submit gzips the body and sends the token`() = runBlocking {
         val server = MockWebServer()
-        server.enqueue(MockResponse().setBody("""{"lessonId":"L","revisionId":1,"revision":1,"status":"pending"}"""))
+        server.enqueue(MockResponse().setBody("""{"lessonId":"L","revisionId":1,"revision":1,"status":"published","courseId":"C","courseStatus":"pending","courseReviewNote":null}"""))
         server.start()
         try {
-            val submission = buildSubmission(session, "t", PublishCourseInfo("a", "b", "c", "d"), listOf(segment("x")), emptyList())
+            val submission = buildSubmission(session, "t", PublishCourse("a", "b", "c", "d"), listOf(segment("x")), emptyList())
             val result = PublishApiClient(OkHttpClient(), requireHttps = false).submit(server.url("/").toString(), "lp_token", submission)
-            assertEquals("pending", result.status)
+            assertEquals("published" to "pending", result.status to result.courseStatus)
             val request = server.takeRequest()
             assertEquals("/api/publish/v1/submissions", request.path)
             assertEquals("Bearer lp_token", request.getHeader("Authorization"))
@@ -109,6 +123,24 @@ class PublishTest {
             assertTrue(body.contains("\"sessionId\":\"${session.sessionId}\""))
             assertFalse(body.contains("asrJobId"))
             assertFalse(body.contains("serverModel"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `course status and lessons parse`() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("""{"courseId":"C","schoolName":"s","term":"t","courseName":"c","teacherName":"d","status":"rejected","reviewNote":"写全名","lessonCount":2}"""))
+        server.enqueue(MockResponse().setBody("""{"lessons":[{"lessonId":"L","sessionId":"S","status":"active","revision":2,"updatedAt":5,"withdrawRequested":true}]}"""))
+        server.start()
+        try {
+            val client = PublishApiClient(OkHttpClient(), requireHttps = false)
+            val url = server.url("/").toString()
+            assertEquals("写全名", client.course(url, "t", "C").reviewNote)
+            assertTrue(client.courseLessons(url, "t", "C").single().withdrawRequested)
+            assertEquals("/api/publish/v1/courses/C", server.takeRequest().path)
+            assertEquals("/api/publish/v1/courses/C/lessons", server.takeRequest().path)
         } finally {
             server.shutdown()
         }

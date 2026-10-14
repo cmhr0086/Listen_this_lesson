@@ -374,7 +374,7 @@ internal fun CaptureControlBar(
 }
 
 internal data class RecordingStatus(val label: String, val tone: StatusTone, val note: String? = null, val showProgress: Boolean = false)
-internal enum class StatusTone { ACTIVE, READY, DONE, PROBLEM }
+enum class StatusTone { ACTIVE, READY, DONE, PROBLEM }
 
 internal fun recordingStatus(recording: RecordingEntity, processingHere: Boolean, progressPercent: Int): RecordingStatus =
     when (if (processingHere) RecordingState.PROCESSING else recording.recordingState) {

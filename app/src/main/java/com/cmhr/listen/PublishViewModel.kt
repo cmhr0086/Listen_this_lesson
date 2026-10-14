@@ -4,17 +4,21 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.cmhr.listen.data.course.ListenDatabase
-import com.cmhr.listen.data.course.SessionEntity
+import com.cmhr.listen.data.course.SessionSummary
+import com.cmhr.listen.data.publish.PUBLISH_BASE_URL
 import com.cmhr.listen.data.publish.PublishApiClient
-import com.cmhr.listen.data.publish.PublishCourseInfo
-import com.cmhr.listen.data.publish.PublishLessonStatus
-import com.cmhr.listen.data.publish.PublishNoteCandidate
+import com.cmhr.listen.data.publish.PublishCourse
+import com.cmhr.listen.data.publish.PublishCourseLesson
+import com.cmhr.listen.data.publish.PublishCourseState
+import com.cmhr.listen.data.publish.PublishSubmission
 import com.cmhr.listen.data.publish.buildSubmission
-import com.cmhr.listen.data.publish.defaultNoteSelection
 import com.cmhr.listen.data.publish.defaultPublishTitle
+import com.cmhr.listen.data.publish.fingerprint
 import com.cmhr.listen.data.publish.noteCandidates
-import com.cmhr.listen.data.publish.termSuggestions
+import com.cmhr.listen.data.publish.publicNotes
+import com.cmhr.listen.data.publish.termOf
 import com.cmhr.listen.data.settings.AppSettingsRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -22,177 +26,248 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
-/** What the server says about this class; loaded separately so the form works offline. */
-sealed interface PublishRemoteState {
-    data object NotConfigured : PublishRemoteState
-    data object Loading : PublishRemoteState
-    data class Loaded(val status: PublishLessonStatus) : PublishRemoteState
-    data class Failed(val message: String) : PublishRemoteState
-}
+/** Where one class stands between this device and the public reader. */
+enum class ClassPublishState { LIVE, NO_TEXT, EXCLUDED, NEW, CHANGED, SYNCED }
 
-data class PublishUiState(
-    val recordId: Long? = null,
+data class PublishClassRow(
+    val recordId: Long,
+    val sessionId: String,
+    val title: String,
+    val startedAt: Long,
+    val term: String,
+    val segmentCount: Int,
+    val hasNotes: Boolean,
+    val state: ClassPublishState,
+    /** The server's copy, once this class has been uploaded. */
+    val remote: PublishCourseLesson? = null
+)
+
+/** One public course: a local course becomes one per term its classes fall in. */
+data class PublishRemoteCourse(val term: String, val courseId: String, val status: String, val reviewNote: String? = null)
+
+data class CoursePublishUiState(
+    val courseId: Long? = null,
     val loaded: Boolean = false,
-    val title: String = "",
-    val course: PublishCourseInfo = PublishCourseInfo(),
-    val termSuggestions: List<String> = emptyList(),
-    val segmentCount: Int = 0,
-    val markedCount: Int = 0,
-    val correctedCount: Int = 0,
-    val notes: List<PublishNoteCandidate> = emptyList(),
-    val selectedNotes: Set<Long> = emptySet(),
-    val remote: PublishRemoteState = PublishRemoteState.Loading,
-    val submitting: Boolean = false,
-    /** Result of the last submit or withdraw, shown on the status card until the next one. */
+    val localName: String = "",
+    val course: PublishCourseState = PublishCourseState(),
+    val school: String = "",
+    val hasToken: Boolean = false,
+    val classes: List<PublishClassRow> = emptyList(),
+    val remote: List<PublishRemoteCourse> = emptyList(),
+    val refreshing: Boolean = false,
+    val remoteError: String? = null,
+    /** Classes done / to do while a sync runs. */
+    val progress: Pair<Int, Int>? = null,
     val notice: String? = null,
     val error: String? = null
 ) {
-    val canSubmit: Boolean get() = loaded && !submitting && course.complete && title.isNotBlank() &&
-        (segmentCount > 0 || selectedNotes.isNotEmpty()) && remote !is PublishRemoteState.NotConfigured
+    val publicName: String get() = course.publicName.ifBlank { localName }
+    val toSync: List<PublishClassRow> get() = classes.filter { it.state == ClassPublishState.NEW || it.state == ClassPublishState.CHANGED }
+    val missing: List<String> get() = listOfNotNull(
+        "上传 Token".takeIf { !hasToken },
+        "学校".takeIf { school.isBlank() },
+        "教师".takeIf { course.teacherName.isBlank() }
+    )
+    val syncing: Boolean get() = progress != null
+    val canSync: Boolean get() = loaded && !syncing && missing.isEmpty() && toSync.isNotEmpty()
 }
 
 class PublishViewModel(application: Application) : AndroidViewModel(application) {
     private val database = ListenDatabase.get(application)
     private val settings = AppSettingsRepository(application)
     private val client = PublishApiClient()
-    private val _uiState = MutableStateFlow(PublishUiState())
+    private val _uiState = MutableStateFlow(CoursePublishUiState())
     val uiState = _uiState.asStateFlow()
-    private var session: SessionEntity? = null
-    private var courseId: Long? = null
-    private var statusJob: Job? = null
-    private var contentJob: Job? = null
+    private var watchJob: Job? = null
+    private var remoteJob: Job? = null
+    /** The submission each class would send right now, rebuilt whenever its content changes. */
+    private var drafts: Map<Long, PublishSubmission> = emptyMap()
 
-    fun load(recordId: Long) {
-        if (_uiState.value.recordId == recordId && _uiState.value.loaded) { refreshStatus(); return }
-        contentJob?.cancel()
-        _uiState.value = PublishUiState(recordId = recordId)
-        viewModelScope.launch {
-            val record = database.recordDao().recordNow(recordId) ?: run {
-                _uiState.update { it.copy(error = "这节课已不存在。") }
-                return@launch
-            }
-            val course = database.courseDao().courseNow(record.courseId)
-            val summary = database.recordDao().summary(recordId).first()
-            val stored = settings.settings.first().publish.courseInfo
-            // A course seen before keeps its labels; a new one inherits school and term from the last one used.
-            val previous = stored[record.courseId]
-            val latest = stored.values.lastOrNull()
-            val terms = termSuggestions(record.startedAt)
-            session = record
-            courseId = record.courseId
-            _uiState.update {
-                it.copy(
-                    loaded = true,
-                    title = defaultPublishTitle(record.name, course?.name, record.startedAt, summary?.classNumber ?: 0),
-                    course = previous ?: PublishCourseInfo(
-                        schoolName = latest?.schoolName.orEmpty(),
-                        term = latest?.term?.takeIf { term -> term in terms } ?: terms.first(),
-                        courseName = course?.name.orEmpty()
-                    ),
-                    termSuggestions = terms
-                )
-            }
-            refreshStatus()
+    fun load(courseId: Long) {
+        if (_uiState.value.courseId == courseId && watchJob?.isActive == true) { refreshRemote(); return }
+        watchJob?.cancel()
+        remoteJob?.cancel()
+        remoteJob = null
+        _uiState.value = CoursePublishUiState(courseId = courseId)
+        watchJob = viewModelScope.launch {
+            // Classes, AI results and settings all move the state, so recompute whenever any changes.
+            combine(
+                database.recordDao().summariesForCourse(courseId),
+                database.aiDao().allResults(),
+                settings.settings
+            ) { summaries, _, appSettings -> summaries to appSettings }
+                .collect { (summaries, appSettings) ->
+                    val localName = database.courseDao().courseNow(courseId)?.name.orEmpty()
+                    val publish = appSettings.publish
+                    val course = publish.courses[courseId] ?: PublishCourseState()
+                    val rows = withContext(Dispatchers.Default) { rows(summaries, localName, publish.schoolName, course) }
+                    _uiState.update { state ->
+                        state.copy(
+                            loaded = true,
+                            localName = localName,
+                            course = course,
+                            school = publish.schoolName,
+                            hasToken = publish.hasToken,
+                            classes = rows.map { row -> row.copy(remote = state.classes.firstOrNull { it.recordId == row.recordId }?.remote) },
+                            remote = course.remoteCourses.map { (term, id) ->
+                                state.remote.firstOrNull { it.courseId == id } ?: PublishRemoteCourse(term, id, course.remoteStatus[term] ?: "pending")
+                            }.sortedByDescending { it.term }
+                        )
+                    }
+                    if (_uiState.value.remote.isNotEmpty() && remoteJob == null) refreshRemote()
+                }
         }
-        // Text and notes keep arriving after a class (recognition, auto notes), so follow them live
-        // instead of reading once: this state outlives the page while the app is open.
-        contentJob = viewModelScope.launch {
-            combine(database.transcriptDao().segments(recordId), database.aiDao().results(recordId)) { segments, results ->
-                segments.filter { it.effectiveText.isNotBlank() } to noteCandidates(results)
-            }.collect { (segments, candidates) ->
-                _uiState.update { state ->
-                    val known = state.notes.mapTo(hashSetOf()) { it.resultId }
-                    val kept = state.selectedNotes.filterTo(hashSetOf()) { id -> candidates.any { it.resultId == id } }
-                    // Notes that appear later get the same default as on first open.
-                    val fresh = defaultNoteSelection(candidates).filterNot { it in known }
-                    state.copy(
-                        segmentCount = segments.size,
-                        markedCount = segments.count { it.marked },
-                        correctedCount = segments.count { !it.correctedText.isNullOrBlank() },
-                        notes = candidates,
-                        selectedNotes = if (state.notes.isEmpty() && known.isEmpty()) defaultNoteSelection(candidates) else kept + fresh
+    }
+
+    private suspend fun rows(
+        summaries: List<SessionSummary>,
+        localName: String,
+        school: String,
+        course: PublishCourseState
+    ): List<PublishClassRow> {
+        val built = mutableMapOf<Long, PublishSubmission>()
+        val rows = summaries.sortedBy { it.session.startedAt }.map { summary ->
+            val record = summary.session
+            val segments = database.transcriptDao().segments(record.id).first()
+            val notes = publicNotes(noteCandidates(database.aiDao().results(record.id).first()))
+            val title = defaultPublishTitle(record.name, localName, record.startedAt, summary.classNumber)
+            val term = termOf(record.startedAt)
+            val submission = buildSubmission(
+                record, title,
+                PublishCourse(school, term, course.publicName.ifBlank { localName }, course.teacherName),
+                segments, notes
+            )
+            val state = when {
+                record.endedAt == null -> ClassPublishState.LIVE
+                submission.segments.isEmpty() -> ClassPublishState.NO_TEXT
+                record.id in course.excluded -> ClassPublishState.EXCLUDED
+                course.synced[record.id] == null -> ClassPublishState.NEW
+                course.synced[record.id] != fingerprint(submission) -> ClassPublishState.CHANGED
+                else -> ClassPublishState.SYNCED
+            }
+            if (state == ClassPublishState.NEW || state == ClassPublishState.CHANGED) built[record.id] = submission
+            PublishClassRow(record.id, record.sessionId, title, record.startedAt, term, submission.segments.size, notes.isNotEmpty(), state)
+        }
+        drafts = built
+        return rows.reversed()
+    }
+
+    fun setTeacher(value: String) = editCourse { it.copy(teacherName = value.trim()) }
+    fun setPublicName(value: String) = editCourse { it.copy(publicName = value.trim()) }
+    fun setSchool(value: String) = viewModelScope.launch { runCatching { settings.savePublishSchool(value) } }
+
+    private fun editCourse(change: (PublishCourseState) -> PublishCourseState) {
+        val id = _uiState.value.courseId ?: return
+        viewModelScope.launch { settings.updatePublishCourse(id, change) }
+    }
+
+    /** Uploads every new or changed class, oldest first; stops at the first failure so it can be retried. */
+    fun sync() {
+        val state = _uiState.value
+        val courseId = state.courseId ?: return
+        if (!state.canSync) return
+        val queue = state.toSync.sortedBy { it.startedAt }.mapNotNull { row -> drafts[row.recordId]?.let { row to it } }
+        _uiState.update { it.copy(progress = 0 to queue.size, notice = null, error = null) }
+        viewModelScope.launch {
+            val token = settings.readPublishToken().orEmpty()
+            var done = 0
+            var failure: String? = null
+            for ((row, submission) in queue) {
+                val result = runCatching { client.submit(PUBLISH_BASE_URL, token, submission) }
+                val submitted = result.getOrElse { failure = it.message ?: "上传失败。"; null } ?: break
+                settings.updatePublishCourse(courseId) { course ->
+                    course.copy(
+                        synced = course.synced + (row.recordId to fingerprint(submission)),
+                        remoteCourses = course.remoteCourses + (submission.course.term to submitted.courseId),
+                        remoteStatus = course.remoteStatus + (submission.course.term to submitted.courseStatus),
+                        lastSyncAt = System.currentTimeMillis()
                     )
                 }
-            }
-        }
-    }
-
-    fun refreshStatus() {
-        val record = session ?: return
-        statusJob?.cancel()
-        statusJob = viewModelScope.launch {
-            val token = settings.readPublishToken()
-            val baseUrl = settings.settings.first().publishBaseUrl
-            if (token.isNullOrBlank() || baseUrl.isBlank()) {
-                _uiState.update { it.copy(remote = PublishRemoteState.NotConfigured) }
-                return@launch
-            }
-            if (_uiState.value.remote !is PublishRemoteState.Loaded) _uiState.update { it.copy(remote = PublishRemoteState.Loading) }
-            val result = runCatching { client.status(baseUrl, token, record.sessionId) }
-            _uiState.update { state ->
-                state.copy(remote = result.fold(
-                    { PublishRemoteState.Loaded(it) },
-                    { PublishRemoteState.Failed(it.message ?: "无法读取审核状态。") }
-                ))
-            }
-        }
-    }
-
-    fun setTitle(value: String) = _uiState.update { it.copy(title = value) }
-    fun setCourse(value: PublishCourseInfo) {
-        _uiState.update { it.copy(course = value) }
-        // Saved right away, so labels typed once survive leaving the page before submitting.
-        courseId?.let { id -> viewModelScope.launch { settings.savePublishCourseInfo(id, value) } }
-    }
-    fun toggleNote(resultId: Long) = _uiState.update {
-        it.copy(selectedNotes = if (resultId in it.selectedNotes) it.selectedNotes - resultId else it.selectedNotes + resultId)
-    }
-
-    fun submit() {
-        val state = _uiState.value
-        val record = session ?: return
-        if (!state.canSubmit) return
-        _uiState.update { it.copy(submitting = true, error = null, notice = null) }
-        viewModelScope.launch {
-            val result = runCatching {
-                val token = settings.readPublishToken().orEmpty()
-                val baseUrl = settings.settings.first().publishBaseUrl
-                // Read again at submit time so the copy matches what is on screen right now.
-                val segments = database.transcriptDao().segments(record.id).first()
-                val notes = state.notes.filter { it.resultId in state.selectedNotes }
-                courseId?.let { settings.savePublishCourseInfo(it, state.course) }
-                client.submit(baseUrl, token, buildSubmission(record, state.title, state.course, segments, notes))
+                done += 1
+                _uiState.update { it.copy(progress = done to queue.size) }
             }
             _uiState.update {
-                result.fold(
-                    { submitted ->
-                        it.copy(
-                            submitting = false,
-                            notice = if (submitted.status == "unchanged") "内容和已公开的版本一样，无需再次审核。"
-                            else "已提交第 ${submitted.revision} 版，等待管理员审核。"
-                        )
-                    },
-                    { error -> it.copy(submitting = false, error = error.message ?: "提交失败。") }
+                it.copy(
+                    progress = null,
+                    notice = if (failure == null) "已同步 $done 节课。" else null,
+                    error = failure?.let { message -> "已同步 $done / ${queue.size} 节，其余未上传：$message" }
                 )
             }
-            refreshStatus()
+            refreshRemote()
         }
     }
 
-    fun requestWithdraw(reason: String) {
-        val lessonId = ((_uiState.value.remote as? PublishRemoteState.Loaded)?.status?.lessonId) ?: return
+    /** Review status of each public course and the server's copy of each class. */
+    fun refreshRemote() {
+        val state = _uiState.value
+        val courseId = state.courseId ?: return
+        if (state.remote.isEmpty()) return
+        remoteJob?.cancel()
+        remoteJob = viewModelScope.launch {
+            _uiState.update { it.copy(refreshing = true) }
+            val token = settings.readPublishToken()
+            if (token.isNullOrBlank()) {
+                _uiState.update { it.copy(refreshing = false) }
+                return@launch
+            }
+            val result = runCatching {
+                state.remote.map { course ->
+                    val status = client.course(PUBLISH_BASE_URL, token, course.courseId)
+                    PublishRemoteCourse(course.term, course.courseId, status.status, status.reviewNote) to
+                        client.courseLessons(PUBLISH_BASE_URL, token, course.courseId)
+                }
+            }
+            result.onSuccess { pairs ->
+                val lessons = pairs.flatMap { it.second }.associateBy { it.sessionId }
+                settings.updatePublishCourse(courseId) { course ->
+                    course.copy(remoteStatus = course.remoteStatus + pairs.associate { (remote, _) -> remote.term to remote.status })
+                }
+                _uiState.update { s ->
+                    s.copy(
+                        refreshing = false,
+                        remoteError = null,
+                        remote = pairs.map { it.first }.sortedByDescending { it.term },
+                        classes = s.classes.map { row -> row.copy(remote = lessons[row.sessionId]) }
+                    )
+                }
+            }.onFailure { error ->
+                _uiState.update { it.copy(refreshing = false, remoteError = error.message ?: "读不到审核状态。") }
+            }
+        }
+    }
+
+    fun requestReview(remoteCourseId: String) = viewModelScope.launch {
+        val result = runCatching { client.requestReview(PUBLISH_BASE_URL, settings.readPublishToken().orEmpty(), remoteCourseId) }
+        _uiState.update {
+            result.fold(
+                { _ -> it.copy(notice = "已重新申请，等待管理员审核。", error = null) },
+                { error -> it.copy(error = error.message ?: "申请失败。") }
+            )
+        }
+        refreshRemote()
+    }
+
+    /**
+     * Keeps a class off the public reader. A class already public stays visible until the admin
+     * acts on the withdraw request this files.
+     */
+    fun setExcluded(row: PublishClassRow, excluded: Boolean) {
+        editCourse { it.copy(excluded = if (excluded) it.excluded + row.recordId else it.excluded - row.recordId) }
+        val lesson = row.remote ?: return
+        if (!excluded || lesson.status != "active" || lesson.withdrawRequested) return
         viewModelScope.launch {
             val result = runCatching {
-                client.requestWithdraw(settings.settings.first().publishBaseUrl, settings.readPublishToken().orEmpty(), lessonId, reason.trim())
+                client.requestWithdraw(PUBLISH_BASE_URL, settings.readPublishToken().orEmpty(), lesson.lessonId, "上传者不再公开这节课")
             }
             _uiState.update {
                 result.fold(
-                    { _ -> it.copy(notice = "已申请撤回，管理员处理后读者将看不到这节课。", error = null) },
+                    { _ -> it.copy(notice = "「${row.title}」已申请撤回，管理员处理后读者就看不到了。") },
                     { error -> it.copy(error = error.message ?: "申请撤回失败。") }
                 )
             }
-            refreshStatus()
+            refreshRemote()
         }
     }
 }

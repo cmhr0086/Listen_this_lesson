@@ -663,17 +663,10 @@ fun PublishSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
                 else -> StatusCard(CardTone.NEUTRAL, Icons.Outlined.Settings, "已配置", "还没测试", action = { TestButton(false, "测试", model::checkPublish) })
             }
         }
-        item("server-heading") { SectionHeader("服务器", Modifier.padding(top = 12.dp)) }
+        item("server-heading") { SectionHeader("发布信息", Modifier.padding(top = 12.dp)) }
         item("server") {
             ListGroup {
-                ValueRow(
-                    "地址", null, { editing = EditTarget.URL }, Modifier.testTag("publish-url"),
-                    subtitle = when {
-                        publish.baseUrl.isNotBlank() -> publish.baseUrl
-                        state.publishBaseUrl.isNotBlank() -> "${state.publishBaseUrl}（与云同步相同）"
-                        else -> "未填写"
-                    }
-                )
+                ValueRow("学校", publish.schoolName.ifBlank { "未填写" }, { editing = EditTarget.URL }, Modifier.testTag("publish-school-setting"), subtitle = "所有公开的课程共用")
                 ListDivider(16.dp)
                 ValueRow(
                     "上传 Token", if (publish.hasToken) SECRET_DOTS else "未填写", { editing = EditTarget.KEY }, Modifier.testTag("publish-token"),
@@ -682,15 +675,15 @@ fun PublishSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
             }
         }
         item("note") {
-            Note("和云同步是两套系统：同步只给你自己的设备，发布要经管理员审核后才对所有人公开。在课堂页右上角菜单里选「公开发布」。")
+            Note("和云同步是两套系统：同步只给你自己的设备，发布的课程经管理员审核后对所有人公开。在课程页点「公开发布」，填好教师就能申请。")
         }
         if (publish.hasToken) item("clear") { DangerRow("清除上传 Token", "已公开的课堂不受影响", { confirmClear = true }) }
     }
     when (editing) {
         EditTarget.URL -> TextEditSheet(
-            title = "发布服务地址", description = "必须使用 HTTPS。一般和云同步服务器是同一个地址。", label = "地址",
-            initial = state.publishBaseUrl, secret = false, confirmLabel = "保存并测试", placeholder = "https://sync.example.com",
-            onConfirm = model::savePublishUrl, dismiss = { editing = null }
+            title = "学校", description = "所有公开的课程都归在这所学校下。", label = "学校",
+            initial = publish.schoolName, secret = false, confirmLabel = "保存", placeholder = "例如 西安建筑科技大学",
+            keyboardType = KeyboardType.Text, onConfirm = model::savePublishSchool, dismiss = { editing = null }
         )
         EditTarget.KEY -> TextEditSheet(
             title = "上传 Token", description = "管理员开通上传资格时给你的 Token，只保存在本机。", label = "新的 Token",

@@ -55,8 +55,25 @@ data class PublishSubmissionResult(
     val lessonId: String,
     val revisionId: Int? = null,
     val revision: Int? = null,
-    /** "pending" (queued for review) or "unchanged" (identical to what readers already see). */
-    val status: String
+    /** "published" (this copy is now the public one) or "unchanged" (identical to it already). */
+    val status: String,
+    val courseId: String,
+    /** Readers see the lesson only while its course is "approved". */
+    val courseStatus: String,
+    val courseReviewNote: String? = null
+)
+
+/** Review is per course: pending, approved, rejected or taken_down. */
+@Serializable
+data class PublishCourseStatus(
+    val courseId: String,
+    val schoolName: String,
+    val term: String,
+    val courseName: String,
+    val teacherName: String,
+    val status: String,
+    val reviewNote: String? = null,
+    val lessonCount: Int = 0
 )
 
 @Serializable
@@ -79,6 +96,21 @@ data class PublishLessonStatus(
     val withdrawRequested: Boolean = false,
     val revisions: List<PublishRevisionStatus> = emptyList()
 )
+
+/** One of this uploader's lessons in a public course, as the server holds it. */
+@Serializable
+data class PublishCourseLesson(
+    val lessonId: String,
+    val sessionId: String,
+    /** active or taken_down. */
+    val status: String,
+    val revision: Int,
+    val updatedAt: Long,
+    val withdrawRequested: Boolean = false
+)
+
+@Serializable
+internal data class PublishCourseLessons(val lessons: List<PublishCourseLesson>)
 
 @Serializable
 data class PublishUploader(val displayName: String, val status: String)

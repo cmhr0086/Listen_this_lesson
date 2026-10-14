@@ -17,7 +17,7 @@ import kotlinx.coroutines.flow.map
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import com.cmhr.listen.data.stt.AsrPromptAutoConfig
 import com.cmhr.listen.data.stt.AsrPromptMode
-import com.cmhr.listen.data.publish.PublishCourseInfo
+import com.cmhr.listen.data.publish.PublishCourseState
 import com.cmhr.listen.data.sync.SyncStateStore
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.MapSerializer
@@ -44,10 +44,11 @@ data class CloudSyncSettings(
 )
 /** Public publishing is separate from personal sync: its own address, uploader token and course labels. */
 data class PublishSettings(
-    val baseUrl: String = "",
     val hasToken: Boolean = false,
-    /** Local course id → how that course is labelled for readers. */
-    val courseInfo: Map<Long, PublishCourseInfo> = emptyMap()
+    /** Set once; every published course is filed under it. */
+    val schoolName: String = "",
+    /** Local course id → its publishing state. */
+    val courses: Map<Long, PublishCourseState> = emptyMap()
 )
 enum class AiProvider { OPENAI_COMPATIBLE, DEEPSEEK }
 enum class AiThinkingMode(val displayName: String) {
@@ -104,10 +105,7 @@ data class AppSettings(
     val autoNotes: Boolean = true,
     /** Course id → index into the course color palette, for courses whose color the user changed. */
     val courseColors: Map<Long, Int> = emptyMap()
-) {
-    /** The publish service usually shares the sync server's domain, so an unset address borrows it. */
-    val publishBaseUrl: String get() = publish.baseUrl.ifBlank { cloudSync.baseUrl }
-}
+)
 
 /** DataStore owns ordinary settings; API keys and tokens are AES-GCM encrypted with Android Keystore keys. */
 class AppSettingsRepository(private val context: Context) : SyncStateStore {
@@ -173,9 +171,9 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
                 lastSyncAt = preferences[CLOUD_SYNC_LAST_SYNC_AT] ?: 0
             ),
             publish = PublishSettings(
-                baseUrl = preferences[PUBLISH_BASE_URL].orEmpty(),
                 hasToken = preferences[PUBLISH_TOKEN] != null,
-                courseInfo = decodePublishCourseInfo(preferences[PUBLISH_COURSE_INFO])
+                schoolName = preferences[PUBLISH_SCHOOL].orEmpty(),
+                courses = decodePublishCourses(preferences[PUBLISH_COURSES])
             ),
             selectedCourseId = preferences[SELECTED_COURSE],
             selectedRecordId = preferences[SELECTED_RECORD],
@@ -362,11 +360,9 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
         context.appSettingsDataStore.edit { it[CLOUD_SYNC_LAST_SYNC_AT] = value }
     }
 
-    suspend fun savePublishUrl(baseUrl: String) {
-        val normalized = baseUrl.trim().trimEnd('/')
-        val parsed = normalized.toHttpUrlOrNull()
-        require(parsed != null && parsed.scheme == "https") { "发布服务地址必须是有效的 https:// 地址。" }
-        context.appSettingsDataStore.edit { it[PUBLISH_BASE_URL] = normalized }
+    suspend fun savePublishSchool(name: String) {
+        require(name.isNotBlank()) { "学校不能为空。" }
+        context.appSettingsDataStore.edit { it[PUBLISH_SCHOOL] = name.trim() }
     }
 
     suspend fun savePublishToken(token: String) {
@@ -379,11 +375,12 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
     suspend fun readPublishToken(): String? =
         context.appSettingsDataStore.data.first()[PUBLISH_TOKEN]?.let(publishTokenStore::decrypt)
 
-    suspend fun savePublishCourseInfo(courseId: Long, info: PublishCourseInfo) = context.appSettingsDataStore.edit { preferences ->
-        // Re-inserted last, so the newest entry is the one new courses borrow school and term from.
-        val all = decodePublishCourseInfo(preferences[PUBLISH_COURSE_INFO]) - courseId + (courseId to info)
-        preferences[PUBLISH_COURSE_INFO] = encodePublishCourseInfo(all)
-    }
+    /** Read-modify-write inside one edit, so a sync finishing and a form edit cannot undo each other. */
+    suspend fun updatePublishCourse(courseId: Long, change: (PublishCourseState) -> PublishCourseState) =
+        context.appSettingsDataStore.edit { preferences ->
+            val all = decodePublishCourses(preferences[PUBLISH_COURSES])
+            preferences[PUBLISH_COURSES] = encodePublishCourses(all + (courseId to change(all[courseId] ?: PublishCourseState())))
+        }
 
     suspend fun selectCourse(courseId: Long?) = context.appSettingsDataStore.edit { preferences ->
         if (courseId == null) preferences.remove(SELECTED_COURSE) else preferences[SELECTED_COURSE] = courseId
@@ -431,9 +428,9 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
         val CLOUD_SYNC_API_TOKEN = stringPreferencesKey("encrypted_cloud_sync_api_token")
         val CLOUD_SYNC_DEVICE_ID = stringPreferencesKey("cloud_sync_device_id")
         val CLOUD_SYNC_LAST_SYNC_AT = longPreferencesKey("cloud_sync_last_sync_at")
-        val PUBLISH_BASE_URL = stringPreferencesKey("publish_base_url")
         val PUBLISH_TOKEN = stringPreferencesKey("encrypted_publish_token")
-        val PUBLISH_COURSE_INFO = stringPreferencesKey("publish_course_info")
+        val PUBLISH_SCHOOL = stringPreferencesKey("publish_school")
+        val PUBLISH_COURSES = stringPreferencesKey("publish_courses")
         val SELECTED_COURSE = longPreferencesKey("selected_course_id")
         val SELECTED_RECORD = longPreferencesKey("selected_record_id")
         const val STT_KEY_ALIAS = "listen_stt_api_key"
@@ -452,18 +449,29 @@ internal fun decodeCourseColors(raw: String?): Map<Long, Int> = raw.orEmpty().sp
 internal fun encodeCourseColors(colors: Map<Long, Int>): String = colors.entries.joinToString(",") { "${it.key}:${it.value}" }
 
 @Serializable
-private data class StoredCourseInfo(val school: String = "", val term: String = "", val course: String = "", val teacher: String = "")
+private data class StoredPublishCourse(
+    val publicName: String = "",
+    val teacher: String = "",
+    val remote: Map<String, String> = emptyMap(),
+    val status: Map<String, String> = emptyMap(),
+    val synced: Map<Long, String> = emptyMap(),
+    val excluded: Set<Long> = emptySet(),
+    val lastSyncAt: Long = 0
+)
 
-private val courseInfoSerializer = MapSerializer(Long.serializer(), StoredCourseInfo.serializer())
-private val courseInfoJson = Json { ignoreUnknownKeys = true }
+private val publishCoursesSerializer = MapSerializer(Long.serializer(), StoredPublishCourse.serializer())
+private val publishJson = Json { ignoreUnknownKeys = true }
 
-/** JSON keyed by local course id; unreadable data falls back to empty, since it only pre-fills a form. */
-internal fun decodePublishCourseInfo(raw: String?): Map<Long, PublishCourseInfo> = runCatching {
-    courseInfoJson.decodeFromString(courseInfoSerializer, raw ?: return emptyMap())
-        .mapValues { (_, v) -> PublishCourseInfo(v.school, v.term, v.course, v.teacher) }
+/** JSON keyed by local course id; unreadable data falls back to empty rather than breaking settings. */
+internal fun decodePublishCourses(raw: String?): Map<Long, PublishCourseState> = runCatching {
+    publishJson.decodeFromString(publishCoursesSerializer, raw ?: return emptyMap()).mapValues { (_, v) ->
+        PublishCourseState(v.publicName, v.teacher, v.remote, v.status, v.synced, v.excluded, v.lastSyncAt)
+    }
 }.getOrDefault(emptyMap())
 
-internal fun encodePublishCourseInfo(info: Map<Long, PublishCourseInfo>): String = courseInfoJson.encodeToString(
-    courseInfoSerializer,
-    info.mapValues { (_, v) -> StoredCourseInfo(v.schoolName, v.term, v.courseName, v.teacherName) }
+internal fun encodePublishCourses(courses: Map<Long, PublishCourseState>): String = publishJson.encodeToString(
+    publishCoursesSerializer,
+    courses.mapValues { (_, v) ->
+        StoredPublishCourse(v.publicName, v.teacherName, v.remoteCourses, v.remoteStatus, v.synced, v.excluded, v.lastSyncAt)
+    }
 )

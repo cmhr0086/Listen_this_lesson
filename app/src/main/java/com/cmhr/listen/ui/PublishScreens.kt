@@ -2,29 +2,22 @@ package com.cmhr.listen.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.CloudOff
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.HourglassTop
 import androidx.compose.material.icons.outlined.Public
-import androidx.compose.material.icons.outlined.Send
-import androidx.compose.material3.AlertDialog
+import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material3.Button
-import androidx.compose.material3.Checkbox
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -32,231 +25,235 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.cmhr.listen.PublishRemoteState
-import com.cmhr.listen.PublishUiState
+import com.cmhr.listen.ClassPublishState
+import com.cmhr.listen.CoursePublishUiState
+import com.cmhr.listen.PublishClassRow
 import com.cmhr.listen.PublishViewModel
-import com.cmhr.listen.data.publish.PublishCourseInfo
-import com.cmhr.listen.data.publish.PublishLessonStatus
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
-private enum class PublishField(val label: String, val description: String, val placeholder: String) {
-    SCHOOL("学校", "读者按学校、学期、课程名和教师区分课程。", "例如 某某大学"),
-    TERM("学期", "同一门课不同学期会分开显示。", "例如 2026-2027 第一学期"),
-    COURSE("课程名", "公开显示的课程名称，可以和本机的课程名不同。", "例如 高等数学"),
-    TEACHER("教师", "同名课程按教师区分。教师姓名会公开显示。", "例如 张老师"),
-    TITLE("课堂标题", "读者在课程里看到的这节课的名字。", "例如 第 3 节 极限");
+private enum class CourseField { SCHOOL, NAME, TEACHER }
 
-    fun read(state: PublishUiState): String = when (this) {
-        SCHOOL -> state.course.schoolName
-        TERM -> state.course.term
-        COURSE -> state.course.courseName
-        TEACHER -> state.course.teacherName
-        TITLE -> state.title
+/** The headline of the course publish page: one state, one sentence, at most one action. */
+internal data class PublishHeadline(val tone: CardTone, val title: String, val detail: String, val action: HeadlineAction? = null)
+internal enum class HeadlineAction { SETTINGS, REQUEST_REVIEW }
+
+internal fun publishHeadline(state: CoursePublishUiState): PublishHeadline {
+    val latest = state.remote.firstOrNull()
+    val uploaded = state.classes.count { it.remote != null }
+    val waiting = state.toSync.size
+    val pendingSync = if (waiting > 0) "，还有 $waiting 节待同步" else ""
+    return when {
+        !state.hasToken -> PublishHeadline(CardTone.NEUTRAL, "还不能发布", "需要管理员开通的上传 Token。", HeadlineAction.SETTINGS)
+        latest == null -> PublishHeadline(
+            CardTone.NEUTRAL, "还没公开",
+            "完善下面的课程信息，点「申请公开」。管理员批准后，同学们就能在阅读端看到这门课。"
+        )
+        latest.status == "pending" -> PublishHeadline(
+            CardTone.NEUTRAL, "等待审核", "已上传 $uploaded 节$pendingSync。管理员批准后，这门课会对同学们公开。"
+        )
+        latest.status == "approved" -> PublishHeadline(CardTone.OK, "已公开", "$uploaded 节课公开中$pendingSync。")
+        latest.status == "rejected" -> PublishHeadline(
+            CardTone.PROBLEM, "未通过审核",
+            (latest.reviewNote?.let { "管理员：$it。" } ?: "") + "修改后可以重新申请。", HeadlineAction.REQUEST_REVIEW
+        )
+        else -> PublishHeadline(CardTone.PROBLEM, "已被管理员下架", "读者现在看不到这门课。如有疑问请联系管理员。")
     }
 }
 
-private fun PublishCourseInfo.with(field: PublishField, value: String) = when (field) {
-    PublishField.SCHOOL -> copy(schoolName = value)
-    PublishField.TERM -> copy(term = value)
-    PublishField.COURSE -> copy(courseName = value)
-    PublishField.TEACHER -> copy(teacherName = value)
-    PublishField.TITLE -> this
+/** A class's state in one pill: what readers can see of it, or why it is not there. */
+internal fun classPill(row: PublishClassRow, courseStatus: String?): Pair<String, StatusTone> = when (row.state) {
+    ClassPublishState.LIVE -> "上课中" to StatusTone.ACTIVE
+    ClassPublishState.NO_TEXT -> "没有文字" to StatusTone.DONE
+    ClassPublishState.EXCLUDED -> when {
+        row.remote?.status == "active" && row.remote.withdrawRequested -> "撤回中" to StatusTone.READY
+        row.remote?.status == "active" -> "仍公开" to StatusTone.PROBLEM
+        else -> "不公开" to StatusTone.DONE
+    }
+    ClassPublishState.NEW -> "未上传" to StatusTone.READY
+    ClassPublishState.CHANGED -> "有改动" to StatusTone.READY
+    ClassPublishState.SYNCED -> when {
+        row.remote?.status == "taken_down" -> "已下架" to StatusTone.PROBLEM
+        row.remote?.withdrawRequested == true -> "撤回中" to StatusTone.READY
+        courseStatus == "approved" -> "已公开" to StatusTone.DONE
+        else -> "已上传" to StatusTone.DONE
+    }
 }
 
+private fun dateLabel(at: Long) = SimpleDateFormat("M月d日 E", Locale.CHINA).format(Date(at))
+
 /**
- * One class, sent for public reading: what readers will see it filed under, which notes go along,
- * and where its review stands. Nothing here changes the class on this device.
+ * Publishing works per course: fill the course in once, then one button uploads every class that
+ * is new or changed. The admin reviews the course; after that its classes go live as they sync.
  */
 @Composable
-fun PublishLessonScreen(recordId: Long, model: PublishViewModel, openSettings: () -> Unit) {
+fun CoursePublishScreen(courseId: Long, model: PublishViewModel, openSettings: () -> Unit) {
     val state by model.uiState.collectAsState()
-    var editing by rememberSaveable { mutableStateOf<PublishField?>(null) }
-    var withdrawing by remember { mutableStateOf(false) }
-    LaunchedEffect(recordId) { model.load(recordId) }
+    var editing by rememberSaveable { mutableStateOf<CourseField?>(null) }
+    LaunchedEffect(courseId) { model.load(courseId) }
+    val headline = publishHeadline(state)
+    val latestStatus = state.remote.firstOrNull()?.status
 
     SettingsPage {
-        item("status") { PublishStatusCard(state, openSettings, model::refreshStatus) }
-        item("course-heading") { SectionHeader("公开显示为", Modifier.padding(top = 12.dp)) }
-        item("course") {
-            ListGroup {
-                PublishField.entries.forEachIndexed { index, field ->
-                    if (index > 0) ListDivider(16.dp)
-                    ValueRow(field.label, field.read(state).ifBlank { "未填写" }, { editing = field }, Modifier.testTag("publish-field-${field.name.lowercase()}"))
-                    if (field == PublishField.TERM && state.termSuggestions.isNotEmpty()) {
-                        Row(
-                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(start = 16.dp, end = 16.dp, bottom = 10.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            state.termSuggestions.forEach { term ->
-                                FilterChip(
-                                    selected = state.course.term == term,
-                                    onClick = { model.setCourse(state.course.copy(term = term)) },
-                                    label = { Text(term) }
-                                )
-                            }
-                        }
-                    }
-                }
+        item("status") {
+            val icon: ImageVector = when (headline.tone) {
+                CardTone.OK -> Icons.Outlined.Check
+                CardTone.PROBLEM -> Icons.Outlined.ErrorOutline
+                else -> if (state.remote.isEmpty()) Icons.Outlined.CloudOff else Icons.Outlined.HourglassTop
             }
-        }
-        item("notes-heading") { SectionHeader("一起公开的笔记", Modifier.padding(top = 12.dp)) }
-        item("notes") {
-            if (state.notes.isEmpty()) {
-                Note("这节课还没有整理好的笔记，只会公开课堂文字。")
-            } else ListGroup {
-                state.notes.forEachIndexed { index, note ->
-                    if (index > 0) ListDivider(56.dp)
-                    val checked = note.resultId in state.selectedNotes
-                    Row(
-                        Modifier.fillMaxWidth().heightIn(min = 56.dp)
-                            .toggleable(checked, role = Role.Checkbox) { model.toggleNote(note.resultId) }
-                            .padding(start = 4.dp, end = 16.dp, top = 8.dp, bottom = 8.dp)
-                            .testTag("publish-note-${note.resultId}"),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Checkbox(checked = checked, onCheckedChange = null, modifier = Modifier.padding(horizontal = 12.dp))
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Text("${note.title} · ${checkTime(note.createdAt)}", style = MaterialTheme.typography.titleSmall)
-                            Text(
-                                note.content.lineSequence().map { it.trimStart('#', ' ', '-', '*') }.firstOrNull { it.isNotBlank() }.orEmpty(),
-                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis
-                            )
-                        }
+            StatusCard(
+                if (state.syncing) CardTone.BUSY else headline.tone, icon,
+                if (state.syncing) "正在上传…" else headline.title,
+                state.progress?.let { (done, total) -> "已上传 $done / $total 节" } ?: headline.detail,
+                action = when (headline.action) {
+                    HeadlineAction.SETTINGS -> { { OutlinedButton(onClick = openSettings) { Text("去设置") } } }
+                    HeadlineAction.REQUEST_REVIEW -> state.remote.firstOrNull()?.let { remote ->
+                        { OutlinedButton(onClick = { model.requestReview(remote.courseId) }, modifier = Modifier.testTag("publish-request-review")) { Text("重新申请") } }
                     }
+                    null -> if (state.remote.isNotEmpty()) { { TextButton(onClick = model::refreshRemote, enabled = !state.refreshing) { Text(if (state.refreshing) "刷新中" else "刷新") } } } else null
                 }
-            }
-        }
-        item("content-heading") { SectionHeader("课堂文字", Modifier.padding(top = 12.dp)) }
-        item("content") {
-            Note(
-                buildString {
-                    append(if (state.segmentCount == 0) "这节课还没有文字" else "${state.segmentCount} 段文字")
-                    if (state.markedCount > 0) append("，其中 ${state.markedCount} 段重点")
-                    if (state.correctedCount > 0) append("，${state.correctedCount} 段使用纠正后的文字")
-                    append("。录音、识别诊断和 AI 对话都不会上传。")
-                }
-            )
-        }
-        item("submit") {
-            val published = (state.remote as? PublishRemoteState.Loaded)?.status?.published == true
-            Column(Modifier.padding(top = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            ) {
+                state.notice?.let { Note(it, Modifier.testTag("publish-notice")) }
                 state.error?.let { Note(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.testTag("publish-error")) }
+                state.remoteError?.let { Note("读不到最新审核状态：$it", color = MaterialTheme.colorScheme.error) }
+                state.remote.drop(1).forEach { older ->
+                    Note("${older.term}：${courseStatusLabel(older.status)}")
+                }
+            }
+        }
+
+        item("info-heading") { SectionHeader("课程信息 · 公开显示", Modifier.padding(top = 12.dp)) }
+        item("info") {
+            ListGroup {
+                ValueRow("学校", state.school.ifBlank { "未填写" }, { editing = CourseField.SCHOOL }, Modifier.testTag("publish-school"), subtitle = "所有课程共用")
+                ListDivider(16.dp)
+                ValueRow("课程名", state.publicName.ifBlank { "未填写" }, { editing = CourseField.NAME }, Modifier.testTag("publish-name"))
+                ListDivider(16.dp)
+                ValueRow("教师", state.course.teacherName.ifBlank { "未填写" }, { editing = CourseField.TEACHER }, Modifier.testTag("publish-teacher"))
+                ListDivider(16.dp)
+                ListRow(
+                    "学期", subtitle = "按每节课的上课日期自动归入",
+                    trailing = {
+                        Text(
+                            state.classes.firstOrNull()?.term ?: "—",
+                            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(end = 8.dp)
+                        )
+                    }
+                )
+            }
+        }
+        if (state.remote.isNotEmpty()) item("info-note") { Note("改动课程名或教师后，这门课会作为新课程重新审核，审核通过前读者看不到。") }
+
+        item("sync") {
+            Column(Modifier.padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
-                    onClick = model::submit,
-                    enabled = state.canSubmit,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).testTag("publish-submit")
+                    onClick = model::sync,
+                    enabled = state.canSync,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).testTag("publish-sync")
                 ) {
-                    Icon(Icons.Outlined.Send, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Icon(if (state.remote.isEmpty()) Icons.Outlined.Public else Icons.Outlined.Sync, contentDescription = null, modifier = Modifier.size(20.dp))
                     Text(
                         when {
-                            state.submitting -> "正在提交…"
-                            published -> "提交新版本审核"
-                            else -> "提交审核"
+                            state.syncing -> "正在上传…"
+                            state.toSync.isEmpty() -> if (state.classes.any { it.state == ClassPublishState.SYNCED }) "已全部同步" else "没有可上传的课堂"
+                            state.remote.isEmpty() -> "申请公开并上传 ${state.toSync.size} 节"
+                            else -> "同步 ${state.toSync.size} 节到公开"
                         },
                         Modifier.padding(start = 8.dp)
                     )
                 }
                 Note(
-                    if (!state.course.complete) "先把学校、学期、课程名和教师填完整。"
-                    else if (published) "新版本通过审核前，读者看到的仍是现在公开的版本。"
-                    else "提交的是此刻内容的副本；之后在本机修改不会影响它，需要时再提交新版本。"
+                    when {
+                        state.missing.isNotEmpty() -> "还需要填写：${state.missing.joinToString("、")}。"
+                        state.course.lastSyncAt > 0 -> "上次同步 ${checkTime(state.course.lastSyncAt)}。只上传课堂文字、重点和最新的整节课笔记；录音和 AI 对话不会上传。"
+                        else -> "只上传课堂文字、重点和最新的整节课笔记；录音和 AI 对话不会上传。"
+                    }
                 )
             }
         }
-        val status = (state.remote as? PublishRemoteState.Loaded)?.status
-        if (status?.published == true && !status.withdrawRequested) item("withdraw") {
-            DangerRow("申请撤回", "管理员处理后，读者将看不到这节课", { withdrawing = true }, Modifier.testTag("publish-withdraw"))
+
+        item("classes-heading") { SectionHeader("课堂（${state.classes.size}）", Modifier.padding(top = 12.dp)) }
+        item("classes") {
+            if (state.classes.isEmpty()) Note("这门课还没有课堂。")
+            else ListGroup {
+                state.classes.forEachIndexed { index, row ->
+                    if (index > 0) ListDivider(16.dp)
+                    val (pill, tone) = classPill(row, state.remote.firstOrNull { it.term == row.term }?.status)
+                    val canToggle = row.state != ClassPublishState.LIVE && row.state != ClassPublishState.NO_TEXT
+                    ListRow(
+                        title = row.title,
+                        subtitle = buildString {
+                            append(dateLabel(row.startedAt))
+                            if (row.segmentCount > 0) append(" · ${row.segmentCount} 段")
+                            if (row.hasNotes) append(" · 有笔记")
+                        },
+                        status = { StatusPill(pill, tone) },
+                        trailing = if (canToggle) {
+                            {
+                                Switch(
+                                    checked = row.state != ClassPublishState.EXCLUDED,
+                                    onCheckedChange = { model.setExcluded(row, !it) },
+                                    modifier = Modifier.testTag("publish-class-${row.recordId}")
+                                )
+                            }
+                        } else null
+                    )
+                }
+            }
+        }
+        if (state.classes.any { it.state == ClassPublishState.EXCLUDED }) item("classes-note") {
+            Note("关掉开关的课堂不会上传；已经公开的会申请撤回，管理员处理后读者就看不到了。")
         }
     }
 
-    editing?.let { field ->
-        TextEditSheet(
-            title = field.label, description = field.description, label = field.label,
-            initial = field.read(state), secret = false, confirmLabel = "确定", placeholder = field.placeholder,
-            keyboardType = KeyboardType.Text,
-            onConfirm = { value ->
-                if (field == PublishField.TITLE) model.setTitle(value) else model.setCourse(state.course.with(field, value))
-            },
-            dismiss = { editing = null }
+    when (editing) {
+        CourseField.SCHOOL -> TextEditSheet(
+            title = "学校", description = "所有公开的课程都归在这所学校下。", label = "学校",
+            initial = state.school, secret = false, confirmLabel = "确定", placeholder = "例如 西安建筑科技大学",
+            keyboardType = KeyboardType.Text, onConfirm = model::setSchool, dismiss = { editing = null }
         )
-    }
-    if (withdrawing) WithdrawDialog(dismiss = { withdrawing = false }, confirm = model::requestWithdraw)
-}
-
-@Composable
-private fun PublishStatusCard(state: PublishUiState, openSettings: () -> Unit, retry: () -> Unit) {
-    val notice = state.notice
-    when (val remote = state.remote) {
-        PublishRemoteState.NotConfigured -> StatusCard(
-            CardTone.NEUTRAL, Icons.Outlined.CloudOff, "还没设置", "需要先填写上传 Token。",
-            action = { OutlinedButton(onClick = openSettings) { Text("去设置") } }
+        CourseField.NAME -> TextEditSheet(
+            title = "课程名", description = "同学们看到的课程名称，可以和本机的不同。", label = "课程名",
+            initial = state.publicName, secret = false, confirmLabel = "确定", placeholder = state.localName,
+            keyboardType = KeyboardType.Text, onConfirm = model::setPublicName, dismiss = { editing = null }
         )
-        PublishRemoteState.Loading -> StatusCard(CardTone.BUSY, Icons.Outlined.Public, "正在读取审核状态…", null)
-        is PublishRemoteState.Failed -> StatusCard(
-            CardTone.PROBLEM, Icons.Outlined.ErrorOutline, "读不到审核状态", remote.message,
-            action = { OutlinedButton(onClick = retry) { Text("重试") } }
+        CourseField.TEACHER -> TextEditSheet(
+            title = "教师", description = "同名课程按教师区分，教师姓名会公开显示。", label = "教师",
+            initial = state.course.teacherName, secret = false, confirmLabel = "确定", placeholder = "例如 张老师",
+            keyboardType = KeyboardType.Text, onConfirm = model::setTeacher, dismiss = { editing = null }
         )
-        is PublishRemoteState.Loaded -> {
-            val (tone, title, detail) = describe(remote.status)
-            StatusCard(
-                tone, if (tone == CardTone.OK) Icons.Outlined.Check else if (tone == CardTone.PROBLEM) Icons.Outlined.ErrorOutline else Icons.Outlined.HourglassTop,
-                title, listOfNotNull(notice, detail).joinToString("\n").ifEmpty { null },
-                action = { TextButton(onClick = retry) { Text("刷新") } }
-            )
-        }
+        null -> Unit
     }
 }
 
-/** The card for a class: the public state first, then what is waiting behind it. */
-internal fun describe(status: PublishLessonStatus): Triple<CardTone, String, String?> {
-    val latest = status.revisions.firstOrNull()
-    val pending = status.revisions.firstOrNull { it.status == "pending" }
-    val waiting = pending?.let { "第 ${it.revision} 版已提交 ${checkTime(it.submittedAt)}，等待审核" }
-    val rejectedNote = latest?.takeIf { it.status == "rejected" }?.let { r ->
-        "第 ${r.revision} 版被驳回" + (r.reviewNote?.let { "：$it" } ?: "")
-    }
+internal fun courseStatusLabel(status: String) = when (status) {
+    "pending" -> "等待审核"
+    "approved" -> "已公开"
+    "rejected" -> "未通过审核"
+    "taken_down" -> "已下架"
+    else -> status
+}
+
+/** One line for the course page row, from what this device last knew. */
+internal fun coursePublishSummary(hasToken: Boolean, status: Map<String, String>, teacher: String): Pair<String, Pair<String, StatusTone>?> {
+    val latest = status.entries.maxByOrNull { it.key }?.value
     return when {
-        latest == null -> Triple(CardTone.NEUTRAL, "尚未公开", "提交后，管理员审核通过才会出现在阅读端。")
-        status.lessonStatus == "taken_down" -> Triple(CardTone.PROBLEM, "已下架", "读者已看不到这节课。" + (waiting?.let { "\n$it" } ?: ""))
-        status.published -> Triple(
-            CardTone.OK, "已公开",
-            listOfNotNull(
-                if (status.withdrawRequested) "已申请撤回，等待管理员处理" else null,
-                waiting, rejectedNote
-            ).joinToString("\n").ifEmpty { "读者看到的是最新通过审核的版本。" }
-        )
-        pending != null -> Triple(CardTone.BUSY, "等待审核", waiting)
-        else -> Triple(CardTone.PROBLEM, "未通过审核", rejectedNote ?: "可以修改后重新提交。")
+        latest != null -> "同学们在阅读端看到的内容" to (courseStatusLabel(latest) to when (latest) {
+            "approved" -> StatusTone.DONE
+            "pending" -> StatusTone.READY
+            else -> StatusTone.PROBLEM
+        })
+        !hasToken -> "需要管理员开通的上传 Token" to null
+        teacher.isBlank() -> "完善课程信息后，公开给同学们阅读" to null
+        else -> "已完善，可以申请公开" to null
     }
-}
-
-@Composable
-private fun WithdrawDialog(dismiss: () -> Unit, confirm: (String) -> Unit) {
-    var reason by rememberSaveable { mutableStateOf("") }
-    AlertDialog(
-        onDismissRequest = dismiss,
-        title = { Text("申请撤回这节课？") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("管理员处理后，读者将看不到这节课。已经导出过的文件无法收回。")
-                OutlinedTextField(reason, { reason = it }, label = { Text("原因") }, modifier = Modifier.fillMaxWidth().testTag("publish-withdraw-reason"))
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = { confirm(reason); dismiss() }, enabled = reason.isNotBlank()) {
-                Text("申请撤回", color = MaterialTheme.colorScheme.error)
-            }
-        },
-        dismissButton = { TextButton(onClick = dismiss) { Text("取消") } }
-    )
 }

@@ -6,6 +6,7 @@ import com.cmhr.listen.ui.theme.ThemePalette
 
 import android.app.Application
 import com.cmhr.listen.data.publish.PublishApiClient
+import com.cmhr.listen.data.publish.PUBLISH_BASE_URL
 import com.cmhr.listen.data.settings.PublishSettings
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -59,8 +60,6 @@ data class SettingsUiState(
     val aiCheck: ServiceCheck = ServiceCheck.Unknown,
     val autoNotes: Boolean = true,
     val publish: PublishSettings = PublishSettings(),
-    /** Address actually used: the publish address, or the sync address when that is unset. */
-    val publishBaseUrl: String = "",
     val publishCheck: ServiceCheck = ServiceCheck.Unknown,
     /** Nickname the publish service knows this token by, from the last successful check. */
     val publishUploader: String? = null
@@ -148,8 +147,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             asrPromptAutoConfig = settings.asrPromptAutoConfig,
             cloudSync = settings.cloudSync,
             autoNotes = settings.autoNotes,
-            publish = settings.publish,
-            publishBaseUrl = settings.publishBaseUrl
+            publish = settings.publish
         ) }
     } } }
 
@@ -315,8 +313,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     // 公开发布
 
-    fun savePublishUrl(baseUrl: String) = viewModelScope.launch {
-        if (attempt("发布服务地址无效。") { repository.savePublishUrl(baseUrl) }) checkPublish()
+    fun savePublishSchool(name: String) = viewModelScope.launch {
+        if (attempt("学校不能为空。") { repository.savePublishSchool(name) }) messageFlow.emit(UiMessage("学校已保存。"))
     }
     fun savePublishToken(token: String) = viewModelScope.launch {
         if (attempt("Token 无效。") { repository.savePublishToken(token) }) checkPublish()
@@ -331,10 +329,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         publishCheckJob?.cancel()
         publishCheckJob = viewModelScope.launch {
             _uiState.update { it.copy(publishCheck = ServiceCheck.Testing) }
-            val settings = repository.settings.first()
             val started = SystemClock.elapsedRealtime()
             val result = runCatching {
-                publishClient.me(settings.publishBaseUrl, repository.readPublishToken().orEmpty())
+                publishClient.me(PUBLISH_BASE_URL, repository.readPublishToken().orEmpty())
             }
             val now = System.currentTimeMillis()
             result.fold(

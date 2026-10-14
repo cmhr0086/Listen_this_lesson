@@ -20,6 +20,9 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 
 /** A failure worth showing as-is: the message is already written for the user. */
+/** The publish service this app talks to; fixed, since there is only one public reader. */
+const val PUBLISH_BASE_URL = "https://sync.vmnox.com"
+
 class PublishException(message: String, val httpCode: Int? = null) : IOException(message)
 
 class PublishApiClient(
@@ -41,6 +44,15 @@ class PublishApiClient(
             header("Content-Encoding", "gzip").post(body.toRequestBody(JSON))
         }.let { parse(it) }
     }
+
+    suspend fun course(baseUrl: String, token: String, courseId: String): PublishCourseStatus =
+        call(baseUrl, token, "courses/$courseId") { get() }.let { parse(it) }
+
+    suspend fun courseLessons(baseUrl: String, token: String, courseId: String): List<PublishCourseLesson> =
+        call(baseUrl, token, "courses/$courseId/lessons") { get() }.let { parse<PublishCourseLessons>(it) }.lessons
+
+    suspend fun requestReview(baseUrl: String, token: String, courseId: String): PublishCourseStatus =
+        call(baseUrl, token, "courses/$courseId/request-review") { post(ByteArray(0).toRequestBody(JSON)) }.let { parse(it) }
 
     suspend fun requestWithdraw(baseUrl: String, token: String, lessonId: String, reason: String) {
         val body = json.encodeToString(PublishWithdrawRequest(reason)).toRequestBody(JSON)
