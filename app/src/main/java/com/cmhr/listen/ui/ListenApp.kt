@@ -90,6 +90,7 @@ import com.cmhr.listen.CourseViewModel
 import com.cmhr.listen.SettingsViewModel
 import com.cmhr.listen.AiPromptKind
 import com.cmhr.listen.SttViewModel
+import com.cmhr.listen.PublishViewModel
 import com.cmhr.listen.RecordingViewModel
 import com.cmhr.listen.recording.CaptureMode
 import com.cmhr.listen.data.ai.AiActionType
@@ -180,6 +181,8 @@ private fun routeTitle(route: String?): String = when (route) {
     "settings/ai-service/models" -> "选择模型"
     "settings/asr-prompt-policy/thresholds" -> "自动模式门槛"
     "settings/cloud-sync" -> "云同步"
+    "settings/publish" -> "公开发布"
+    "record/{recordId}/publish" -> "公开发布"
     "settings/appearance" -> "外观"
     "settings/ai-prompts" -> "AI 提示词"
     "settings/asr-prompt-policy" -> "专业词提示"
@@ -204,7 +207,8 @@ fun ListenApp(
     courses: CourseViewModel = viewModel(),
     settings: SettingsViewModel = viewModel(),
     ai: AiViewModel = viewModel(),
-    recordings: RecordingViewModel = viewModel()
+    recordings: RecordingViewModel = viewModel(),
+    publish: PublishViewModel = viewModel()
 ) {
     val nav = rememberNavController()
     val backStackEntry by nav.currentBackStackEntryAsState()
@@ -584,6 +588,7 @@ fun ListenApp(
                         }
                     },
                     select = { recordMenuExpanded = false; ai.beginSelection(recordId) },
+                    publish = { recordMenuExpanded = false; nav.navigate("record/$recordId/publish") },
                     editAsrPrompt = {
                         recordMenuExpanded = false
                         promptDraft = currentCourse?.asrPrompt.orEmpty()
@@ -852,6 +857,7 @@ fun ListenApp(
                     onCloudSync = { nav.navigate("settings/cloud-sync") },
                     onAsrDiagnostics = { nav.navigate("settings/asr-diagnostics") },
                     onAppearance = { nav.navigate("settings/appearance") },
+                    onPublish = { nav.navigate("settings/publish") },
                     vadSummary = sttState.selectedVadPreset?.displayName ?: "自定义（基于「${nearestVadPreset(sttState.configuredVadConfig).displayName}」）"
                 )
             }
@@ -863,6 +869,11 @@ fun ListenApp(
             }
             composable("settings/ai-service/models") { AiModelsScreen(settingsState, settings, done = { nav.popBackStack() }) }
             composable("settings/cloud-sync") { CloudSyncSettingsScreen(settingsState, settings) }
+            composable("settings/publish") { PublishSettingsScreen(settingsState, settings) }
+            composable("record/{recordId}/publish") { entry ->
+                val id = entry.arguments?.getString("recordId")?.toLongOrNull() ?: return@composable
+                PublishLessonScreen(id, publish, openSettings = { nav.navigate("settings/publish") })
+            }
             composable("settings/appearance") { AppearanceSettingsScreen(settingsState, settings) }
             composable("settings/ai-prompts") {
                 AiPromptsSettingsScreen(settingsState, settings, open = { nav.navigate("settings/ai-prompts/${it.name}") })
@@ -1057,7 +1068,8 @@ internal fun RecordNormalTopBar(
     back: () -> Unit,
     exportTxt: () -> Unit,
     select: () -> Unit,
-    editAsrPrompt: () -> Unit
+    editAsrPrompt: () -> Unit,
+    publish: () -> Unit = {}
 ) = TopAppBar(
     title = {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1085,6 +1097,7 @@ internal fun RecordNormalTopBar(
         ) {
             DropdownMenuItem(text = { Text("选择片段") }, onClick = select)
             DropdownMenuItem(text = { Text("导出 TXT") }, onClick = exportTxt)
+            DropdownMenuItem(text = { Text("公开发布") }, onClick = publish, modifier = Modifier.testTag("record-menu-publish"))
             HorizontalDivider()
             DropdownMenuItem(text = { Text("专业词提示") }, onClick = editAsrPrompt)
         }

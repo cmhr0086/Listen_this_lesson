@@ -4,6 +4,7 @@ import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.Palette
+import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.Translate
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Code
@@ -49,6 +50,7 @@ fun SettingsScreen(
     onCloudSync: () -> Unit = {},
     onAsrDiagnostics: () -> Unit = {},
     onAppearance: () -> Unit = {},
+    onPublish: () -> Unit = {},
     vadSummary: String = ""
 ) = SettingsOverview(
     state = state,
@@ -63,7 +65,8 @@ fun SettingsScreen(
     onAiGeneration = onAiGeneration,
     onCloudSync = onCloudSync,
     onAsrDiagnostics = onAsrDiagnostics,
-    onAppearance = onAppearance
+    onAppearance = onAppearance,
+    onPublish = onPublish
 )
 
 @Composable
@@ -79,6 +82,7 @@ internal fun SettingsOverview(
     onCloudSync: () -> Unit = {},
     onAsrDiagnostics: () -> Unit = {},
     onAppearance: () -> Unit = {},
+    onPublish: () -> Unit = {},
     setAutoNotes: (Boolean) -> Unit = {},
     vadSummary: String = ""
 ) {
@@ -125,6 +129,18 @@ internal fun SettingsOverview(
                     Icons.Outlined.Cloud, onCloudSync,
                     status = if (syncReady) null else "可选" to StatusTone.READY,
                     modifier = Modifier.testTag("settings-sync")
+                )
+                ListDivider(62.dp)
+                SettingsRow(
+                    "公开发布",
+                    if (state.publish.hasToken) "提交课堂给同学们阅读，经管理员审核后公开" else "需要管理员开通的上传 Token",
+                    Icons.Outlined.Public, onPublish,
+                    status = when {
+                        !state.publish.hasToken -> "可选" to StatusTone.READY
+                        state.publishCheck is ServiceCheck.Failed -> "连接失败" to StatusTone.PROBLEM
+                        else -> null
+                    },
+                    modifier = Modifier.testTag("settings-publish")
                 )
             }
         }
