@@ -409,6 +409,15 @@ class ListenDatabaseMigrationTest {
             assertEquals("known-job", resumedKnownJob?.jobId)
             assertEquals(AsrLifecycleState.QUEUED_SERVER, resumedKnownJob?.lifecycleState)
 
+            // 全部重试: every unknown submission goes back to the queue in one step.
+            listOf("bulk-a" to 10L, "bulk-b" to 11L).forEach { (id, seq) ->
+                dao.insertSegment(diagnostic(segmentId = id, recordId = otherRecordId, sequenceNumber = seq, state = AsrLifecycleState.SUBMISSION_UNKNOWN))
+            }
+            assertEquals(2, dao.confirmRetryAllUnknown())
+            assertEquals(AsrLifecycleState.QUEUED_LOCAL, dao.segment("bulk-a")?.lifecycleState)
+            assertEquals(AsrLifecycleState.QUEUED_LOCAL, dao.segment("bulk-b")?.lifecycleState)
+            assertEquals(0, dao.confirmRetryAllUnknown())
+
             dao.insertSegment(
                 diagnostic(
                     segmentId = "same-boot",

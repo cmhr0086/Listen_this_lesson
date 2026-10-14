@@ -929,6 +929,7 @@ fun ListenApp(
                         refreshHealth = stt::refreshAsrHealth,
                         confirmRetryUnknown = stt::confirmRetryUnknown,
                         openHistory = { nav.navigate("settings/asr-diagnostics/history/$it") },
+                        retryAllUnknown = stt::confirmRetryAllUnknown,
                         activeDiagnostics = activeDiagnostics,
                         recentCounts = recentCounts,
                         runtimeSummary = runtimeSummary,

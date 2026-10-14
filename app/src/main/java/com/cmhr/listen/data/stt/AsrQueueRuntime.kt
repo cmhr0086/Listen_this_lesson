@@ -18,6 +18,7 @@ import androidx.work.WorkerParameters
 import com.cmhr.listen.data.course.ListenDatabase
 import com.cmhr.listen.data.course.TranscriptEntity
 import com.cmhr.listen.data.settings.AppSettingsRepository
+import com.cmhr.listen.data.settings.SttProvider
 import com.cmhr.listen.audio.WavEncoder
 import com.cmhr.listen.audio.PcmRecorder
 import java.io.File
@@ -379,6 +380,11 @@ class AsrQueueRuntime private constructor(private val context: Context) {
         if (dao.confirmRetryUnknown(segmentId) > 0) kick()
     }
 
+    suspend fun confirmRetryAllUnknown(): Int = dao.confirmRetryAllUnknown().also { if (it > 0) kick() }
+
+    /** A synchronous (OpenAI-format) call has no job to lose: a dropped one is simply sent again. */
+    private suspend fun syncProvider(): Boolean = settings.settings.first().server.provider == SttProvider.OPENAI_COMPATIBLE
+
     suspend fun refreshHealth(): AsrHealthRefreshResult {
         return when (val result = httpPermits.withPermit { client.health() }) {
             is SttCallOutcome.Success -> {
@@ -591,7 +597,8 @@ class AsrQueueRuntime private constructor(private val context: Context) {
                     firstServerProcessingAt = if (status == "processing") completedAt else null,
                     firstServerQueuedElapsedMs = if (status == "queued") completedElapsed else null,
                     firstServerProcessingElapsedMs = if (status == "processing") completedElapsed else null,
-                    nextAttemptAt = completedAt + POLL_INTERVAL_MS,
+                    // A synchronous call already holds the text: collect it right away.
+                    nextAttemptAt = if (acceptedJobId.startsWith(SttApiClient.SYNC_JOB_PREFIX)) completedAt else completedAt + POLL_INTERVAL_MS,
                     lastHttpStatus = outcome.httpCode,
                     postDurationMs = outcome.trace.durationBetween(AsrNetworkEventType.CALL_START, AsrNetworkEventType.RESPONSE_BODY_END),
                     uploadDurationMs = outcome.trace.durationBetween(AsrNetworkEventType.REQUEST_BODY_START, AsrNetworkEventType.REQUEST_BODY_END),
@@ -619,6 +626,8 @@ class AsrQueueRuntime private constructor(private val context: Context) {
                 val traced = submitting.withSubmitCallStart(outcome.trace)
                 if (outcome.trace.none { it.eventType == AsrNetworkEventType.REQUEST_BODY_START }) {
                     retry(traced, submitFailureStage(outcome.trace), outcome.exceptionClass, outcome.safeMessage, null)
+                } else if (syncProvider()) {
+                    retry(traced, submitFailureStage(outcome.trace), outcome.exceptionClass, "识别服务响应超时或中断，将自动重新提交。", null)
                 } else {
                     markSubmissionUnknown(
                         traced,

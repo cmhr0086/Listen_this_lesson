@@ -91,6 +91,7 @@ fun AsrDiagnosticsScreen(
     refreshHealth: () -> Unit,
     confirmRetryUnknown: (String) -> Unit,
     openHistory: (Long) -> Unit,
+    retryAllUnknown: () -> Unit = {},
     activeDiagnostics: List<AsrSegmentDiagnosticEntity>,
     recentCounts: AsrDiagnosticStateCounts,
     runtimeSummary: AsrRuntimeSummary? = null,
@@ -125,7 +126,7 @@ fun AsrDiagnosticsScreen(
             }
         }
         item("capture-vad") { CaptureAndVadCard(state, vadState, recentCounts.discardedFillerCount) }
-        item("summary") { QueueCard(visibleActiveDiagnostics, runtimeSummary, recentCounts) }
+        item("summary") { QueueCard(visibleActiveDiagnostics, runtimeSummary, recentCounts, retryAllUnknown) }
         item("server") { ServerCard(health, healthRefreshing, healthError, refreshHealth) }
         item("segments-heading") {
             DiagSectionTitle(if (totalCount > DIAGNOSTICS_PREVIEW_LIMIT) "最近 $DIAGNOSTICS_PREVIEW_LIMIT 个片段" else "片段")
@@ -304,7 +305,12 @@ private fun VadMeter(vadState: VadDiagnosticsUiState) {
 }
 
 @Composable
-private fun QueueCard(activeDiagnostics: List<AsrSegmentDiagnosticEntity>, runtimeSummary: AsrRuntimeSummary?, recentCounts: AsrDiagnosticStateCounts) {
+private fun QueueCard(
+    activeDiagnostics: List<AsrSegmentDiagnosticEntity>,
+    runtimeSummary: AsrRuntimeSummary?,
+    recentCounts: AsrDiagnosticStateCounts,
+    retryAllUnknown: () -> Unit = {}
+) {
     val processing = activeDiagnostics.firstOrNull {
         it.lifecycleState == AsrLifecycleState.SUBMITTING ||
             it.lifecycleState == AsrLifecycleState.QUEUED_SERVER ||
@@ -330,11 +336,15 @@ private fun QueueCard(activeDiagnostics: List<AsrSegmentDiagnosticEntity>, runti
                 Text("并发槽已满，新的片段在本地持久队列等待。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary)
             }
             if (runtimeSummary.submissionUnknownCount > 0) {
-                Text(
-                    "${runtimeSummary.submissionUnknownCount} 个片段提交状态未知，在下方展开确认。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "${runtimeSummary.submissionUnknownCount} 个片段提交状态未知，可逐个展开确认，或全部重新提交。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.weight(1f)
+                    )
+                    androidx.compose.material3.TextButton(onClick = retryAllUnknown, modifier = Modifier.testTag("asr-retry-all-unknown")) { Text("全部重试") }
+                }
             }
             DiagRow("本次运行", "完成 ${runtimeSummary.completedCount} · 失败 ${runtimeSummary.failedCount}")
         }
@@ -475,7 +485,7 @@ private fun AsrDiagnosticCard(
                 HorizontalDivider(Modifier.padding(vertical = 4.dp))
                 DiagSubTitle("耗时")
                 DiagRow("客户端排队") { ClientQueueDuration(diagnostic) }
-                DiagRow("POST /transcribe", formatNullableMs(diagnostic.postDurationMs))
+                DiagRow("提交请求", formatNullableMs(diagnostic.postDurationMs))
                 DiagRow("实际上传", formatNullableMs(diagnostic.uploadDurationMs), indent = true)
                 DiagRow("等待提交响应", formatNullableMs(diagnostic.submitResponseWaitDurationMs), indent = true)
                 DiagRow("服务端等待（估算）") { ServerWaitDuration(diagnostic) }
