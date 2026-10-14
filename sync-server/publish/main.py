@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import secrets
+import time
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -22,7 +23,10 @@ from starlette.middleware.gzip import GZipMiddleware
 from app.compression import GzipRequestMiddleware
 from app.database import create_sync_engine
 
+from starlette.concurrency import run_in_threadpool
+
 from . import queries, service
+from .timetable_pdf import TimetableError, parse_timetable
 from .database import initialize_database
 from .models import AuditLog, Course, Lesson, Revision, RevisionNote, RevisionSegment, Uploader
 from .schemas import (
@@ -37,6 +41,8 @@ from .schemas import (
 )
 
 MAX_SUBMISSION_BYTES = 8 * 1024 * 1024
+MAX_TIMETABLE_PDF_BYTES = 2 * 1024 * 1024
+TIMETABLE_PDF_PER_HOUR = 20
 ADMIN_PAGE = Path(__file__).with_name("admin.html")
 
 
@@ -170,6 +176,31 @@ def create_app(database_url: str | None = None) -> FastAPI:
                 "Cache-Control": "public, max-age=30",
             },
         )
+
+    # A stateless helper for the mini program's timetable: the PDF is parsed in memory and
+    # dropped; nothing is stored or logged. It lives under /api/public so the existing proxy
+    # route and the mini program's request domain cover it.
+    pdf_calls: dict[str, list[float]] = {}
+
+    @public.post("/tools/timetable-pdf")
+    async def timetable_pdf(request: Request):
+        client = request.headers.get("x-real-ip") or (request.client.host if request.client else "")
+        now = time.monotonic()
+        recent = [t for t in pdf_calls.get(client, []) if now - t < 3600]
+        if len(recent) >= TIMETABLE_PDF_PER_HOUR:
+            raise HTTPException(429, "导入太频繁，请稍后再试")
+        pdf_calls[client] = recent + [now]
+        if len(pdf_calls) > 10_000:
+            pdf_calls.clear()
+        body = await request.body()
+        if not body:
+            raise HTTPException(400, "没有收到文件")
+        if len(body) > MAX_TIMETABLE_PDF_BYTES:
+            raise HTTPException(413, "文件太大，课表 PDF 一般不超过 2 MB")
+        try:
+            return await run_in_threadpool(parse_timetable, body)
+        except TimetableError as error:
+            raise HTTPException(422, str(error)) from error
 
     # ---- uploaders ----------------------------------------------------------------------
 
