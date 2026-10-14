@@ -163,6 +163,25 @@ def test_rejected_course_reaches_uploader_and_can_be_requested_again(client):
     assert client.post(f"/api/publish/v1/courses/{result['courseId']}/request-review", headers=auth(token)).status_code == 409
     other = new_uploader(client, "乙")
     assert client.post(f"/api/publish/v1/courses/{result['courseId']}/request-review", headers=auth(other)).status_code == 404
+    # The admin sees it is back with the note it was rejected with.
+    queued = admin(client, "GET", "/courses")["courses"][0]
+    assert (queued["reRequested"], queued["reviewNote"]) == (True, "教师姓名请写全")
+    approve(client, result["courseId"])
+    assert admin(client, "GET", f"/courses/{result['courseId']}")["course"]["reRequested"] is False
+
+
+def test_admin_queue_is_first_come_first_served_with_tab_counts(client):
+    token = new_uploader(client)
+    first = submit(client, token, submission(course={"schoolName": "某某大学", "term": "T", "courseName": "甲课", "teacherName": "张"}))
+    submit(client, token, submission(course={"schoolName": "某某大学", "term": "T", "courseName": "乙课", "teacherName": "张"}))
+    assert [c["courseName"] for c in admin(client, "GET", "/courses")["courses"]] == ["甲课", "乙课"]
+    assert admin(client, "GET", "/summary") == {"pendingCourses": 2, "withdrawRequests": 0}
+    approve(client, first["courseId"])
+    client.post(f"/api/publish/v1/lessons/{first['lessonId']}/withdraw-request", headers=auth(token), json={"reason": "录错了"})
+    assert admin(client, "GET", "/summary") == {"pendingCourses": 1, "withdrawRequests": 1}
+    row = admin(client, "GET", "/uploaders")["uploaders"][0]
+    assert sorted(row["courseNames"]) == sorted(["甲课", "乙课"])
+    assert row["lastUploadAt"] is not None
 
 
 def test_course_takedown_hides_all_its_lessons_and_approve_restores(client):
@@ -367,7 +386,7 @@ def test_public_api_is_read_only(client):
 
 def test_admin_page_is_served(client):
     page = client.get("/admin")
-    assert page.status_code == 200 and "Listen 审核" in page.text
+    assert page.status_code == 200 and "公开后台" in page.text
 
 
 def test_private_sync_data_never_reaches_the_public_api(tmp_path, monkeypatch, client):

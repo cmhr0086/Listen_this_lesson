@@ -293,6 +293,8 @@ def create_app(database_url: str | None = None) -> FastAPI:
             "requestedAt": course.requestedAt,
             "reviewedAt": course.reviewedAt,
             "lastUploadAt": last,
+            # A pending course keeps the note it was rejected with until the admin decides again.
+            "reRequested": course.status == "pending" and course.reviewNote is not None,
         }
 
     @admin.get("/courses")
@@ -300,8 +302,22 @@ def create_app(database_url: str | None = None) -> FastAPI:
         stmt = select(Course)
         if status != "all":
             stmt = stmt.where(Course.status == status)
-        rows = db.scalars(stmt.order_by(Course.requestedAt.desc().nulls_last(), Course.createdAt.desc()).limit(200))
+        # The review queue is first come, first served; other lists show the newest first.
+        order = (Course.requestedAt.asc(), Course.createdAt.asc()) if status == "pending" else (
+            Course.requestedAt.desc().nulls_last(), Course.createdAt.desc())
+        rows = db.scalars(stmt.order_by(*order).limit(200))
         return {"courses": [course_row(db, course) for course in rows]}
+
+    @admin.get("/summary")
+    def admin_summary(db: Session = Depends(get_db)):
+        """Counts behind the badges on the admin tabs."""
+        return {
+            "pendingCourses": db.scalar(select(func.count()).select_from(Course).where(Course.status == "pending")),
+            "withdrawRequests": db.scalar(
+                select(func.count()).select_from(Lesson)
+                .where(Lesson.withdrawRequestedAt.is_not(None), Lesson.publishedRevisionId.is_not(None))
+            ),
+        }
 
     @admin.get("/courses/{course_id}")
     def admin_course(course_id: str, db: Session = Depends(get_db)):
@@ -374,9 +390,20 @@ def create_app(database_url: str | None = None) -> FastAPI:
             "createdAt": uploader.createdAt,
         }
 
+    def uploader_row(db: Session, uploader: Uploader) -> dict:
+        courses = db.scalars(
+            select(Course.courseName).join(Lesson, Lesson.courseId == Course.id)
+            .where(Lesson.uploaderId == uploader.id).distinct().order_by(Course.courseName)
+        ).all()
+        last = db.scalar(
+            select(func.max(Revision.submittedAt)).join(Lesson, Lesson.id == Revision.lessonId)
+            .where(Lesson.uploaderId == uploader.id)
+        )
+        return {**uploader_dict(uploader), "courseNames": list(courses), "lastUploadAt": last}
+
     @admin.get("/uploaders")
     def admin_uploaders(db: Session = Depends(get_db)):
-        return {"uploaders": [uploader_dict(u) for u in db.scalars(select(Uploader).order_by(Uploader.id))]}
+        return {"uploaders": [uploader_row(db, u) for u in db.scalars(select(Uploader).order_by(Uploader.id.desc()))]}
 
     @admin.post("/uploaders")
     def admin_create_uploader(body: UploaderCreate, db: Session = Depends(get_db)):
