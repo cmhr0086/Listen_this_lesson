@@ -341,8 +341,8 @@ fun SttServiceSettingsScreen(state: SettingsUiState, model: SettingsViewModel, o
         item("type-heading") { SectionHeader("服务类型", Modifier.padding(top = 12.dp)) }
         item("type") {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                ProviderCard("自建服务", "Qwen3-ASR 等，异步任务接口", openAi.not(), { model.chooseSttProvider(SttProvider.SELF_HOSTED) }, Modifier.weight(1f).testTag("stt-provider-self"))
-                ProviderCard("OpenAI 兼容", "第三方识别，/audio/transcriptions", openAi, { model.chooseSttProvider(SttProvider.OPENAI_COMPATIBLE) }, Modifier.weight(1f).testTag("stt-provider-openai"))
+                ProviderCard("自建服务", "Qwen3-ASR 等自己部署的服务", openAi.not(), { model.chooseSttProvider(SttProvider.SELF_HOSTED) }, Modifier.weight(1f).testTag("stt-provider-self"))
+                ProviderCard("OpenAI 兼容", "第三方识别服务，填模型名", openAi, { model.chooseSttProvider(SttProvider.OPENAI_COMPATIBLE) }, Modifier.weight(1f).testTag("stt-provider-openai"))
             }
         }
         item("server-heading") { SectionHeader("服务器", Modifier.padding(top = 12.dp)) }

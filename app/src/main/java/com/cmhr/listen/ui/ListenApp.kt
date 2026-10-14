@@ -437,7 +437,7 @@ fun ListenApp(
     }
     if (pickingStartCourse) CoursePickerDialog(
         title = "这节课是哪门课？",
-        message = "只是先选一个，录完还可以改。",
+        message = "录完自动保存到这门课，之后也能再换。",
         courses = courseState.courseSummaries,
         initialCourseId = startCourseId,
         confirmLabel = "确定",
