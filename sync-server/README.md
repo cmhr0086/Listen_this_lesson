@@ -59,7 +59,7 @@ pytest -q
 
 | 前缀 | 鉴权 | 用途 |
 |---|---|---|
-| `/api/public/v1` | 无（只读） | 课程、课堂、详情、搜索、TXT 导出，只返回已批准且未下架的版本 |
+| `/api/public/v1` | 无；读者 Token 可选 | 课程、课堂、详情、搜索、TXT 导出，只返回已批准且未下架的版本；原文只给获准读者。小程序读者在这里登录 |
 | `/api/publish/v1` | 上传者 Token | Android 提交版本、查询审核状态、申请撤回 |
 | `/api/admin/v1`、`/admin` | `PUBLISH_ADMIN_TOKEN` | 审核、下架/恢复、开通上传者；`/admin` 是适配手机的审核页 |
 
@@ -75,5 +75,6 @@ docker run -d --name listen-publish \
 ```
 
 - `PUBLISH_ADMIN_TOKEN` 未配置时管理接口一律 401。上传者 Token 在 `/admin` 开通或重置时只显示一次，服务端只存 SHA-256。
+- `WECHAT_APPID`、`WECHAT_SECRET` 是小程序的 AppID 和 AppSecret，用于读者登录（`POST /api/public/v1/auth/wechat`）。未配置时登录返回 503，读者仍可匿名看笔记。课堂原文只给在 `/admin`「原文权限」里允许的读者。AppSecret 和管理员 Token 一样只放在 env 文件里。
 - `PUBLISH_CORS_ORIGINS` 仅网页阅读端需要（逗号分隔）；小程序不受 CORS 限制，但要在小程序后台配置 request / downloadFile 合法域名。
 - `PUBLISH_TIMEZONE` 控制 TXT 中的时间显示，默认 `Asia/Shanghai`。

@@ -228,6 +228,7 @@ const TABS = [
   { key: "pending", label: "待审课程", short: "待审", badge: "pendingCourses", hot: true },
   { key: "courses", label: "全部课程", short: "全部课程" },
   { key: "withdraw", label: "撤回申请", short: "撤回", badge: "withdrawRequests" },
+  { key: "readers", label: "原文权限", short: "原文", badge: "pendingReaders" },
   { key: "uploaders", label: "上传者", short: "上传者" },
   { key: "audit", label: "操作日志", short: "日志" },
 ];
@@ -237,7 +238,9 @@ const ACTIONS = {
   "course.request": "申请公开课程", "course.approved": "批准课程", "course.rejected": "驳回课程", "course.taken_down": "下架课程",
   "lesson.publish": "上传课堂", "lesson.withdraw_request": "申请撤回课堂", "lesson.taken_down": "下架课堂", "lesson.active": "恢复课堂",
   "uploader.create": "新建上传者", "uploader.rotate": "更换 Token", "uploader.disabled": "停用上传者", "uploader.active": "启用上传者",
+  "reader.request_transcripts": "申请查看原文", "reader.approve": "允许查看原文", "reader.revoke": "收回原文权限",
 };
+const READER_ACCESS = { none: "未申请", pending: "等待批准", approved: "可看原文", revoked: "已收回" };
 const ICON = {
   check: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
   chev: '<svg class="chev" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>',
@@ -324,7 +327,7 @@ async function render() {
   view.innerHTML = `<p class="muted">加载中…</p>`;
   refreshSummary();
   try {
-    await ({ pending: renderCourses, courses: renderCourses, withdraw: renderWithdraw, uploaders: renderUploaders, audit: renderAudit })[state.tab]();
+    await ({ pending: renderCourses, courses: renderCourses, withdraw: renderWithdraw, readers: renderReaders, uploaders: renderUploaders, audit: renderAudit })[state.tab]();
   } catch (error) {
     view.innerHTML = `<div class="banner">${esc(error.message)}</div><button class="btn" type="button" data-act="retry">重试</button>`;
   }
@@ -510,6 +513,42 @@ async function lessonAct(button) {
   } catch (e) { button.disabled = false; alert(e.message); }
 }
 
+// ---- readers -------------------------------------------------------------------------------
+
+async function renderReaders() {
+  const { readers } = await api("/readers");
+  const rows = readers.map((r) => `<tr>
+      <td class="mono" style="white-space:nowrap">#${r.readerId} <span class="muted">${esc(r.openidHint)}</span></td>
+      <td>${pill(r.transcriptAccess === "approved" ? "active" : r.transcriptAccess === "pending" ? "pending" : "disabled", READER_ACCESS[r.transcriptAccess])}</td>
+      <td style="color:var(--ink-2)">${esc(r.requestNote || "—")}</td>
+      <td class="mono" style="font-size:14px;color:var(--ink-2)">${short(r.requestedAt)}</td>
+      <td class="mono" style="font-size:14px"><span class="muted">${short(r.lastSeenAt)}</span></td>
+      <td class="actions">
+        ${r.transcriptAccess === "approved"
+          ? `<button type="button" class="btn small plain-danger" data-reader="revoke" data-id="${r.readerId}">收回</button>`
+          : `<button type="button" class="btn small" style="color:var(--primary)" data-reader="approve" data-id="${r.readerId}">允许</button>`}
+      </td></tr>`).join("");
+  view.innerHTML = `<div class="stack">
+    <div><h1>原文权限</h1><p class="lede">笔记对所有人公开；课堂原文只给这里允许的小程序用户看，对所有课程生效。用户在小程序里申请时可以留一句话，方便你认出是谁。</p></div>
+    ${flash()}
+    <section class="card" aria-label="读者列表" style="overflow:hidden">
+      ${readers.length ? `<div class="scroll"><table style="min-width:720px">
+        <thead><tr><th scope="col">读者</th><th scope="col">原文</th><th scope="col">申请留言</th><th scope="col">申请于</th><th scope="col">最近登录</th><th scope="col">操作</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>` : `<div class="empty" style="margin:16px">还没有人在小程序里登录过。</div>`}
+    </section></div>`;
+}
+
+async function readerAct(button) {
+  const action = button.dataset.reader;
+  if (action === "revoke" && !confirm("收回这位读者查看原文的权限？")) return;
+  button.disabled = true;
+  try {
+    await post(`/readers/${button.dataset.id}/${action}`);
+    state.flash = action === "approve" ? "已允许查看原文。" : "已收回原文权限。";
+    render();
+  } catch (e) { button.disabled = false; alert(e.message); }
+}
+
 // ---- uploaders -----------------------------------------------------------------------------
 
 async function renderUploaders() {
@@ -602,6 +641,7 @@ view.addEventListener("click", (e) => {
   else if (t.dataset.decide) decide(t);
   else if (t.dataset.lessonAct) lessonAct(t);
   else if (t.dataset.uploader) uploaderAct(t);
+  else if (t.dataset.reader) readerAct(t);
   else if (t.dataset.peek) go("courses", { filter: "all", courseId: t.dataset.peek, lessonId: t.dataset.id });
   else if (t.dataset.act === "back") { state.courseId = null; render(); }
   else if (t.dataset.act === "retry") render();

@@ -67,16 +67,21 @@ audit_log        id, at, actor(uploader:<id>|admin), action, target, detail
 
 ## 4. 接口
 
-### 4.1 公开只读 `/api/public/v1`（匿名，只有 GET 请求）
+### 4.1 公开 `/api/public/v1`（内容只读；读者登录可选）
 
 | 接口 | 返回 |
 |---|---|
 | `GET /courses?school=&term=` | 课程列表（只含已批准的课程）：四项信息、公开课堂数、最近一节的时间 |
 | `GET /courses/{courseId}/lessons?cursor=` | 课堂列表（按开始时间倒序）：标题、主题、日期、时长、上传者昵称、笔记数、重点数 |
-| `GET /lessons/{lessonId}` | 课堂详情：课程信息、标题、主题、时间、`segments[]`（`displayText` 优先取纠正后的文字，`marked`）、`notes[]`、公开版本更新时间 |
-| `GET /search?q=&courseId=&cursor=` | 搜索命中：lessonId、课程和课堂标题、命中类型（`segment` 或 `note`）、定位信息（片段 seq 或笔记 noteId 加偏移）、带前后文的摘要 |
-| `GET /lessons/{lessonId}/export.txt?parts=transcript,notes` | UTF-8 编码的 TXT，网页和小程序用同一份格式 |
+| `GET /lessons/{lessonId}` | 课堂详情：课程信息、标题、主题、时间、`notes[]`、公开版本更新时间、`segmentCount`。`segments[]`（`displayText` 优先取纠正后的文字，`marked`）只对获准读者填写，其他人拿到空数组和 `transcriptHidden: true` |
+| `GET /search?q=&courseId=&cursor=` | 搜索命中：lessonId、课程和课堂标题、命中类型（`segment` 或 `note`）、定位信息（片段 seq 或笔记 noteId 加偏移）、带前后文的摘要。只有获准读者能搜到 `segment` |
+| `GET /lessons/{lessonId}/export.txt?parts=transcript,notes` | UTF-8 编码的 TXT，网页和小程序用同一份格式。不带 `parts` 时给笔记，获准读者再加原文；未获准却要 `transcript` 返回 403 |
+| `POST /auth/wechat {code}` | 小程序 `wx.login` 的 code 换 openid（服务端调用 `jscode2session`，不保存 session_key），返回 30 天有效的读者 Token（`lr_…`）和 `transcriptAccess` |
+| `GET /me` | 当前读者的 `transcriptAccess`：`none`、`pending`、`approved`、`revoked`；Token 无效或过期返回 401 |
+| `POST /me/transcript-access {note?}` | 申请查看原文，可留一句话让管理员认出是谁 |
+| `GET /me/timetable`、`PUT /me/timetable {timetable, updatedAt}` | 读者的课程表，随微信账号同步。按手机上的修改时间 `updatedAt` 后写者胜；上传的比服务器旧时返回 409 并带回服务器那份 |
 
+- **原文只给获准读者**：笔记对所有人公开；课堂原文只给管理员允许的读者（按 openid，全局生效，不分课程）。读者在请求头里带 `Authorization: Bearer lr_…`；Token 缺失、无效或过期都按匿名处理，只给笔记。与读者有关的响应带 `Cache-Control: private, no-cache` 和 `Vary: Authorization`：共享缓存不会把原文给了别人，刚获准的读者下一次打开就能看到原文（内容没变时由 ETag 回 304）。
 - 下架的课堂、没有公开版本的课堂、课程未批准的课堂，在所有入口都返回 404。分页用 cursor，只按条数分页，不靠“没返回”来判断数据已被删除。
 - 搜索第一版直接对**当前公开版本**的片段和笔记做 `LIKE` 查询。规模在千节课以内都够用；以后数据量大了，再换成 FTS5 trigram 索引。
   - `LIKE` 不受“中文至少 3 个字”的限制，搜两个字也能命中。
@@ -119,7 +124,7 @@ audit_log        id, at, actor(uploader:<id>|admin), action, target, detail
 
 | 接口 | 说明 |
 |---|---|
-| `GET /summary` | 待审课程数、撤回申请数（后台标签上的数字） |
+| `GET /summary` | 待审课程数、待批原文申请数、撤回申请数（后台标签上的数字） |
 | `GET /courses?status=pending\|all\|approved\|rejected\|taken_down` | 课程列表；待审队列按申请时间先后排，`reRequested` 标出重新申请的课程 |
 | `GET /courses/{id}` | 课程信息和全部课堂 |
 | `POST /courses/{id}/approve`、`/reject {note}`、`/takedown {note}` | 批准、驳回（理由显示给上传者）、下架整门课，写入审核日志 |
@@ -128,6 +133,8 @@ audit_log        id, at, actor(uploader:<id>|admin), action, target, detail
 | `POST /lessons/{id}/takedown`、`/restore` | 下架或恢复单节课，下架同时了结撤回申请 |
 | `GET /uploaders`、`POST /uploaders` | 上传者列表（含负责的课程、最近上传时间）；开通上传者，**Token 只在这时显示一次** |
 | `POST /uploaders/{id}/disable`、`/enable`、`/rotate-token` | 停用、启用上传者、更换 Token |
+| `GET /readers?status=` | 小程序读者：openid 只露首尾、申请留言、原文权限、最近登录 |
+| `POST /readers/{id}/approve`、`/revoke` | 允许或收回查看原文 |
 | `GET /audit` | 最近 100 条操作日志 |
 
 - `/admin` 是服务端自带的单页（HTML 加 fetch），电脑上左右分栏，手机上列表和详情分屏，底部固定审核按钮。管理员 Token 只存在浏览器标签页里。读者在网页和小程序里都看不到它。

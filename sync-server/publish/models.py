@@ -113,3 +113,40 @@ class AuditLog(Base):
     action: Mapped[str] = mapped_column(Text, nullable=False)
     target: Mapped[str] = mapped_column(Text, nullable=False)
     detail: Mapped[str | None] = mapped_column(Text)
+
+
+class Reader(Base):
+    """A mini program user, known only by openid. Transcripts need an admin-approved reader."""
+
+    __tablename__ = "readers"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    openid: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    # none | pending | approved | revoked
+    transcriptAccess: Mapped[str] = mapped_column(Text, nullable=False, default="none")
+    requestNote: Mapped[str | None] = mapped_column(Text)
+    requestedAt: Mapped[int | None] = mapped_column(Integer)
+    reviewedAt: Mapped[int | None] = mapped_column(Integer)
+    createdAt: Mapped[int] = mapped_column(Integer, nullable=False)
+    lastSeenAt: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class ReaderSession(Base):
+    __tablename__ = "reader_sessions"
+
+    tokenHash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    readerId: Mapped[int] = mapped_column(ForeignKey("readers.id"), nullable=False, index=True)
+    createdAt: Mapped[int] = mapped_column(Integer, nullable=False)
+    expiresAt: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+
+
+class ReaderTimetable(Base):
+    """A reader's timetable as the mini program stores it, so it follows them to another phone."""
+
+    __tablename__ = "reader_timetables"
+
+    readerId: Mapped[int] = mapped_column(ForeignKey("readers.id"), primary_key=True)
+    data: Mapped[str] = mapped_column(Text, nullable=False)
+    # When the phone last changed it; the newer copy wins.
+    updatedAt: Mapped[int] = mapped_column(Integer, nullable=False)
+    savedAt: Mapped[int] = mapped_column(Integer, nullable=False)

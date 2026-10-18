@@ -25,12 +25,15 @@ from app.database import create_sync_engine
 
 from starlette.concurrency import run_in_threadpool
 
-from . import queries, service
+from . import queries, readers, service
 from .timetable_pdf import TimetableError, parse_timetable
 from .database import initialize_database
-from .models import AuditLog, Course, Lesson, Revision, RevisionNote, RevisionSegment, Uploader
+from .models import AuditLog, Course, Lesson, Reader, Revision, RevisionNote, RevisionSegment, Uploader
 from .schemas import (
     CourseStatus,
+    ReaderAccessRequest,
+    TimetableUpload,
+    WechatLogin,
     LessonSubmissions,
     ReviewDecision,
     RevisionStatus,
@@ -43,12 +46,15 @@ from .schemas import (
 MAX_SUBMISSION_BYTES = 8 * 1024 * 1024
 MAX_TIMETABLE_PDF_BYTES = 2 * 1024 * 1024
 TIMETABLE_PDF_PER_HOUR = 20
+WECHAT_LOGINS_PER_HOUR = 30
 ADMIN_PAGE = Path(__file__).with_name("admin.html")
 
 
 def create_app(database_url: str | None = None) -> FastAPI:
     engine = create_sync_engine(database_url or os.getenv("PUBLISH_DATABASE_URL", "sqlite:////data/listen-publish.db"))
     admin_token = os.getenv("PUBLISH_ADMIN_TOKEN")
+    wechat_appid = os.getenv("WECHAT_APPID")
+    wechat_secret = os.getenv("WECHAT_SECRET")
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -88,6 +94,18 @@ def create_app(database_url: str | None = None) -> FastAPI:
             raise unauthorized()
         return uploader
 
+    def optional_reader(
+        authorization: Annotated[str | None, Header()] = None, db: Session = Depends(get_db)
+    ) -> Reader | None:
+        # Content endpoints treat a missing or expired reader token as anonymous: notes only.
+        token = bearer(authorization)
+        return readers.authenticate(db, token) if token else None
+
+    def require_reader(reader: Reader | None = Depends(optional_reader)) -> Reader:
+        if reader is None:
+            raise unauthorized()
+        return reader
+
     def require_admin(authorization: Annotated[str | None, Header()] = None) -> None:
         token = bearer(authorization)
         if not (admin_token and token and secrets.compare_digest(token, admin_token)):
@@ -101,10 +119,15 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     public = APIRouter(prefix="/api/public/v1")
 
-    def cached(request: Request, payload) -> Response:
+    def cached(request: Request, payload, reader_aware: bool = False) -> Response:
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
         etag = 'W/"' + hashlib.sha256(body).hexdigest()[:32] + '"'
         headers = {"ETag": etag, "Cache-Control": "public, max-age=30"}
+        if reader_aware:
+            # The same URL answers differently for allowed readers; keep shared caches out of it.
+            # no-cache: always revalidate, so a reader allowed a moment ago sees the transcript at
+            # once; the ETag keeps unchanged answers to a 304.
+            headers.update({"Cache-Control": "private, no-cache", "Vary": "Authorization"})
         if request.headers.get("if-none-match") == etag:
             return Response(status_code=304, headers=headers)
         return Response(body, media_type="application/json", headers=headers)
@@ -133,11 +156,13 @@ def create_app(database_url: str | None = None) -> FastAPI:
         return cached(request, page)
 
     @public.get("/lessons/{lesson_id}")
-    def lesson(request: Request, lesson_id: str, db: Session = Depends(get_db)):
-        detail = queries.lesson_detail(db, lesson_id)
+    def lesson(
+        request: Request, lesson_id: str, reader: Reader | None = Depends(optional_reader), db: Session = Depends(get_db)
+    ):
+        detail = queries.lesson_detail(db, lesson_id, transcripts=readers.can_read_transcripts(reader))
         if detail is None:
             raise not_found("课堂不存在或已下架")
-        return cached(request, detail)
+        return cached(request, detail, reader_aware=True)
 
     @public.get("/search")
     def search(
@@ -146,23 +171,36 @@ def create_app(database_url: str | None = None) -> FastAPI:
         courseId: str | None = None,
         cursor: str | None = None,
         limit: Annotated[int, Query(ge=1, le=50)] = 20,
+        reader: Reader | None = Depends(optional_reader),
         db: Session = Depends(get_db),
     ):
         query = q.strip()
         if not query:
             raise HTTPException(400, "请输入关键词")
         try:
-            return cached(request, queries.search(db, query, courseId, cursor, limit))
+            hits = queries.search(db, query, courseId, cursor, limit, transcripts=readers.can_read_transcripts(reader))
+            return cached(request, hits, reader_aware=True)
         except ValueError as error:
             raise HTTPException(400, str(error)) from error
 
     @public.get("/lessons/{lesson_id}/export.txt")
-    def export(lesson_id: str, parts: str = "transcript,notes", db: Session = Depends(get_db)):
-        wanted = {part.strip() for part in parts.split(",") if part.strip()}
-        if not wanted or not wanted <= {"transcript", "notes"}:
-            raise HTTPException(400, "parts 只能是 transcript、notes 或两者")
+    def export(
+        lesson_id: str,
+        parts: str | None = None,
+        reader: Reader | None = Depends(optional_reader),
+        db: Session = Depends(get_db),
+    ):
+        allowed = readers.can_read_transcripts(reader)
+        # Without parts: notes, plus the transcript for readers allowed to see it.
+        wanted = {"notes", "transcript"} if allowed else {"notes"}
+        if parts is not None:
+            wanted = {part.strip() for part in parts.split(",") if part.strip()}
+            if not wanted or not wanted <= {"transcript", "notes"}:
+                raise HTTPException(400, "parts 只能是 transcript、notes 或两者")
+            if "transcript" in wanted and not allowed:
+                raise HTTPException(403, "原文只对获准的读者开放")
         try:
-            result = queries.export_txt(db, lesson_id, wanted)
+            result = queries.export_txt(db, lesson_id, wanted, refuse_empty_notes=parts is not None)
         except LookupError as error:
             raise HTTPException(409, str(error)) from error
         if result is None:
@@ -173,7 +211,8 @@ def create_app(database_url: str | None = None) -> FastAPI:
             media_type="text/plain; charset=utf-8",
             headers={
                 "Content-Disposition": f"attachment; filename=\"lesson.txt\"; filename*=UTF-8''{quote(filename)}",
-                "Cache-Control": "public, max-age=30",
+                "Cache-Control": "private, no-cache",
+                "Vary": "Authorization",
             },
         )
 
@@ -201,6 +240,48 @@ def create_app(database_url: str | None = None) -> FastAPI:
             return await run_in_threadpool(parse_timetable, body)
         except TimetableError as error:
             raise HTTPException(422, str(error)) from error
+
+    # ---- readers (mini program sign-in) -----------------------------------------------
+
+    login_calls: dict[str, list[float]] = {}
+
+    @public.post("/auth/wechat")
+    async def wechat_login(body: WechatLogin, request: Request, db: Session = Depends(get_db)):
+        if not (wechat_appid and wechat_secret):
+            raise HTTPException(503, "服务端未配置微信登录")
+        client = request.headers.get("x-real-ip") or (request.client.host if request.client else "")
+        now = time.monotonic()
+        recent = [t for t in login_calls.get(client, []) if now - t < 3600]
+        if len(recent) >= WECHAT_LOGINS_PER_HOUR:
+            raise HTTPException(429, "登录太频繁，请稍后再试")
+        login_calls[client] = recent + [now]
+        if len(login_calls) > 10_000:
+            login_calls.clear()
+        openid = await run_in_threadpool(readers.code_to_openid, wechat_appid, wechat_secret, body.code)
+        reader, token, expires = readers.sign_in(db, openid)
+        return {"token": token, "expiresAt": expires, "reader": readers.reader_dict(reader)}
+
+    @public.get("/me")
+    def reader_me(reader: Reader = Depends(require_reader)):
+        return readers.reader_dict(reader)
+
+    @public.post("/me/transcript-access")
+    def reader_request_access(
+        body: ReaderAccessRequest | None = None, reader: Reader = Depends(require_reader), db: Session = Depends(get_db)
+    ):
+        return readers.reader_dict(readers.request_access(db, reader, body.note if body else None))
+
+    @public.get("/me/timetable")
+    def reader_timetable(reader: Reader = Depends(require_reader), db: Session = Depends(get_db)):
+        return JSONResponse(readers.timetable(db, reader), headers={"Cache-Control": "no-store"})
+
+    @public.put("/me/timetable")
+    def reader_save_timetable(body: TimetableUpload, reader: Reader = Depends(require_reader), db: Session = Depends(get_db)):
+        try:
+            return readers.save_timetable(db, reader, body.timetable, body.updatedAt)
+        except readers.TimetableConflict as conflict:
+            # Changed later on another phone: hand that copy back so this one can take it.
+            return JSONResponse(status_code=409, content={"detail": "课表在另一台手机上更新过", **conflict.current})
 
     # ---- uploaders ----------------------------------------------------------------------
 
@@ -344,6 +425,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
         """Counts behind the badges on the admin tabs."""
         return {
             "pendingCourses": db.scalar(select(func.count()).select_from(Course).where(Course.status == "pending")),
+            "pendingReaders": db.scalar(select(func.count()).select_from(Reader).where(Reader.transcriptAccess == "pending")),
             "withdrawRequests": db.scalar(
                 select(func.count()).select_from(Lesson)
                 .where(Lesson.withdrawRequestedAt.is_not(None), Lesson.publishedRevisionId.is_not(None))
@@ -454,6 +536,24 @@ def create_app(database_url: str | None = None) -> FastAPI:
     @admin.post("/uploaders/{uploader_id}/enable")
     def admin_enable(uploader_id: int, db: Session = Depends(get_db)):
         return uploader_dict(service.set_uploader_status(db, uploader_id, "active"))
+
+    @admin.get("/readers")
+    def admin_readers(status: str = "all", db: Session = Depends(get_db)):
+        stmt = select(Reader)
+        if status != "all":
+            stmt = stmt.where(Reader.transcriptAccess == status)
+        rows = db.scalars(stmt.order_by(Reader.requestedAt.desc().nulls_last(), Reader.lastSeenAt.desc()).limit(200))
+        return {"readers": [readers.admin_reader_dict(reader) for reader in rows]}
+
+    @admin.post("/readers/{reader_id}/approve")
+    def admin_reader_approve(reader_id: int, db: Session = Depends(get_db)):
+        reader = service.require(db.get(Reader, reader_id), "读者不存在")
+        return readers.admin_reader_dict(readers.decide(db, reader, approved=True))
+
+    @admin.post("/readers/{reader_id}/revoke")
+    def admin_reader_revoke(reader_id: int, db: Session = Depends(get_db)):
+        reader = service.require(db.get(Reader, reader_id), "读者不存在")
+        return readers.admin_reader_dict(readers.decide(db, reader, approved=False))
 
     @admin.get("/audit")
     def admin_audit(db: Session = Depends(get_db)):

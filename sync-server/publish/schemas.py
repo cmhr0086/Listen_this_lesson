@@ -151,3 +151,19 @@ class UploaderCreate(StrictModel):
     displayName: str = Field(max_length=50)
 
     _name = field_validator("displayName")(_required_text)
+
+
+class WechatLogin(StrictModel):
+    code: str = Field(min_length=1, max_length=128)
+
+
+class ReaderAccessRequest(StrictModel):
+    # Lets the admin tell which openid is whose ("我是小林").
+    note: str | None = Field(default=None, max_length=50)
+
+    _note = field_validator("note")(_optional_text)
+
+
+class TimetableUpload(StrictModel):
+    timetable: dict
+    updatedAt: Timestamp
