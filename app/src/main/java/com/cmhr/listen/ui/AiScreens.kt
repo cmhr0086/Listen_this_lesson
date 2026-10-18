@@ -489,7 +489,9 @@ fun AiResultDetailScreen(
     resultId: Long,
     model: AiViewModel,
     developerMode: Boolean = false,
-    onComposerClearanceChanged: (Dp) -> Unit = {}
+    onComposerClearanceChanged: (Dp) -> Unit = {},
+    /** Opened from the notes tab, which already shows the notes in full: keep them folded as context. */
+    notesAsContext: Boolean = false
 ) {
     val result by model.result(resultId).collectAsStateWithLifecycle(initialValue = null)
     val sourceSegments by model.resultSourceSegments(resultId).collectAsStateWithLifecycle(initialValue = emptyList())
@@ -500,6 +502,7 @@ fun AiResultDetailScreen(
     val aiState by model.uiState.collectAsStateWithLifecycle()
     var question by remember { mutableStateOf("") }
     var pendingAttachments by remember { mutableStateOf(emptyList<PendingAiAttachment>()) }
+    var notesExpanded by remember(resultId) { mutableStateOf(false) }
     val context = LocalContext.current
     val clipboard = remember(context) { context.getSystemService(ClipboardManager::class.java) }
     val correction = remember(result?.correctionPayload, sourceSegments) {
@@ -532,7 +535,23 @@ fun AiResultDetailScreen(
         ) {
             val value = result
             if (value == null) item("loading-result") { Text("正在加载 AI 结果……") }
-            else {
+            else if (notesAsContext && value.status == AiRequestStatus.SUCCESS.name) {
+                item("notes-context") {
+                    ConversationContextCard(value.output.orEmpty(), notesExpanded, title = "课堂笔记", markdown = true) {
+                        notesExpanded = !notesExpanded
+                    }
+                }
+                if (messages.isEmpty()) item("notes-follow-up-hint") {
+                    Text(
+                        "笔记里哪里没看懂、想展开或想换个说法，直接问。回答依据这节课的原文和这份笔记。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                items(messages, key = { "result-message-${it.id}" }) { message ->
+                    ChatMessageBubble(message, aiState.messageStreamPhases[message.id], model, clipboard)
+                }
+            } else {
                 item("result-heading") { Text(actionName(value.actionType), style = MaterialTheme.typography.titleLarge) }
                 item("result-summary") {
                     when (value.status) {
@@ -1159,15 +1178,22 @@ private fun AiChatComposer(
 }
 
 @Composable
-private fun ConversationContextCard(snapshot: String, expanded: Boolean, toggle: () -> Unit) {
+private fun ConversationContextCard(
+    snapshot: String,
+    expanded: Boolean,
+    title: String = "课堂原文",
+    markdown: Boolean = false,
+    toggle: () -> Unit
+) {
     val preview = snapshot.lineSequence().take(6).joinToString("\n")
     GroupCard(Modifier.fillMaxWidth().clickable(onClick = toggle)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("课堂原文", style = MaterialTheme.typography.titleMedium)
+                Text(title, style = MaterialTheme.typography.titleMedium)
                 Text(if (expanded) "收起" else "展开", color = MaterialTheme.colorScheme.primary)
             }
-            Text(
+            if (markdown) MarkdownText(snapshot, maxLines = if (expanded) Int.MAX_VALUE else 6)
+            else Text(
                 if (expanded || preview.length == snapshot.length) snapshot else "$preview\n……",
                 style = MaterialTheme.typography.bodyMedium
             )

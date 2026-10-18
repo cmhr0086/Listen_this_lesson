@@ -192,6 +192,7 @@ private fun routeTitle(route: String?): String = when (route) {
     "settings/asr-diagnostics/history/{recordId}" -> "ASR 诊断历史"
     "record/{recordId}/ai-results" -> "AI 结果"
     "record/{recordId}/ai-result/{resultId}" -> "AI 结果详情"
+    "record/{recordId}/ai-result/{resultId}/ask" -> "笔记追问"
     "record/{recordId}/ai-conversations" -> "AI 对话"
     "ai-conversation/{conversationId}" -> "课堂问答"
     else -> "课堂提问识别助手"
@@ -595,7 +596,7 @@ fun ListenApp(
                         editingRecordCoursePrompt = currentCourse != null
                     }
                 )
-                route == "record/{recordId}/ai-result/{resultId}" || route == "ai/result/{recordId}/{resultId}" || route == "ai-conversation/{conversationId}" -> TopAppBar(
+                route == "record/{recordId}/ai-result/{resultId}" || route == "record/{recordId}/ai-result/{resultId}/ask" || route == "ai/result/{recordId}/{resultId}" || route == "ai-conversation/{conversationId}" -> TopAppBar(
                     title = { Text(routeTitle(route)) },
                     navigationIcon = {
                         IconButton(onClick = { nav.popBackStack() }) {
@@ -825,6 +826,7 @@ fun ListenApp(
                     aiModel = ai,
                     openResult = { nav.navigate("record/$id/ai-result/$it") },
                     openConversation = { nav.navigate("ai-conversation/$it") },
+                    askAboutNotes = { nav.navigate("record/$id/ai-result/$it/ask") },
                     recordings = recordingState,
                     startCapture = { mode -> startCapture(id, mode) },
                     stopCapture = stt::endClass,
@@ -990,6 +992,16 @@ fun ListenApp(
                     ai,
                     settingsState.developerMode,
                     onComposerClearanceChanged = { aiComposerClearance = it }
+                )
+            }
+            composable("record/{recordId}/ai-result/{resultId}/ask") { entry ->
+                val resultId = entry.arguments?.getString("resultId")?.toLongOrNull() ?: return@composable
+                AiResultDetailScreen(
+                    resultId,
+                    ai,
+                    settingsState.developerMode,
+                    onComposerClearanceChanged = { aiComposerClearance = it },
+                    notesAsContext = true
                 )
             }
             composable("ai/result/{recordId}/{resultId}") { entry ->

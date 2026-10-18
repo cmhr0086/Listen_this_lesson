@@ -20,6 +20,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.AutoFixHigh
@@ -37,6 +38,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -48,7 +50,6 @@ import androidx.compose.material3.SecondaryTabRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
@@ -102,6 +103,7 @@ fun RecordDetailsScreen(
     aiModel: AiViewModel,
     openResult: (Long) -> Unit,
     openConversation: (Long) -> Unit,
+    askAboutNotes: (Long) -> Unit = openResult,
     recordings: RecordingUiState,
     startCapture: (CaptureMode) -> Unit,
     stopCapture: () -> Unit,
@@ -156,7 +158,7 @@ fun RecordDetailsScreen(
                     startCapture, stopCapture, pauseCapture, resumeCapture, recognizeAll,
                     startOfflineRecognition, stopOfflineRecognition, deleteRecording, markMoment
                 )
-                ClassTab.NOTES -> ClassNotesTab(recordId, segments, aiState, aiModel, openResult)
+                ClassTab.NOTES -> ClassNotesTab(recordId, segments, aiState, aiModel, openResult, askAboutNotes)
                 ClassTab.QA -> ClassQaTab(recordId, segments, conversations, aiState, aiModel, openConversation)
             }
         }
@@ -409,7 +411,8 @@ private fun ClassNotesTab(
     segments: List<TranscriptEntity>,
     aiState: AiUiState,
     aiModel: AiViewModel,
-    openResult: (Long) -> Unit
+    openResult: (Long) -> Unit,
+    askAboutNotes: (Long) -> Unit
 ) {
     val results by remember(recordId) { aiModel.results(recordId) }.collectAsStateWithLifecycle(initialValue = emptyList())
     val notes = results.filter { it.actionType == AiActionType.ORGANIZE_NOTES.name }.maxByOrNull { it.createdAt }
@@ -469,8 +472,11 @@ private fun ClassNotesTab(
                         when {
                             notes.status == AiRequestStatus.ERROR.name -> Text(notes.errorMessage ?: "请稍后重试。", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
                             !notes.output.isNullOrBlank() -> {
-                                MarkdownText(notes.output, maxLines = 18)
-                                TextButton(onClick = { openResult(notes.id) }, modifier = Modifier.testTag("open-notes")) { Text("展开全文与追问") }
+                                MarkdownText(notes.output)
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                                FilledTonalButton(onClick = { askAboutNotes(notes.id) }, modifier = Modifier.testTag("ask-about-notes")) {
+                                    Icon(Icons.AutoMirrored.Outlined.Chat, contentDescription = null, modifier = Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("就这份笔记追问")
+                                }
                             }
                         }
                     }
