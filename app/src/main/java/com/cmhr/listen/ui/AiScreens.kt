@@ -944,7 +944,7 @@ internal fun MarkdownText(markdown: String, modifier: Modifier = Modifier, maxLi
             view.textSize = fontSize
             view.maxLines = maxLines
             view.ellipsize = if (maxLines == Int.MAX_VALUE) null else android.text.TextUtils.TruncateAt.END
-            markwon.setMarkdown(view, markdown)
+            markwon.setMarkdown(view, normalizeAiMarkdown(markdown))
         }
     )
 }
@@ -974,6 +974,8 @@ private object MarkdownRenderer {
                 .usePlugin(StrikethroughPlugin.create())
                 .usePlugin(TaskListPlugin.create(context.applicationContext))
                 .usePlugin(HtmlPlugin.create())
+                // AI notes put one point per line; keep single line breaks instead of joining them.
+                .usePlugin(io.noties.markwon.SoftBreakAddsNewLinePlugin.create())
                 .usePlugin(object : io.noties.markwon.AbstractMarkwonPlugin() {
                     // Markwon's 2x/1.5x headings dwarf phone-width notes; keep them a step above body text.
                     override fun configureTheme(builder: io.noties.markwon.core.MarkwonTheme.Builder) {

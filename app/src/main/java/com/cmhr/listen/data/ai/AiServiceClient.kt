@@ -263,7 +263,9 @@ class AiServiceClient(
                         reasoningPresent = true
                         reasoning.append(reasoningChunk)
                     }
-                    val contentChunk = delta?.get("content")?.extractText().orEmpty().ifBlank {
+                    // Whitespace-only chunks ("\n\n", " ") carry Markdown structure; only fall back to
+                    // legacy `text` when the delta has no content at all.
+                    val contentChunk = delta?.get("content")?.extractText().orEmpty().ifEmpty {
                         choice?.get("text")?.extractText().orEmpty()
                     }
                     if (contentChunk.isNotEmpty()) content.append(contentChunk)

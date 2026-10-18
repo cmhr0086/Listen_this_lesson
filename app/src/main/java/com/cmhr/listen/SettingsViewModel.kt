@@ -84,7 +84,11 @@ data class UiMessage(val text: String)
 
 /** The AI prompts a user can edit, one page each. */
 enum class AiPromptKind(val label: String, val usage: String) {
-    NOTES("整理成笔记", "用于「笔记」标签和下课后自动整理。课堂原文和重点标记会自动附在后面，这里只写要求。"),
+    NOTES("整理成笔记", "所有笔记方向共用的规则，用于「笔记」标签和下课后自动整理。所选方向的要求接在它后面，课堂原文和重点标记会自动附上。"),
+    STYLE_DETAILED("方向 · 详细讲义", "选「详细讲义」整理笔记时，接在「整理成笔记」规则后面的要求。"),
+    STYLE_OUTLINE("方向 · 复习提纲", "选「复习提纲」整理笔记时，接在「整理成笔记」规则后面的要求。"),
+    STYLE_FRAMEWORK("方向 · 知识框架", "选「知识框架」整理笔记时，接在「整理成笔记」规则后面的要求。"),
+    STYLE_QA("方向 · 问答卡片", "选「问答卡片」整理笔记时，接在「整理成笔记」规则后面的要求。"),
     CORRECT("修正识别错误", "选中文字后「修正」时使用，只改明显的错字和标点。"),
     QUICK("快速回答", "从选中的课堂原文里找出老师的问题并逐条作答。"),
     CLASS_CHAT("课堂问答", "「问答」标签里的提问和追问；只依据冻结的课堂原文回答。"),
@@ -93,6 +97,10 @@ enum class AiPromptKind(val label: String, val usage: String) {
 
     fun read(value: AiPromptSettings): String = when (this) {
         NOTES -> value.organizeNotes
+        STYLE_DETAILED -> value.noteStyleDetailed
+        STYLE_OUTLINE -> value.noteStyleOutline
+        STYLE_FRAMEWORK -> value.noteStyleFramework
+        STYLE_QA -> value.noteStyleQaCards
         CORRECT -> value.correctAsr
         QUICK -> value.quickAnswer
         CLASS_CHAT -> value.customConversation
@@ -102,6 +110,10 @@ enum class AiPromptKind(val label: String, val usage: String) {
 
     fun write(value: AiPromptSettings, text: String): AiPromptSettings = when (this) {
         NOTES -> value.copy(organizeNotes = text)
+        STYLE_DETAILED -> value.copy(noteStyleDetailed = text)
+        STYLE_OUTLINE -> value.copy(noteStyleOutline = text)
+        STYLE_FRAMEWORK -> value.copy(noteStyleFramework = text)
+        STYLE_QA -> value.copy(noteStyleQaCards = text)
         CORRECT -> value.copy(correctAsr = text)
         QUICK -> value.copy(quickAnswer = text)
         CLASS_CHAT -> value.copy(customConversation = text)

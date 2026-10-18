@@ -1031,6 +1031,7 @@ fun AiPromptsSettingsScreen(state: SettingsUiState, model: SettingsViewModel, op
     var confirmRestore by remember { mutableStateOf(false) }
     val groups = listOf(
         "课堂" to listOf(AiPromptKind.NOTES, AiPromptKind.CORRECT, AiPromptKind.QUICK, AiPromptKind.CLASS_CHAT, AiPromptKind.IMAGE),
+        "笔记方向" to listOf(AiPromptKind.STYLE_DETAILED, AiPromptKind.STYLE_OUTLINE, AiPromptKind.STYLE_FRAMEWORK, AiPromptKind.STYLE_QA),
         "其他" to listOf(AiPromptKind.GENERAL)
     )
     SettingsPage {

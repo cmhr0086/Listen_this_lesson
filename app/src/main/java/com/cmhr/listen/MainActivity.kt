@@ -1,5 +1,7 @@
 package com.cmhr.listen
 
+import kotlinx.coroutines.launch
+import androidx.lifecycle.lifecycleScope
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -30,6 +32,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        lifecycleScope.launch { DemoData.seedIfEmpty(applicationContext) }
         val appearance = AppSettingsRepository(applicationContext).settings.map { it.appearance }
         setContent {
             // Initial null keeps the default theme for the first frame instead of flashing another one.

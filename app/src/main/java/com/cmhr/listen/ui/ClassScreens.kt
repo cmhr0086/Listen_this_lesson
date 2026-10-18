@@ -1,5 +1,10 @@
 package com.cmhr.listen.ui
 
+import com.cmhr.listen.data.ai.NoteStyle
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material.icons.outlined.Check
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -418,7 +423,18 @@ private fun ClassNotesTab(
     val notes = results.filter { it.actionType == AiActionType.ORGANIZE_NOTES.name }.maxByOrNull { it.createdAt }
     val others = results.filter { it.id != notes?.id }.sortedByDescending { it.createdAt }
     val clipboard = LocalClipboardManager.current
-    val regenerate = { aiModel.runFullRecordAction(recordId, AiActionType.ORGANIZE_NOTES, segments) { } }
+    val lastStyle by aiModel.lastNoteStyle.collectAsStateWithLifecycle(initialValue = NoteStyle.DEFAULT)
+    val notesStyle = notes?.let { NoteStyle.fromPrompt(it.requestPrompt) }
+    var pickingStyle by rememberSaveable(recordId) { mutableStateOf(false) }
+    val regenerate = { pickingStyle = true }
+    if (pickingStyle) NoteStylePicker(
+        selected = notesStyle ?: lastStyle,
+        dismiss = { pickingStyle = false },
+        pick = { style ->
+            pickingStyle = false
+            aiModel.runFullRecordAction(recordId, AiActionType.ORGANIZE_NOTES, segments, noteStyle = style) { }
+        }
+    )
     LazyColumn(
         Modifier.fillMaxSize().testTag("class-notes"),
         contentPadding = PaddingValues(16.dp),
@@ -447,7 +463,7 @@ private fun ClassNotesTab(
                                     when (notes.status) {
                                         AiRequestStatus.PENDING.name -> "正在整理……"
                                         AiRequestStatus.ERROR.name -> "整理失败"
-                                        else -> "${notes.sourceSegmentLabel(segments)} · ${SimpleDateFormat("M月d日 HH:mm", Locale.CHINA).format(Date(notes.finishedAt ?: notes.createdAt))}"
+                                        else -> listOfNotNull(notes.sourceSegmentLabel(segments), notesStyle?.label).joinToString(" · ") + " · ${SimpleDateFormat("M月d日 HH:mm", Locale.CHINA).format(Date(notes.finishedAt ?: notes.createdAt))}"
                                     },
                                     style = MaterialTheme.typography.bodySmall,
                                     color = if (notes.status == AiRequestStatus.ERROR.name) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
@@ -517,6 +533,35 @@ private fun ClassNotesTab(
                     }
                 }
             }
+        }
+    }
+}
+
+/** Where the notes are headed; picking one starts organizing right away. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun NoteStylePicker(selected: NoteStyle, dismiss: () -> Unit, pick: (NoteStyle) -> Unit) {
+    ModalBottomSheet(onDismissRequest = dismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+        Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("整理方向", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(horizontal = 4.dp))
+            ListGroup {
+                NoteStyle.entries.forEachIndexed { index, style ->
+                    if (index > 0) ListDivider()
+                    ListRow(
+                        title = style.label,
+                        subtitle = style.description,
+                        trailing = if (style == selected) ({ Icon(Icons.Outlined.Check, contentDescription = "上次所选", tint = MaterialTheme.colorScheme.primary) }) else null,
+                        onClick = { pick(style) },
+                        modifier = Modifier.testTag("note-style-${style.name.lowercase()}")
+                    )
+                }
+            }
+            Text(
+                "每个方向的要求可以在「设置 → AI 提示词」里修改。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 4.dp)
+            )
         }
     }
 }
