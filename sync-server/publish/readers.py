@@ -59,7 +59,7 @@ def authenticate(db: Session, token: str) -> Reader | None:
 
 
 def can_read_transcripts(reader: Reader | None) -> bool:
-    return reader is not None and reader.transcriptAccess == "approved"
+    return reader is not None and (reader.transcriptAccess == "approved" or reader.isAdmin)
 
 
 def request_access(db: Session, reader: Reader, note: str | None) -> Reader:
@@ -80,8 +80,20 @@ def decide(db: Session, reader: Reader, approved: bool) -> Reader:
     return reader
 
 
+def set_admin(db: Session, reader: Reader, value: bool) -> Reader:
+    reader.isAdmin = value
+    audit(db, "admin", "reader.make_admin" if value else "reader.remove_admin", str(reader.id))
+    db.commit()
+    return reader
+
+
 def reader_dict(reader: Reader) -> dict:
-    return {"readerId": reader.id, "transcriptAccess": reader.transcriptAccess, "requestedAt": reader.requestedAt}
+    return {
+        "readerId": reader.id,
+        "transcriptAccess": reader.transcriptAccess,
+        "requestedAt": reader.requestedAt,
+        "isAdmin": bool(reader.isAdmin),
+    }
 
 
 def admin_reader_dict(reader: Reader) -> dict:

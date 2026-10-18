@@ -120,7 +120,7 @@ audit_log        id, at, actor(uploader:<id>|admin), action, target, detail
 - 第一次有课堂上传到某门课时创建课程，状态为 `pending`，记下申请人和时间。
 - 如果和当前公开版本的 `contentHash` 完全相同，直接返回 `unchanged`，不生成新版本。
 
-### 4.3 管理 `/api/admin/v1` 和 `/admin` 页面（管理员 Token，从环境变量读取）
+### 4.3 管理 `/api/admin/v1` 和 `/admin` 页面（管理员 Token 从环境变量读取；管理员读者的 Token 也可以）
 
 | 接口 | 说明 |
 |---|---|
@@ -135,6 +135,7 @@ audit_log        id, at, actor(uploader:<id>|admin), action, target, detail
 | `POST /uploaders/{id}/disable`、`/enable`、`/rotate-token` | 停用、启用上传者、更换 Token |
 | `GET /readers?status=` | 小程序读者：openid 只露首尾、申请留言、原文权限、最近登录 |
 | `POST /readers/{id}/approve`、`/revoke` | 允许或收回查看原文 |
+| `POST /readers/{id}/make-admin`、`/remove-admin` | 把小程序账号设为（或取消）管理员：它的读者 Token 也能调用整个管理接口，小程序「设置 › 管理」里审核；管理员可看全部原文 |
 | `GET /audit` | 最近 100 条操作日志 |
 
 - `/admin` 是服务端自带的单页（HTML 加 fetch），电脑上左右分栏，手机上列表和详情分屏，底部固定审核按钮。管理员 Token 只存在浏览器标签页里。读者在网页和小程序里都看不到它。
