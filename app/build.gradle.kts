@@ -45,6 +45,9 @@ android {
     }
     buildTypes {
         debug {
+            // Installs beside the real app with its own data, so testing never touches real classes.
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
             ndk {
                 abiFilters += listOf("arm64-v8a", "x86_64")
             }
