@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import create_app as create_sync_app
+from publish import readers
 from publish.main import create_app
 
 ADMIN_TOKEN = "test-admin-token"
@@ -16,6 +17,10 @@ ADMIN_TOKEN = "test-admin-token"
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("PUBLISH_ADMIN_TOKEN", ADMIN_TOKEN)
+    monkeypatch.setenv("WECHAT_APPID", "wx-test")
+    monkeypatch.setenv("WECHAT_SECRET", "secret")
+    # wx.login codes stand in for openids, so a test can sign the same person in twice.
+    monkeypatch.setattr(readers, "code_to_openid", lambda appid, secret, code: f"openid-{code}")
     app = create_app(f"sqlite:///{tmp_path / 'publish-test.db'}")
     with TestClient(app) as value:
         yield value
@@ -33,6 +38,20 @@ def new_uploader(client, name="小林"):
 
 def auth(token):
     return {"Authorization": f"Bearer {token}"}
+
+
+def sign_in(client, code="me"):
+    response = client.post("/api/public/v1/auth/wechat", json={"code": code})
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def transcript_reader(client, code="me"):
+    """Signs a reader in, requests transcript access and has the admin approve it."""
+    login = sign_in(client, code)
+    client.post("/api/public/v1/me/transcript-access", headers=auth(login["token"]), json={"note": "我"})
+    admin(client, "POST", f"/readers/{login['reader']['readerId']}/approve")
+    return auth(login["token"])
 
 
 def submission(*, session_id=None, title="第一课 极限", segments=None, notes=None, course=None, **extra):
@@ -118,7 +137,7 @@ def test_lessons_stay_hidden_until_their_course_is_approved(client):
     approve(client, result["courseId"])
     courses = client.get("/api/public/v1/courses").json()["courses"]
     assert [(c["courseName"], c["teacherName"], c["lessonCount"]) for c in courses] == [("高等数学", "张老师", 1)]
-    detail = client.get(f"/api/public/v1/lessons/{result['lessonId']}").json()
+    detail = client.get(f"/api/public/v1/lessons/{result['lessonId']}", headers=transcript_reader(client)).json()
     assert detail["title"] == "第一课 极限"
     assert detail["uploader"] == "小林"
     assert [s["displayText"] for s in detail["segments"]] == ["今天讲极限的定义", "ε-δ 语言"]
@@ -175,10 +194,10 @@ def test_admin_queue_is_first_come_first_served_with_tab_counts(client):
     first = submit(client, token, submission(course={"schoolName": "某某大学", "term": "T", "courseName": "甲课", "teacherName": "张"}))
     submit(client, token, submission(course={"schoolName": "某某大学", "term": "T", "courseName": "乙课", "teacherName": "张"}))
     assert [c["courseName"] for c in admin(client, "GET", "/courses")["courses"]] == ["甲课", "乙课"]
-    assert admin(client, "GET", "/summary") == {"pendingCourses": 2, "withdrawRequests": 0}
+    assert admin(client, "GET", "/summary") == {"pendingCourses": 2, "pendingReaders": 0, "withdrawRequests": 0}
     approve(client, first["courseId"])
     client.post(f"/api/publish/v1/lessons/{first['lessonId']}/withdraw-request", headers=auth(token), json={"reason": "录错了"})
-    assert admin(client, "GET", "/summary") == {"pendingCourses": 1, "withdrawRequests": 1}
+    assert admin(client, "GET", "/summary") == {"pendingCourses": 1, "pendingReaders": 0, "withdrawRequests": 1}
     row = admin(client, "GET", "/uploaders")["uploaders"][0]
     assert sorted(row["courseNames"]) == sorted(["甲课", "乙课"])
     assert row["lastUploadAt"] is not None
@@ -328,7 +347,7 @@ def test_lessons_page_newest_first_with_cursor(client):
 
 def test_search_finds_corrected_text_and_notes_and_escapes_wildcards(client):
     _, result = publish_one(client)
-    hits = client.get("/api/public/v1/search", params={"q": "ε-δ"}).json()["hits"]
+    hits = client.get("/api/public/v1/search", params={"q": "ε-δ"}, headers=transcript_reader(client)).json()["hits"]
     assert {hit["kind"] for hit in hits} == {"segment", "note"}
     segment = next(hit for hit in hits if hit["kind"] == "segment")
     assert segment["seq"] == 1 and segment["lessonId"] == result["lessonId"]
@@ -342,8 +361,9 @@ def test_search_finds_corrected_text_and_notes_and_escapes_wildcards(client):
 def test_search_pages_with_cursor(client):
     segments = [{"startTime": 1_760_000_000_000 + i * 1000, "endTime": 1_760_000_000_500 + i * 1000, "text": f"导数 第{i}段", "marked": False} for i in range(5)]
     publish_one(client, segments=segments, notes=[])
-    first = client.get("/api/public/v1/search", params={"q": "导数", "limit": 3}).json()
-    second = client.get("/api/public/v1/search", params={"q": "导数", "limit": 3, "cursor": first["nextCursor"]}).json()
+    reader = transcript_reader(client)
+    first = client.get("/api/public/v1/search", params={"q": "导数", "limit": 3}, headers=reader).json()
+    second = client.get("/api/public/v1/search", params={"q": "导数", "limit": 3, "cursor": first["nextCursor"]}, headers=reader).json()
     assert [h["seq"] for h in first["hits"] + second["hits"]] == [0, 1, 2, 3, 4]
     assert second["nextCursor"] is None
 
@@ -351,13 +371,14 @@ def test_search_pages_with_cursor(client):
 def test_export_txt_parts(client):
     _, result = publish_one(client)
     url = f"/api/public/v1/lessons/{result['lessonId']}/export.txt"
-    both = client.get(url)
+    reader = transcript_reader(client)
+    both = client.get(url, headers=reader)
     assert both.headers["content-type"] == "text/plain; charset=utf-8"
     assert "filename*=UTF-8''" in both.headers["content-disposition"]
     text = both.content.decode("utf-8")
     assert "高等数学 · 张老师" in text and "主题：函数极限" in text
     assert "★ ε-δ 语言" in text and "==== 笔记 1：课堂笔记 ====" in text
-    transcript = client.get(url, params={"parts": "transcript"}).text
+    transcript = client.get(url, params={"parts": "transcript"}, headers=reader).text
     assert "转写文字" in transcript and "笔记 1" not in transcript
     notes = client.get(url, params={"parts": "notes"}).text
     assert "课堂笔记" in notes and "今天讲极限" not in notes
@@ -386,7 +407,7 @@ def test_public_api_is_read_only(client):
 
 def test_admin_page_is_served(client):
     page = client.get("/admin")
-    assert page.status_code == 200 and "公开后台" in page.text
+    assert page.status_code == 200 and "公开后台" in page.text and "原文权限" in page.text
 
 
 def test_private_sync_data_never_reaches_the_public_api(tmp_path, monkeypatch, client):
@@ -407,7 +428,7 @@ def test_private_sync_data_never_reaches_the_public_api(tmp_path, monkeypatch, c
 def test_snippet_offset_points_into_the_snippet_for_long_text(client):
     long_text = "前" * 100 + "洛必达" + "后" * 100
     publish_one(client, segments=[{"startTime": 1, "endTime": 2, "text": long_text, "marked": False}], notes=[])
-    hit = client.get("/api/public/v1/search", params={"q": "洛必达"}).json()["hits"][0]
+    hit = client.get("/api/public/v1/search", params={"q": "洛必达"}, headers=transcript_reader(client)).json()["hits"][0]
     assert hit["snippet"].startswith("…") and hit["snippet"].endswith("…")
     assert hit["snippet"][hit["matchOffset"]:hit["matchOffset"] + 3] == "洛必达"
 
@@ -441,3 +462,77 @@ def test_uploader_sees_own_lessons_in_a_course(client):
     client.post(f"/api/publish/v1/lessons/{result['lessonId']}/withdraw-request", headers=auth(token), json={"reason": "录错了"})
     lessons = client.get(f"/api/publish/v1/courses/{result['courseId']}/lessons", headers=auth(token)).json()["lessons"]
     assert [(l["sessionId"], l["status"], l["withdrawRequested"]) for l in lessons] == [(session_id, "active", True)]
+
+
+# ---- readers and transcript access -----------------------------------------------------
+
+
+def test_anonymous_readers_get_notes_but_no_transcript(client):
+    _, result = publish_one(client)
+    lesson = f"/api/public/v1/lessons/{result['lessonId']}"
+    detail = client.get(lesson)
+    assert detail.headers["vary"] == "Authorization" and detail.headers["cache-control"].startswith("private")
+    body = detail.json()
+    assert body["segments"] == [] and body["segmentCount"] == 2 and body["transcriptHidden"] is True
+    assert body["notes"][0]["content"].startswith("# 极限")
+    # Search only finds notes, and the export holds notes only.
+    assert {hit["kind"] for hit in client.get("/api/public/v1/search", params={"q": "ε-δ"}).json()["hits"]} == {"note"}
+    assert client.get("/api/public/v1/search", params={"q": "今天讲"}).json()["hits"] == []
+    text = client.get(f"{lesson}/export.txt").text
+    assert "笔记 1" in text and "转写文字" not in text and "今天讲极限" not in text
+    assert client.get(f"{lesson}/export.txt", params={"parts": "transcript"}).status_code == 403
+    # Course lists still show how much transcript a lesson has, but never its text.
+    summary = client.get(f"/api/public/v1/courses/{result['courseId']}/lessons").json()["lessons"][0]
+    assert summary["segmentCount"] == 2
+
+
+def test_signed_in_reader_sees_transcripts_only_after_approval(client):
+    _, result = publish_one(client)
+    lesson = f"/api/public/v1/lessons/{result['lessonId']}"
+    login = sign_in(client)
+    assert login["token"].startswith("lr_") and login["reader"]["transcriptAccess"] == "none"
+    headers = auth(login["token"])
+    assert client.get(lesson, headers=headers).json()["segments"] == []
+
+    pending = client.post("/api/public/v1/me/transcript-access", headers=headers, json={"note": "我是小林"}).json()
+    assert pending["transcriptAccess"] == "pending"
+    assert client.get(lesson, headers=headers).json()["segments"] == []
+    assert admin(client, "GET", "/summary")["pendingReaders"] == 1
+    row = admin(client, "GET", "/readers", params={"status": "pending"})["readers"][0]
+    assert row["requestNote"] == "我是小林" and "openid-me" not in json.dumps(row)
+
+    admin(client, "POST", f"/readers/{row['readerId']}/approve")
+    assert client.get("/api/public/v1/me", headers=headers).json()["transcriptAccess"] == "approved"
+    assert len(client.get(lesson, headers=headers).json()["segments"]) == 2
+    # Signing in again from another phone finds the same reader, still approved.
+    again = sign_in(client)
+    assert again["reader"] == {**login["reader"], "transcriptAccess": "approved", "requestedAt": pending["requestedAt"]}
+    assert len(client.get(lesson, headers=auth(again["token"])).json()["segments"]) == 2
+
+    admin(client, "POST", f"/readers/{row['readerId']}/revoke")
+    assert client.get(lesson, headers=headers).json()["segments"] == []
+    assert client.get("/api/public/v1/me", headers=headers).json()["transcriptAccess"] == "revoked"
+
+
+def test_bad_or_expired_reader_tokens_read_as_anonymous(client, monkeypatch):
+    _, result = publish_one(client)
+    lesson = f"/api/public/v1/lessons/{result['lessonId']}"
+    assert client.get(lesson, headers=auth("lr_nonsense")).json()["segments"] == []
+    assert client.get("/api/public/v1/me", headers=auth("lr_nonsense")).status_code == 401
+    headers = transcript_reader(client)
+    monkeypatch.setattr(readers, "now_ms", lambda: 10**15)
+    assert client.get(lesson, headers=headers).json()["segments"] == []
+    assert client.get("/api/public/v1/me", headers=headers).status_code == 401
+
+
+def test_wechat_login_needs_server_config(tmp_path, monkeypatch):
+    monkeypatch.delenv("WECHAT_APPID", raising=False)
+    monkeypatch.delenv("WECHAT_SECRET", raising=False)
+    with TestClient(create_app(f"sqlite:///{tmp_path / 'p.db'}")) as bare:
+        assert bare.post("/api/public/v1/auth/wechat", json={"code": "x"}).status_code == 503
+
+
+def test_admin_reader_routes_need_the_admin_token(client):
+    login = sign_in(client)
+    assert client.get("/api/admin/v1/readers").status_code == 401
+    assert client.post(f"/api/admin/v1/readers/{login['reader']['readerId']}/approve", headers=auth(login["token"])).status_code == 401

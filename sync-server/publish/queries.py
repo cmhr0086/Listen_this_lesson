@@ -169,17 +169,24 @@ def public_lesson(db: Session, lesson_id: str) -> tuple[Lesson, Revision] | None
     return (row[0], row[1]) if row else None
 
 
-def lesson_detail(db: Session, lesson_id: str) -> dict | None:
+def lesson_detail(db: Session, lesson_id: str, transcripts: bool = False) -> dict | None:
+    """Notes are public; the transcript is only filled in for readers allowed to see it."""
     found = public_lesson(db, lesson_id)
     if found is None:
         return None
     lesson, revision = found
+    content = revision_content(db, revision)
+    segment_count = len(content["segments"])
+    if not transcripts:
+        content["segments"] = []
     return {
         "lessonId": lesson.id,
         "course": course_dict(db.get(Course, lesson.courseId)),
         "uploader": db.get(Uploader, lesson.uploaderId).displayName,
         "updatedAt": revision.reviewedAt,
-        **revision_content(db, revision),
+        **content,
+        "segmentCount": segment_count,
+        "transcriptHidden": not transcripts and segment_count > 0,
     }
 
 
@@ -202,19 +209,19 @@ SELECT * FROM (
     JOIN revision_notes n ON n.revisionId = r.id
     WHERE l.status = 'active' {course_filter}
 )
-WHERE body LIKE :pattern ESCAPE '\\'
+WHERE body LIKE :pattern ESCAPE '\\' AND (kind = 'note' OR :transcripts)
 ORDER BY startedAt DESC, lessonId, kind DESC, seq
 LIMIT :limit OFFSET :offset
 """
 
 
-def search(db: Session, query: str, course_id: str | None, cursor: str | None, limit: int) -> dict:
+def search(db: Session, query: str, course_id: str | None, cursor: str | None, limit: int, transcripts: bool = False) -> dict:
     offset = (decode_cursor(cursor) or {}).get("o", 0)
     escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     course_filter = "AND l.courseId = :course" if course_id else ""
     rows = db.execute(
         text(SEARCH_SQL.format(course_filter=course_filter)),
-        {"pattern": f"%{escaped}%", "limit": limit + 1, "offset": offset, "course": course_id},
+        {"pattern": f"%{escaped}%", "limit": limit + 1, "offset": offset, "course": course_id, "transcripts": transcripts},
     ).all()
     lessons: dict[str, tuple[Lesson, Revision]] = {}
     hits = []
@@ -260,11 +267,12 @@ def snippet(body: str, query: str) -> dict:
 # ---- TXT export ------------------------------------------------------------------------
 
 
-def export_txt(db: Session, lesson_id: str, parts: set[str]) -> tuple[str, str] | None:
-    detail = lesson_detail(db, lesson_id)
+def export_txt(db: Session, lesson_id: str, parts: set[str], refuse_empty_notes: bool = True) -> tuple[str, str] | None:
+    # Callers only ask for "transcript" once they have checked the reader may see it.
+    detail = lesson_detail(db, lesson_id, transcripts="transcript" in parts)
     if detail is None:
         return None
-    if parts == {"notes"} and not detail["notes"]:
+    if refuse_empty_notes and parts == {"notes"} and not detail["notes"]:
         raise LookupError("这节课暂无公开笔记")
     tz = zone()
     course = detail["course"]
