@@ -138,3 +138,15 @@ class ReaderSession(Base):
     readerId: Mapped[int] = mapped_column(ForeignKey("readers.id"), nullable=False, index=True)
     createdAt: Mapped[int] = mapped_column(Integer, nullable=False)
     expiresAt: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+
+
+class ReaderTimetable(Base):
+    """A reader's timetable as the mini program stores it, so it follows them to another phone."""
+
+    __tablename__ = "reader_timetables"
+
+    readerId: Mapped[int] = mapped_column(ForeignKey("readers.id"), primary_key=True)
+    data: Mapped[str] = mapped_column(Text, nullable=False)
+    # When the phone last changed it; the newer copy wins.
+    updatedAt: Mapped[int] = mapped_column(Integer, nullable=False)
+    savedAt: Mapped[int] = mapped_column(Integer, nullable=False)

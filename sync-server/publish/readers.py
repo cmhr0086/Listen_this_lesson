@@ -9,7 +9,7 @@ import urllib.request
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from .models import Reader, ReaderSession
+from .models import Reader, ReaderSession, ReaderTimetable
 from .service import ServiceError, audit, hash_token, now_ms
 
 # Readers sign in with wx.login. Notes stay public; transcripts are shown only to readers on the
@@ -94,3 +94,38 @@ def admin_reader_dict(reader: Reader) -> dict:
         "createdAt": reader.createdAt,
         "lastSeenAt": reader.lastSeenAt,
     }
+
+
+# ---- timetable sync --------------------------------------------------------------------
+
+MAX_TIMETABLE_BYTES = 256 * 1024
+
+
+def timetable(db: Session, reader: Reader) -> dict:
+    row = db.get(ReaderTimetable, reader.id)
+    if row is None:
+        return {"timetable": None, "updatedAt": None}
+    return {"timetable": json.loads(row.data), "updatedAt": row.updatedAt}
+
+
+def save_timetable(db: Session, reader: Reader, data: dict, updated_at: int) -> dict:
+    """Last write wins by the phone's change time; an older copy gets the stored one back (409)."""
+    encoded = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    if len(encoded.encode()) > MAX_TIMETABLE_BYTES:
+        raise ServiceError(413, "课表太大，无法同步")
+    row = db.get(ReaderTimetable, reader.id)
+    if row is not None and row.updatedAt > updated_at:
+        raise TimetableConflict(timetable(db, reader))
+    if row is None:
+        row = ReaderTimetable(readerId=reader.id, data=encoded, updatedAt=updated_at, savedAt=now_ms())
+        db.add(row)
+    else:
+        row.data, row.updatedAt, row.savedAt = encoded, updated_at, now_ms()
+    db.commit()
+    return {"updatedAt": updated_at}
+
+
+class TimetableConflict(Exception):
+    def __init__(self, current: dict) -> None:
+        super().__init__("timetable changed elsewhere")
+        self.current = current

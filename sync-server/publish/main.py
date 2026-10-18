@@ -32,6 +32,7 @@ from .models import AuditLog, Course, Lesson, Reader, Revision, RevisionNote, Re
 from .schemas import (
     CourseStatus,
     ReaderAccessRequest,
+    TimetableUpload,
     WechatLogin,
     LessonSubmissions,
     ReviewDecision,
@@ -124,7 +125,9 @@ def create_app(database_url: str | None = None) -> FastAPI:
         headers = {"ETag": etag, "Cache-Control": "public, max-age=30"}
         if reader_aware:
             # The same URL answers differently for allowed readers; keep shared caches out of it.
-            headers.update({"Cache-Control": "private, max-age=30", "Vary": "Authorization"})
+            # no-cache: always revalidate, so a reader allowed a moment ago sees the transcript at
+            # once; the ETag keeps unchanged answers to a 304.
+            headers.update({"Cache-Control": "private, no-cache", "Vary": "Authorization"})
         if request.headers.get("if-none-match") == etag:
             return Response(status_code=304, headers=headers)
         return Response(body, media_type="application/json", headers=headers)
@@ -208,7 +211,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
             media_type="text/plain; charset=utf-8",
             headers={
                 "Content-Disposition": f"attachment; filename=\"lesson.txt\"; filename*=UTF-8''{quote(filename)}",
-                "Cache-Control": "private, max-age=30",
+                "Cache-Control": "private, no-cache",
                 "Vary": "Authorization",
             },
         )
@@ -267,6 +270,18 @@ def create_app(database_url: str | None = None) -> FastAPI:
         body: ReaderAccessRequest | None = None, reader: Reader = Depends(require_reader), db: Session = Depends(get_db)
     ):
         return readers.reader_dict(readers.request_access(db, reader, body.note if body else None))
+
+    @public.get("/me/timetable")
+    def reader_timetable(reader: Reader = Depends(require_reader), db: Session = Depends(get_db)):
+        return JSONResponse(readers.timetable(db, reader), headers={"Cache-Control": "no-store"})
+
+    @public.put("/me/timetable")
+    def reader_save_timetable(body: TimetableUpload, reader: Reader = Depends(require_reader), db: Session = Depends(get_db)):
+        try:
+            return readers.save_timetable(db, reader, body.timetable, body.updatedAt)
+        except readers.TimetableConflict as conflict:
+            # Changed later on another phone: hand that copy back so this one can take it.
+            return JSONResponse(status_code=409, content={"detail": "课表在另一台手机上更新过", **conflict.current})
 
     # ---- uploaders ----------------------------------------------------------------------
 

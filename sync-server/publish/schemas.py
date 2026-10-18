@@ -162,3 +162,8 @@ class ReaderAccessRequest(StrictModel):
     note: str | None = Field(default=None, max_length=50)
 
     _note = field_validator("note")(_optional_text)
+
+
+class TimetableUpload(StrictModel):
+    timetable: dict
+    updatedAt: Timestamp

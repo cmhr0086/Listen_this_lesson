@@ -471,7 +471,7 @@ def test_anonymous_readers_get_notes_but_no_transcript(client):
     _, result = publish_one(client)
     lesson = f"/api/public/v1/lessons/{result['lessonId']}"
     detail = client.get(lesson)
-    assert detail.headers["vary"] == "Authorization" and detail.headers["cache-control"].startswith("private")
+    assert detail.headers["vary"] == "Authorization" and detail.headers["cache-control"] == "private, no-cache"
     body = detail.json()
     assert body["segments"] == [] and body["segmentCount"] == 2 and body["transcriptHidden"] is True
     assert body["notes"][0]["content"].startswith("# 极限")
@@ -536,3 +536,31 @@ def test_admin_reader_routes_need_the_admin_token(client):
     login = sign_in(client)
     assert client.get("/api/admin/v1/readers").status_code == 401
     assert client.post(f"/api/admin/v1/readers/{login['reader']['readerId']}/approve", headers=auth(login["token"])).status_code == 401
+
+
+def test_timetable_follows_the_reader_and_newer_copy_wins(client):
+    assert client.get("/api/public/v1/me/timetable").status_code == 401
+    phone_a = auth(sign_in(client, "a")["token"])
+    assert client.get("/api/public/v1/me/timetable", headers=phone_a).json() == {"timetable": None, "updatedAt": None}
+    table = {"settings": {"termStart": "2026-09-07", "weeks": 18}, "courses": [{"id": "x", "name": "材料力学", "slots": []}]}
+    saved = client.put("/api/public/v1/me/timetable", headers=phone_a, json={"timetable": table, "updatedAt": 100})
+    assert saved.status_code == 200 and saved.json() == {"updatedAt": 100}
+
+    # The same person on another phone (same openid) gets it back.
+    phone_b = auth(sign_in(client, "a")["token"])
+    got = client.get("/api/public/v1/me/timetable", headers=phone_b)
+    assert got.json() == {"timetable": table, "updatedAt": 100} and got.headers["cache-control"] == "no-store"
+    # Someone else does not.
+    other = auth(sign_in(client, "b")["token"])
+    assert client.get("/api/public/v1/me/timetable", headers=other).json()["timetable"] is None
+
+    newer = {**table, "courses": []}
+    assert client.put("/api/public/v1/me/timetable", headers=phone_b, json={"timetable": newer, "updatedAt": 200}).status_code == 200
+    stale = client.put("/api/public/v1/me/timetable", headers=phone_a, json={"timetable": table, "updatedAt": 150})
+    assert stale.status_code == 409 and stale.json()["timetable"] == newer and stale.json()["updatedAt"] == 200
+
+
+def test_oversized_timetable_is_refused(client):
+    headers = auth(sign_in(client)["token"])
+    big = {"courses": [{"name": "课" * 1000} for _ in range(200)]}
+    assert client.put("/api/public/v1/me/timetable", headers=headers, json={"timetable": big, "updatedAt": 1}).status_code == 413
