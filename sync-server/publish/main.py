@@ -106,9 +106,13 @@ def create_app(database_url: str | None = None) -> FastAPI:
             raise unauthorized()
         return reader
 
-    def require_admin(authorization: Annotated[str | None, Header()] = None) -> None:
+    def require_admin(authorization: Annotated[str | None, Header()] = None, db: Session = Depends(get_db)) -> None:
+        # The /admin page sends the admin token; the mini program sends an admin reader's token.
         token = bearer(authorization)
-        if not (admin_token and token and secrets.compare_digest(token, admin_token)):
+        if admin_token and token and secrets.compare_digest(token, admin_token):
+            return
+        reader = readers.authenticate(db, token) if token else None
+        if reader is None or not reader.isAdmin:
             raise unauthorized()
 
     @app.get("/health")
@@ -549,6 +553,16 @@ def create_app(database_url: str | None = None) -> FastAPI:
     def admin_reader_approve(reader_id: int, db: Session = Depends(get_db)):
         reader = service.require(db.get(Reader, reader_id), "读者不存在")
         return readers.admin_reader_dict(readers.decide(db, reader, approved=True))
+
+    @admin.post("/readers/{reader_id}/make-admin")
+    def admin_reader_make_admin(reader_id: int, db: Session = Depends(get_db)):
+        reader = service.require(db.get(Reader, reader_id), "读者不存在")
+        return readers.admin_reader_dict(readers.set_admin(db, reader, True))
+
+    @admin.post("/readers/{reader_id}/remove-admin")
+    def admin_reader_remove_admin(reader_id: int, db: Session = Depends(get_db)):
+        reader = service.require(db.get(Reader, reader_id), "读者不存在")
+        return readers.admin_reader_dict(readers.set_admin(db, reader, False))
 
     @admin.post("/readers/{reader_id}/revoke")
     def admin_reader_revoke(reader_id: int, db: Session = Depends(get_db)):

@@ -507,6 +507,7 @@ def test_signed_in_reader_sees_transcripts_only_after_approval(client):
     # Signing in again from another phone finds the same reader, still approved.
     again = sign_in(client)
     assert again["reader"] == {**login["reader"], "transcriptAccess": "approved", "requestedAt": pending["requestedAt"]}
+    assert again["reader"]["isAdmin"] is False
     assert len(client.get(lesson, headers=auth(again["token"])).json()["segments"]) == 2
 
     admin(client, "POST", f"/readers/{row['readerId']}/revoke")
@@ -564,3 +565,22 @@ def test_oversized_timetable_is_refused(client):
     headers = auth(sign_in(client)["token"])
     big = {"courses": [{"name": "课" * 1000} for _ in range(200)]}
     assert client.put("/api/public/v1/me/timetable", headers=headers, json={"timetable": big, "updatedAt": 1}).status_code == 413
+
+
+def test_admin_reader_reviews_from_the_mini_program(client):
+    token, result = publish_one(client)
+    login = sign_in(client, "boss")
+    reader = auth(login["token"])
+    assert client.get("/api/admin/v1/summary", headers=reader).status_code == 401
+    admin(client, "POST", f"/readers/{login['reader']['readerId']}/make-admin")
+    assert client.get("/api/public/v1/me", headers=reader).json()["isAdmin"] is True
+    # An admin reader uses the same admin API as the page, and sees transcripts without asking.
+    assert client.get("/api/admin/v1/summary", headers=reader).status_code == 200
+    takedown = client.post(f"/api/admin/v1/courses/{result['courseId']}/takedown", headers=reader, json={"note": "测试"})
+    assert takedown.status_code == 200
+    approve(client, result["courseId"])
+    assert len(client.get(f"/api/public/v1/lessons/{result['lessonId']}", headers=reader).json()["segments"]) == 2
+    admin(client, "POST", f"/readers/{login['reader']['readerId']}/remove-admin")
+    assert client.get("/api/admin/v1/summary", headers=reader).status_code == 401
+    # Uploader tokens never count as admin.
+    assert client.get("/api/admin/v1/summary", headers=auth(token)).status_code == 401

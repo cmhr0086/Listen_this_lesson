@@ -239,6 +239,7 @@ const ACTIONS = {
   "lesson.publish": "上传课堂", "lesson.withdraw_request": "申请撤回课堂", "lesson.taken_down": "下架课堂", "lesson.active": "恢复课堂",
   "uploader.create": "新建上传者", "uploader.rotate": "更换 Token", "uploader.disabled": "停用上传者", "uploader.active": "启用上传者",
   "reader.request_transcripts": "申请查看原文", "reader.approve": "允许查看原文", "reader.revoke": "收回原文权限",
+  "reader.make_admin": "设为管理员", "reader.remove_admin": "取消管理员",
 };
 const READER_ACCESS = { none: "未申请", pending: "等待批准", approved: "可看原文", revoked: "已收回" };
 const ICON = {
@@ -518,7 +519,7 @@ async function lessonAct(button) {
 async function renderReaders() {
   const { readers } = await api("/readers");
   const rows = readers.map((r) => `<tr>
-      <td class="mono" style="white-space:nowrap">#${r.readerId} <span class="muted">${esc(r.openidHint)}</span></td>
+      <td class="mono" style="white-space:nowrap">#${r.readerId} <span class="muted">${esc(r.openidHint)}</span>${r.isAdmin ? ` ${pill("approved", "管理员")}` : ""}</td>
       <td>${pill(r.transcriptAccess === "approved" ? "active" : r.transcriptAccess === "pending" ? "pending" : "disabled", READER_ACCESS[r.transcriptAccess])}</td>
       <td style="color:var(--ink-2)">${esc(r.requestNote || "—")}</td>
       <td class="mono" style="font-size:14px;color:var(--ink-2)">${short(r.requestedAt)}</td>
@@ -527,9 +528,12 @@ async function renderReaders() {
         ${r.transcriptAccess === "approved"
           ? `<button type="button" class="btn small plain-danger" data-reader="revoke" data-id="${r.readerId}">收回</button>`
           : `<button type="button" class="btn small" style="color:var(--primary)" data-reader="approve" data-id="${r.readerId}">允许</button>`}
+        ${r.isAdmin
+          ? `<button type="button" class="btn small plain-danger" data-reader="remove-admin" data-id="${r.readerId}">取消管理员</button>`
+          : `<button type="button" class="btn small" data-reader="make-admin" data-id="${r.readerId}">设为管理员</button>`}
       </td></tr>`).join("");
   view.innerHTML = `<div class="stack">
-    <div><h1>原文权限</h1><p class="lede">笔记对所有人公开；课堂原文只给这里允许的小程序用户看，对所有课程生效。用户在小程序里申请时可以留一句话，方便你认出是谁。</p></div>
+    <div><h1>原文权限</h1><p class="lede">笔记对所有人公开；课堂原文只给这里允许的小程序用户看，对所有课程生效。用户在小程序里申请时可以留一句话，方便你认出是谁。设为管理员的账号能在小程序「设置 › 管理」里审核，也能看所有原文。</p></div>
     ${flash()}
     <section class="card" aria-label="读者列表" style="overflow:hidden">
       ${readers.length ? `<div class="scroll"><table style="min-width:720px">
@@ -541,10 +545,12 @@ async function renderReaders() {
 async function readerAct(button) {
   const action = button.dataset.reader;
   if (action === "revoke" && !confirm("收回这位读者查看原文的权限？")) return;
+  if (action === "make-admin" && !confirm("设为管理员？这个微信账号将能在小程序里审核课程、批准原文权限和下架课堂。")) return;
+  if (action === "remove-admin" && !confirm("取消这个账号的管理员身份？")) return;
   button.disabled = true;
   try {
     await post(`/readers/${button.dataset.id}/${action}`);
-    state.flash = action === "approve" ? "已允许查看原文。" : "已收回原文权限。";
+    state.flash = { approve: "已允许查看原文。", revoke: "已收回原文权限。", "make-admin": "已设为管理员。", "remove-admin": "已取消管理员。" }[action];
     render();
   } catch (e) { button.disabled = false; alert(e.message); }
 }

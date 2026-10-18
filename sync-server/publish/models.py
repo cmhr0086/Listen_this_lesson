@@ -124,6 +124,8 @@ class Reader(Base):
     openid: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     # none | pending | approved | revoked
     transcriptAccess: Mapped[str] = mapped_column(Text, nullable=False, default="none")
+    # Can review from the mini program as well as the /admin page; set from /admin.
+    isAdmin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
     requestNote: Mapped[str | None] = mapped_column(Text)
     requestedAt: Mapped[int | None] = mapped_column(Integer)
     reviewedAt: Mapped[int | None] = mapped_column(Integer)
