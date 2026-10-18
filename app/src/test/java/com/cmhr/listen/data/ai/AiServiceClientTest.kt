@@ -48,6 +48,41 @@ data: [DONE]
     }
 
     @Test
+    fun `stream chat keeps whitespace only chunks`() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(
+                MockResponse()
+                    .setHeader("Content-Type", "text/event-stream")
+                    .setBody(
+                        """data: {"choices":[{"delta":{"content":"## 静矩"}}]}
+
+data: {"choices":[{"delta":{"content":"\n\n"}}]}
+
+data: {"choices":[{"delta":{"content":"-"}}]}
+
+data: {"choices":[{"delta":{"content":" "}}]}
+
+data: {"choices":[{"delta":{"content":"Sy ="}}]}
+
+data: {"choices":[{"delta":{"content":" "}}]}
+
+data: {"choices":[{"delta":{"content":"0"},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+"""
+                    )
+            )
+            val result = AiServiceClient(OkHttpClient(), enforceHttps = false).streamChat(
+                AiCredentials(server.url("/").toString().trimEnd('/'), "secret", "model"),
+                listOf(AiChatMessage("user", "测试"))
+            ) { }
+
+            assertEquals("## 静矩\n\n- Sy = 0", result.content)
+        }
+    }
+
+    @Test
     fun `stream chat supports array deltas`() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody(

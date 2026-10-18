@@ -4,6 +4,7 @@ import android.app.Application
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.cmhr.listen.data.ai.NoteStyle
 import com.cmhr.listen.data.ai.AiActionType
 import com.cmhr.listen.data.ai.AiChatMessage
 import com.cmhr.listen.data.ai.AiCredentials
@@ -31,6 +32,7 @@ import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -99,6 +101,9 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = AiRepository(database, attachmentStore)
     private val courseRepository = com.cmhr.listen.data.course.CourseRepository(database)
     private val settingsRepository = AppSettingsRepository(application)
+
+    /** Style the notes picker starts on when a class has no notes yet. */
+    val lastNoteStyle: kotlinx.coroutines.flow.Flow<NoteStyle> = settingsRepository.settings.map { it.lastNoteStyle }.distinctUntilChanged()
     private val client = AiServiceClient()
     private val _uiState = MutableStateFlow(AiUiState())
     val uiState: StateFlow<AiUiState> = _uiState.asStateFlow()
@@ -403,6 +408,7 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
         action: AiActionType,
         availableSegments: List<TranscriptEntity>,
         attachments: List<PendingAiAttachment> = emptyList(),
+        noteStyle: NoteStyle? = null,
         onCreated: (Long) -> Unit
     ) {
         if (aiJob?.isActive == true) {
@@ -418,7 +424,8 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
         }
         runAction(
             recordId, action, segments, attachments, clearSelectionAfterCreate = false, onCreated,
-            extractTopic = action == AiActionType.ORGANIZE_NOTES
+            extractTopic = action == AiActionType.ORGANIZE_NOTES,
+            noteStyle = noteStyle
         )
     }
 
@@ -462,7 +469,9 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
         attachments: List<PendingAiAttachment>,
         clearSelectionAfterCreate: Boolean,
         onCreated: (Long) -> Unit,
-        extractTopic: Boolean = false
+        extractTopic: Boolean = false,
+        /** Picked for these notes; remembered for next time. Null uses the style picked last. */
+        noteStyle: NoteStyle? = null
     ) {
         aiJob = viewModelScope.launch {
             val selected = orderTranscriptSegments(segments)
@@ -475,11 +484,13 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
                 discardAttachments(attachments)
                 return@launch
             }
-            val promptSettings = settingsRepository.settings.first().aiPrompts
+            val settings = settingsRepository.settings.first()
+            if (noteStyle != null) settingsRepository.setLastNoteStyle(noteStyle)
             val prompt = buildActionPrompt(
                 action = action,
-                prompts = promptSettings,
-                coursePrompt = if (action == AiActionType.CORRECT_ASR) courseAsrPrompt(recordId) else ""
+                prompts = settings.aiPrompts,
+                coursePrompt = if (action == AiActionType.CORRECT_ASR) courseAsrPrompt(recordId) else "",
+                noteStyle = noteStyle ?: settings.lastNoteStyle
             )
             val resultId = runCatching {
                 repository.createResult(recordId, action, prompt, snapshot, selected.map { it.id }, attachments)
@@ -1153,7 +1164,13 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        fun buildActionPrompt(action: AiActionType, prompts: AiPromptSettings, coursePrompt: String = ""): String {
+        fun buildActionPrompt(
+            action: AiActionType,
+            prompts: AiPromptSettings,
+            coursePrompt: String = "",
+            noteStyle: NoteStyle = NoteStyle.DEFAULT
+        ): String {
+            if (action == AiActionType.ORGANIZE_NOTES) return NoteStyle.buildPrompt(noteStyle, prompts)
             if (action != AiActionType.CORRECT_ASR) return promptFor(action, prompts)
             return buildString {
                 appendLine("你是严谨的中文课堂 ASR 校对器。必须逐段审校明显的错字、同音词、专业术语、断句和标点，同时严格保持原意。")

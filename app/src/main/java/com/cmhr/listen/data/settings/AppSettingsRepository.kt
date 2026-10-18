@@ -63,13 +63,27 @@ data class AiServiceSettings(
 )
 data class AiPromptSettings(
     val summary: String = "你是课堂内容整理助手。只依据提供的课堂原文，输出结构清晰的重点摘要；不要虚构原文没有的信息，对不确定内容明确说明。",
-    val organizeNotes: String = "你是课堂笔记整理助手。只依据原文，按主题、关键要点和专业术语整理成中文笔记；保留重要限定条件，不得虚构。",
+    val organizeNotes: String = DEFAULT_NOTES_PROMPT,
     val correctAsr: String = "你是课堂语音转写校对助手。只修正原文中明显的 ASR 错字、同音词和标点，不改变原意；无法确认处保留原文并标记。只输出建议修正版。",
     val quickAnswer: String = "你是课堂问题快速回答助手。先从原文中识别老师明确提出的问题，再按出现顺序逐条给出简洁答案。只能依据原文和可靠的通用知识；原文不足、说话人或问题不确定时必须明确说明，不得虚构课堂内容。",
     val customConversation: String = "你是课堂内容问答助手。只能依据提供的冻结课堂原文回答；若原文不足以回答，应明确说明，不得虚构。",
     val generalConversation: String = "你是可靠、清晰的中文 AI 助手。准确回答用户问题；不确定时明确说明，不得虚构事实。",
-    val imageContext: String = "请结合附加课堂照片中清晰可见的黑板、课件、公式和图表补充判断；无法辨认的内容必须明确说明，不得猜测。"
+    val imageContext: String = "请结合附加课堂照片中清晰可见的黑板、课件、公式和图表补充判断；无法辨认的内容必须明确说明，不得猜测。",
+    val noteStyleDetailed: String = "按讲课顺序分节，尽量完整保留讲解过程：概念是怎么引出的、推导步骤、例子和例题的完整解法、老师的补充说明。宁可详细，不要只列关键词；每个要点写成完整的句子。",
+    val noteStyleOutline: String = "面向考前复习。开头用「## 考点速览」列出本节最重要的 3–8 条；然后按主题列出必须记住的定义、公式、结论和数值；最后用「## 易错与提醒」汇总老师提醒的易错点和考试信息（题型、分值、范围）。语言精炼，每条一句话。",
+    val noteStyleFramework: String = "按知识的层级而不是讲课顺序组织：先用一两句话说明本节在课程中的位置，再用多级列表展示概念之间的从属、并列和因果关系，最后用「## 与前后内容的联系」说明它承接什么、引出什么。每个节点简短。",
+    val noteStyleQaCards: String = "把本节内容拆成适合自测的问答卡片，按主题用「## 」分组。每张卡片写成「**问：**……」换行「**答：**……」，卡片之间空一行。覆盖定义、公式的用法、容易判断错的地方和老师课上提过的问题。"
 )
+
+/** Shared rules for every notes style; the style's own instructions are appended after it. */
+const val DEFAULT_NOTES_PROMPT = """你是课堂笔记整理助手，根据课堂转写原文整理中文笔记。
+1. 只依据原文，不得虚构。转写可能有同音错字，结合上下文和专业常识纠正明显错误；无法确认的保留原词并在后面标注（?）。
+2. 保留老师强调的定义、公式、数值、限定条件、例题，以及考试相关信息（题型、分值、范围）。
+3. 使用规范 Markdown：小节标题用「## 」开头；要点用「- 」开头（短横线后有空格），子要点缩进两个空格；关键术语用 **加粗**。
+4. 不写开场白和客套话，直接输出笔记。"""
+
+/** Notes prompt shipped before 1.5; a stored copy of it is read as the current default. */
+internal const val LEGACY_NOTES_PROMPT = "你是课堂笔记整理助手。只依据原文，按主题、关键要点和专业术语整理成中文笔记；保留重要限定条件，不得虚构。"
 data class AiGenerationSettings(
     val maxTokens: Int = 8_192,
     val fixedTemperature: Float = 0.2f,
@@ -103,6 +117,8 @@ data class AppSettings(
     val selectedRecordId: Long? = null,
     /** Generate whole-class notes after a class is filed, when an AI service is configured. */
     val autoNotes: Boolean = true,
+    /** Notes style picked last; new notes, including automatic ones after class, start from it. */
+    val lastNoteStyle: com.cmhr.listen.data.ai.NoteStyle = com.cmhr.listen.data.ai.NoteStyle.DEFAULT,
     /** Course id → index into the course color palette, for courses whose color the user changed. */
     val courseColors: Map<Long, Int> = emptyMap()
 )
@@ -136,12 +152,16 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
             ),
             aiPrompts = AiPromptSettings(
                 summary = preferences[AI_PROMPT_SUMMARY] ?: AiPromptSettings().summary,
-                organizeNotes = preferences[AI_PROMPT_NOTES] ?: AiPromptSettings().organizeNotes,
+                organizeNotes = preferences[AI_PROMPT_NOTES]?.takeIf { it.trim() != LEGACY_NOTES_PROMPT } ?: AiPromptSettings().organizeNotes,
                 correctAsr = preferences[AI_PROMPT_CORRECT] ?: AiPromptSettings().correctAsr,
                 quickAnswer = preferences[AI_PROMPT_QUICK] ?: AiPromptSettings().quickAnswer,
                 customConversation = preferences[AI_PROMPT_CHAT] ?: AiPromptSettings().customConversation,
                 generalConversation = preferences[AI_PROMPT_GENERAL_CHAT] ?: AiPromptSettings().generalConversation,
-                imageContext = preferences[AI_PROMPT_IMAGE] ?: AiPromptSettings().imageContext
+                imageContext = preferences[AI_PROMPT_IMAGE] ?: AiPromptSettings().imageContext,
+                noteStyleDetailed = preferences[AI_PROMPT_STYLE_DETAILED] ?: AiPromptSettings().noteStyleDetailed,
+                noteStyleOutline = preferences[AI_PROMPT_STYLE_OUTLINE] ?: AiPromptSettings().noteStyleOutline,
+                noteStyleFramework = preferences[AI_PROMPT_STYLE_FRAMEWORK] ?: AiPromptSettings().noteStyleFramework,
+                noteStyleQaCards = preferences[AI_PROMPT_STYLE_QA] ?: AiPromptSettings().noteStyleQaCards
             ),
             aiGeneration = AiGenerationSettings(
                 maxTokens = preferences[AI_MAX_TOKENS] ?: AiGenerationSettings().maxTokens,
@@ -178,6 +198,7 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
             selectedCourseId = preferences[SELECTED_COURSE],
             selectedRecordId = preferences[SELECTED_RECORD],
             autoNotes = preferences[AUTO_NOTES] ?: true,
+            lastNoteStyle = com.cmhr.listen.data.ai.NoteStyle.fromName(preferences[LAST_NOTE_STYLE]) ?: com.cmhr.listen.data.ai.NoteStyle.DEFAULT,
             courseColors = decodeCourseColors(preferences[COURSE_COLORS])
         )
     }
@@ -186,6 +207,7 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
     suspend fun setThemePalette(palette: ThemePalette) = context.appSettingsDataStore.edit { it[THEME_PALETTE] = palette.name }
     suspend fun setDarkMode(mode: DarkModePreference) = context.appSettingsDataStore.edit { it[DARK_MODE] = mode.name }
     suspend fun setAutoNotes(enabled: Boolean) = context.appSettingsDataStore.edit { it[AUTO_NOTES] = enabled }
+    suspend fun setLastNoteStyle(style: com.cmhr.listen.data.ai.NoteStyle) = context.appSettingsDataStore.edit { it[LAST_NOTE_STYLE] = style.name }
     suspend fun setCourseColor(courseId: Long, colorIndex: Int?) = context.appSettingsDataStore.edit { preferences ->
         val colors = decodeCourseColors(preferences[COURSE_COLORS]).toMutableMap()
         if (colorIndex == null) colors.remove(courseId) else colors[courseId] = colorIndex
@@ -257,7 +279,10 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
     suspend fun readAiApiKey(): String? = context.appSettingsDataStore.data.first()[AI_API_KEY]?.let(aiApiKeyStore::decrypt)
 
     suspend fun saveAiPrompts(value: AiPromptSettings) {
-        require(listOf(value.organizeNotes, value.correctAsr, value.quickAnswer, value.customConversation, value.generalConversation, value.imageContext).all { it.isNotBlank() }) {
+        require(listOf(
+            value.organizeNotes, value.correctAsr, value.quickAnswer, value.customConversation, value.generalConversation, value.imageContext,
+            value.noteStyleDetailed, value.noteStyleOutline, value.noteStyleFramework, value.noteStyleQaCards
+        ).all { it.isNotBlank() }) {
             "提示词不能为空。"
         }
         context.appSettingsDataStore.edit { preferences ->
@@ -268,11 +293,18 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
             preferences[AI_PROMPT_CHAT] = value.customConversation.trim()
             preferences[AI_PROMPT_GENERAL_CHAT] = value.generalConversation.trim()
             preferences[AI_PROMPT_IMAGE] = value.imageContext.trim()
+            preferences[AI_PROMPT_STYLE_DETAILED] = value.noteStyleDetailed.trim()
+            preferences[AI_PROMPT_STYLE_OUTLINE] = value.noteStyleOutline.trim()
+            preferences[AI_PROMPT_STYLE_FRAMEWORK] = value.noteStyleFramework.trim()
+            preferences[AI_PROMPT_STYLE_QA] = value.noteStyleQaCards.trim()
         }
     }
 
     suspend fun restoreDefaultAiPrompts() = context.appSettingsDataStore.edit { preferences ->
-        listOf(AI_PROMPT_SUMMARY, AI_PROMPT_NOTES, AI_PROMPT_CORRECT, AI_PROMPT_QUICK, AI_PROMPT_CHAT, AI_PROMPT_GENERAL_CHAT, AI_PROMPT_IMAGE)
+        listOf(
+            AI_PROMPT_SUMMARY, AI_PROMPT_NOTES, AI_PROMPT_CORRECT, AI_PROMPT_QUICK, AI_PROMPT_CHAT, AI_PROMPT_GENERAL_CHAT, AI_PROMPT_IMAGE,
+            AI_PROMPT_STYLE_DETAILED, AI_PROMPT_STYLE_OUTLINE, AI_PROMPT_STYLE_FRAMEWORK, AI_PROMPT_STYLE_QA
+        )
             .forEach(preferences::remove)
     }
 
@@ -413,6 +445,11 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
         val AI_PROMPT_CHAT = stringPreferencesKey("ai_prompt_chat")
         val AI_PROMPT_GENERAL_CHAT = stringPreferencesKey("ai_prompt_general_chat")
         val AI_PROMPT_IMAGE = stringPreferencesKey("ai_prompt_image")
+        val AI_PROMPT_STYLE_DETAILED = stringPreferencesKey("ai_prompt_style_detailed")
+        val AI_PROMPT_STYLE_OUTLINE = stringPreferencesKey("ai_prompt_style_outline")
+        val AI_PROMPT_STYLE_FRAMEWORK = stringPreferencesKey("ai_prompt_style_framework")
+        val AI_PROMPT_STYLE_QA = stringPreferencesKey("ai_prompt_style_qa")
+        val LAST_NOTE_STYLE = stringPreferencesKey("last_note_style")
         val AI_MAX_TOKENS = intPreferencesKey("ai_max_tokens")
         val AI_FIXED_TEMPERATURE = floatPreferencesKey("ai_fixed_temperature")
         val AI_CHAT_TEMPERATURE = floatPreferencesKey("ai_chat_temperature")
