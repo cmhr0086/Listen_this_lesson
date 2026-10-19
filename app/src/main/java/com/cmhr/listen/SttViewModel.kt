@@ -223,6 +223,7 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(pausedClass = null) }
 
         listeningJob = viewModelScope.launch {
+            captureRuntime.awaitRecovery()
             val record = courseRepository.record(recordId).first()
             if (record == null) {
                 _uiState.update { it.copy(error = "课堂记录不存在或已被删除。") }

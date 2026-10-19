@@ -76,6 +76,7 @@ data class CoursePublishUiState(
 
 class PublishViewModel(application: Application) : AndroidViewModel(application) {
     private val database = ListenDatabase.get(application)
+    private val captureRuntime = com.cmhr.listen.recording.ClassroomCaptureRuntime.get(application)
     private val settings = AppSettingsRepository(application)
     private val client = PublishApiClient()
     private val _uiState = MutableStateFlow(CoursePublishUiState())
@@ -140,7 +141,9 @@ class PublishViewModel(application: Application) : AndroidViewModel(application)
                 segments, notes
             )
             val state = when {
-                record.endedAt == null -> ClassPublishState.LIVE
+                // Only the class being captured right now; an end time missing for any other
+                // reason does not hold a class back from publishing.
+                record.endedAt == null && record.id == captureRuntime.state.value.recordId -> ClassPublishState.LIVE
                 submission.segments.isEmpty() -> ClassPublishState.NO_TEXT
                 record.id in course.excluded -> ClassPublishState.EXCLUDED
                 course.synced[record.id] == null -> ClassPublishState.NEW
