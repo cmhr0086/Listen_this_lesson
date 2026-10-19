@@ -73,6 +73,9 @@
   @media (prefers-color-scheme: dark) { .btn.danger-solid { color:#1d0f0d; } }
   .btn.plain-danger { color:var(--danger); }
 
+  .who { display:inline-flex; align-items:center; gap:10px; vertical-align:middle; line-height:1.3; }
+  .avatar { width:32px; height:32px; border-radius:8px; background:var(--off-soft); object-fit:cover; flex:none; display:inline-block; }
+
   /* status pills */
   .pill { display:inline-flex; align-items:center; gap:6px; padding:2px 10px; border-radius:999px; font-size:13px; font-weight:500; white-space:nowrap; }
   .pill::before { content:""; width:7px; height:7px; border-radius:50%; background:currentColor; }
@@ -239,7 +242,7 @@ const ACTIONS = {
   "lesson.publish": "上传课堂", "lesson.withdraw_request": "申请撤回课堂", "lesson.taken_down": "下架课堂", "lesson.active": "恢复课堂",
   "uploader.create": "新建上传者", "uploader.rotate": "更换 Token", "uploader.disabled": "停用上传者", "uploader.active": "启用上传者",
   "reader.request_transcripts": "申请查看原文", "reader.approve": "允许查看原文", "reader.revoke": "收回原文权限",
-  "reader.make_admin": "设为管理员", "reader.remove_admin": "取消管理员",
+  "reader.make_admin": "设为管理员", "reader.remove_admin": "取消管理员", "course.deleted": "删除课程",
 };
 const READER_ACCESS = { none: "未申请", pending: "等待批准", approved: "可看原文", revoked: "已收回" };
 const ICON = {
@@ -441,10 +444,10 @@ function decision(c) {
       hint: `批准后，这门课已上传的 ${n} 节立即对读者可见；以后上传的新课堂也会直接上线，不再逐节审核。`, note: true },
     approved: { buttons: `<button type="button" class="btn danger" data-decide="takedown">下架整门课</button>`,
       hint: "下架后读者看不到这门课的任何课堂，上传者 App 里会显示「已被管理员下架」。可以随时恢复。", note: true },
-    rejected: { buttons: `<button type="button" class="btn primary" data-decide="approve">${ICON.check}改为批准</button>`,
-      hint: "也可以等上传者修改后重新申请，那时它会回到待审课程。", note: false },
-    taken_down: { buttons: `<button type="button" class="btn primary" data-decide="approve">${ICON.check}恢复公开</button>`,
-      hint: `恢复后这门课的 ${n} 节重新对读者可见（单独下架的课堂除外）。`, note: false },
+    rejected: { buttons: `<button type="button" class="btn danger" data-decide="delete">删除课程</button><button type="button" class="btn primary" data-decide="approve">${ICON.check}改为批准</button>`,
+      hint: "也可以等上传者修改后重新申请，那时它会回到待审课程。删除会清掉这门课和它的全部课堂，不能撤销。", note: false },
+    taken_down: { buttons: `<button type="button" class="btn danger" data-decide="delete">删除课程</button><button type="button" class="btn primary" data-decide="approve">${ICON.check}恢复公开</button>`,
+      hint: `恢复后这门课的 ${n} 节重新对读者可见（单独下架的课堂除外）。删除会清掉这门课和它的全部课堂，不能撤销；上传者再次发布时会作为新课程重新审核。`, note: false },
   }[c.status];
   if (!forms) return "";
   const label = c.status === "pending" ? "给上传者的说明" : "下架原因";
@@ -466,8 +469,14 @@ async function decide(button) {
   const error = document.getElementById("decide-error");
   if (action === "reject" && !note) { error.textContent = "驳回时请写明原因，上传者才知道要改什么。"; input.focus(); return; }
   if (action === "takedown" && !confirm("下架整门课？读者将看不到它的所有课堂。")) return;
+  if (action === "delete" && !confirm("删除这门课和它的全部课堂？这不能撤销。")) return;
   form.querySelectorAll("button").forEach((b) => b.disabled = true);
   try {
+    if (action === "delete") {
+      await api(`/courses/${id}`, { method: "DELETE" });
+      Object.assign(state, { courseId: null, lessonId: null, flash: "课程已删除。" });
+      return render();
+    }
     const c = await post(`/courses/${id}/${action}`, { note: note || null });
     const done = { approve: "已批准，这门课已对读者公开。", reject: "已驳回，上传者会在 App 里看到你的说明。", takedown: "已下架整门课。" }[action];
     // Leaving the queue: the decided course moves on to the next one waiting.
@@ -519,7 +528,7 @@ async function lessonAct(button) {
 async function renderReaders() {
   const { readers } = await api("/readers");
   const rows = readers.map((r) => `<tr>
-      <td class="mono" style="white-space:nowrap">#${r.readerId} <span class="muted">${esc(r.openidHint)}</span>${r.isAdmin ? ` ${pill("approved", "管理员")}` : ""}</td>
+      <td style="white-space:nowrap"><span class="who">${r.avatar ? `<img class="avatar" src="${esc(r.avatar)}" alt="">` : `<span class="avatar"></span>`}<span>${esc(r.nickname || "未设置昵称")}<br><span class="mono muted" style="font-size:12px">#${r.readerId} · ${esc(r.openidHint)}</span></span></span>${r.isAdmin ? ` ${pill("approved", "管理员")}` : ""}</td>
       <td>${pill(r.transcriptAccess === "approved" ? "active" : r.transcriptAccess === "pending" ? "pending" : "disabled", READER_ACCESS[r.transcriptAccess])}</td>
       <td style="color:var(--ink-2)">${esc(r.requestNote || "—")}</td>
       <td class="mono" style="font-size:14px;color:var(--ink-2)">${short(r.requestedAt)}</td>

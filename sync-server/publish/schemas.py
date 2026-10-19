@@ -167,3 +167,14 @@ class ReaderAccessRequest(StrictModel):
 class TimetableUpload(StrictModel):
     timetable: dict
     updatedAt: Timestamp
+
+
+class ReaderProfile(StrictModel):
+    # None leaves a field as it is; "" clears it.
+    nickname: str | None = Field(default=None, max_length=20)
+    avatar: str | None = Field(default=None, max_length=96 * 1024)
+
+    @field_validator("nickname")
+    @classmethod
+    def _strip(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else None

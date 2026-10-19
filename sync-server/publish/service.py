@@ -8,7 +8,7 @@ import time
 import unicodedata
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from .models import AuditLog, Course, Lesson, Revision, RevisionNote, RevisionSegment, Uploader
@@ -292,6 +292,24 @@ def review_course(db: Session, course_id: str, status: str, note: str | None = N
     audit(db, "admin", f"course.{status}", f"course:{course.id}", note)
     db.commit()
     return course
+
+
+def delete_course(db: Session, course_id: str) -> None:
+    """Removes a course that is no longer public, with every lesson and version in it."""
+    course = require(db.get(Course, course_id), "课程不存在")
+    if course.status not in ("taken_down", "rejected"):
+        raise ServiceError(409, "只能删除已下架或已驳回的课程，请先下架")
+    lesson_ids = select(Lesson.id).where(Lesson.courseId == course.id)
+    revision_ids = select(Revision.id).where(Revision.lessonId.in_(lesson_ids))
+    lesson_count = db.scalar(select(func.count()).select_from(Lesson).where(Lesson.courseId == course.id))
+    db.execute(delete(RevisionNote).where(RevisionNote.revisionId.in_(revision_ids)))
+    db.execute(delete(RevisionSegment).where(RevisionSegment.revisionId.in_(revision_ids)))
+    db.execute(delete(Revision).where(Revision.lessonId.in_(lesson_ids)))
+    db.execute(delete(Revision).where(Revision.courseId == course.id))
+    db.execute(delete(Lesson).where(Lesson.courseId == course.id))
+    audit(db, "admin", "course.deleted", f"course:{course.id}", f"{course.courseName} · {course.teacherName}，{lesson_count} 节")
+    db.delete(course)
+    db.commit()
 
 
 def set_lesson_status(db: Session, lesson_id: str, status: str, reason: str | None = None) -> Lesson:

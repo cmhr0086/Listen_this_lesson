@@ -13,6 +13,10 @@ ADDED_COLUMNS = {
         "reviewedAt": "INTEGER",
         "reviewNote": "TEXT",
     },
+    "readers": {
+        "nickname": "TEXT",
+        "avatar": "TEXT",
+    },
 }
 
 
