@@ -528,7 +528,7 @@ async function lessonAct(button) {
 async function renderReaders() {
   const { readers } = await api("/readers");
   const rows = readers.map((r) => `<tr>
-      <td style="white-space:nowrap"><span class="who">${r.avatar ? `<img class="avatar" src="${esc(r.avatar)}" alt="">` : `<span class="avatar"></span>`}<span>${esc(r.nickname || "未设置昵称")}<br><span class="mono muted" style="font-size:12px">#${r.readerId} · ${esc(r.openidHint)}</span></span></span>${r.isAdmin ? ` ${pill("approved", "管理员")}` : ""}</td>
+      <td style="white-space:nowrap"><span class="who">${r.avatar ? `<img class="avatar" src="${esc(r.avatar)}" alt="">` : ""}<span>${esc(r.nickname || `读者 #${r.readerId}`)}<br><span class="mono muted" style="font-size:12px">${esc(r.openidHint)}</span></span></span>${r.isAdmin ? ` ${pill("approved", "管理员")}` : ""}</td>
       <td>${pill(r.transcriptAccess === "approved" ? "active" : r.transcriptAccess === "pending" ? "pending" : "disabled", READER_ACCESS[r.transcriptAccess])}</td>
       <td style="color:var(--ink-2)">${esc(r.requestNote || "—")}</td>
       <td class="mono" style="font-size:14px;color:var(--ink-2)">${short(r.requestedAt)}</td>
@@ -542,7 +542,7 @@ async function renderReaders() {
           : `<button type="button" class="btn small" data-reader="make-admin" data-id="${r.readerId}">设为管理员</button>`}
       </td></tr>`).join("");
   view.innerHTML = `<div class="stack">
-    <div><h1>原文权限</h1><p class="lede">笔记对所有人公开；课堂原文只给这里允许的小程序用户看，对所有课程生效。用户在小程序里申请时可以留一句话，方便你认出是谁。设为管理员的账号能在小程序「设置 › 管理」里审核，也能看所有原文。</p></div>
+    <div><h1>原文权限</h1><p class="lede">笔记对所有人公开；课堂原文只给这里允许的小程序用户看，对所有课程生效。申请时留的那句话就是认人的线索。设为管理员的账号能在小程序「设置 › 管理」里审核，也能看所有原文。</p></div>
     ${flash()}
     <section class="card" aria-label="读者列表" style="overflow:hidden">
       ${readers.length ? `<div class="scroll"><table style="min-width:720px">
