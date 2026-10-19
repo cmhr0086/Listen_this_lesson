@@ -299,6 +299,19 @@ data class SessionSyncProjection(
     @Query("UPDATE records SET endedAt = :endedAt, updatedAt = :endedAt, syncStatus = 'PENDING' WHERE id = :id AND deleted = 0") suspend fun end(id: Long, endedAt: Long)
     @Query("UPDATE records SET endedAt = :endedAt, updatedAt = :updatedAt, syncStatus = 'PENDING' WHERE id = :id AND deleted = 0 AND endedAt IS NULL") suspend fun endIfOpen(id: Long, endedAt: Long, updatedAt: Long): Int
     @Query("UPDATE records SET endedAt = NULL, updatedAt = :updatedAt, syncStatus = 'PENDING' WHERE id = :id AND deleted = 0") suspend fun reopen(id: Long, updatedAt: Long)
+    /**
+     * Ends classes a killed process left open: at the end of their last transcript segment or
+     * saved audio, never before they started. Only for process-start recovery, when nothing is
+     * capturing yet.
+     */
+    @Query("""
+        UPDATE records SET
+            endedAt = MAX(startedAt,
+                IFNULL((SELECT MAX(t.endTime) FROM transcript_segments t WHERE t.recordId = records.id AND t.deleted = 0), 0),
+                IFNULL((SELECT MAX(g.endedAt) FROM recordings g WHERE g.recordId = records.id), 0)),
+            updatedAt = :updatedAt, syncStatus = 'PENDING'
+        WHERE endedAt IS NULL AND deleted = 0
+    """) suspend fun endLeftOpen(updatedAt: Long): Int
     @Query("UPDATE records SET deleted = 1, updatedAt = :updatedAt, syncStatus = 'PENDING' WHERE id = :id AND deleted = 0") suspend fun softDelete(id: Long, updatedAt: Long): Int
     @Query("UPDATE records SET deleted = 1, updatedAt = :updatedAt, syncStatus = 'PENDING' WHERE courseId = :courseId AND deleted = 0") suspend fun softDeleteForCourse(courseId: Long, updatedAt: Long): Int
     @Query("SELECT id FROM records WHERE courseId = :courseId AND deleted = 0") suspend fun idsForCourse(courseId: Long): List<Long>

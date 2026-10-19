@@ -68,6 +68,9 @@ class ClassroomCaptureRuntime private constructor(private val context: Context) 
 
     init { scope.launch { RecordingRecovery.ensure(recordings) } }
 
+    /** Realtime capture waits for process-start recovery too, so it never closes the new class. */
+    suspend fun awaitRecovery() = RecordingRecovery.ensure(recordings)
+
     fun tryClaimRealtime(recordId: Long): Boolean {
         if (!RecordingOperationGuard.tryAcquire(REALTIME_OWNER) || !mutex.tryLock()) {
             RecordingOperationGuard.release(REALTIME_OWNER); return false

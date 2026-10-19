@@ -84,6 +84,10 @@ class RecordingRepository(
             dao.relink(item.recordingId, audio.name, frames.toDurationMs(), frames, repairedState.name, null, now)
         }
         dao.recoverInterruptedProcessing(now)
+        // A realtime class has no recording row to repair; one the process died in stays open
+        // and would read as still in class forever. Close it at its last words.
+        val closed = database.recordDao().endLeftOpen(now)
+        if (closed > 0) Log.i("RecordingRecovery", "Closed $closed class(es) left open by a previous process")
     }
 
     /** Deletes one recording and its audio. Transcript segments already produced are kept. */
