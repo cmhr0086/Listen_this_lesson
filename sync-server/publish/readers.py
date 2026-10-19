@@ -87,9 +87,27 @@ def set_admin(db: Session, reader: Reader, value: bool) -> Reader:
     return reader
 
 
+MAX_AVATAR_CHARS = 96 * 1024
+AVATAR_PREFIXES = ("data:image/jpeg;base64,", "data:image/png;base64,", "data:image/webp;base64,")
+
+
+def save_profile(db: Session, reader: Reader, nickname: str | None, avatar: str | None) -> Reader:
+    """Nickname and a small avatar image (a data URL the mini program has already shrunk)."""
+    if avatar is not None:
+        if avatar and (not avatar.startswith(AVATAR_PREFIXES) or len(avatar) > MAX_AVATAR_CHARS):
+            raise ServiceError(422, "头像格式不对或太大")
+        reader.avatar = avatar or None
+    if nickname is not None:
+        reader.nickname = nickname or None
+    db.commit()
+    return reader
+
+
 def reader_dict(reader: Reader) -> dict:
     return {
         "readerId": reader.id,
+        "nickname": reader.nickname,
+        "avatar": reader.avatar,
         "transcriptAccess": reader.transcriptAccess,
         "requestedAt": reader.requestedAt,
         "isAdmin": bool(reader.isAdmin),

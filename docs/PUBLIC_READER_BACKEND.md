@@ -79,6 +79,7 @@ audit_log        id, at, actor(uploader:<id>|admin), action, target, detail
 | `POST /auth/wechat {code}` | 小程序 `wx.login` 的 code 换 openid（服务端调用 `jscode2session`，不保存 session_key），返回 30 天有效的读者 Token（`lr_…`）和 `transcriptAccess` |
 | `GET /me` | 当前读者的 `transcriptAccess`：`none`、`pending`、`approved`、`revoked`；Token 无效或过期返回 401 |
 | `POST /me/transcript-access {note?}` | 申请查看原文，可留一句话让管理员认出是谁 |
+| `PUT /me/profile {nickname?, avatar?}` | 读者在小程序里用微信头像、昵称填写能力设置的昵称（≤20 字）和头像（已压缩的 JPEG/PNG data URL，≤96 KB），管理员列表里显示 |
 | `GET /me/timetable`、`PUT /me/timetable {timetable, updatedAt}` | 读者的课程表，随微信账号同步。按手机上的修改时间 `updatedAt` 后写者胜；上传的比服务器旧时返回 409 并带回服务器那份 |
 
 - **原文只给获准读者**：笔记对所有人公开；课堂原文只给管理员允许的读者（按 openid，全局生效，不分课程）。读者在请求头里带 `Authorization: Bearer lr_…`；Token 缺失、无效或过期都按匿名处理，只给笔记。与读者有关的响应带 `Cache-Control: private, no-cache` 和 `Vary: Authorization`：共享缓存不会把原文给了别人，刚获准的读者下一次打开就能看到原文（内容没变时由 ETag 回 304）。
@@ -128,6 +129,7 @@ audit_log        id, at, actor(uploader:<id>|admin), action, target, detail
 | `GET /courses?status=pending\|all\|approved\|rejected\|taken_down` | 课程列表；待审队列按申请时间先后排，`reRequested` 标出重新申请的课程 |
 | `GET /courses/{id}` | 课程信息和全部课堂 |
 | `POST /courses/{id}/approve`、`/reject {note}`、`/takedown {note}` | 批准、驳回（理由显示给上传者）、下架整门课，写入审核日志 |
+| `DELETE /courses/{id}` | 删除已下架或已驳回的课程及其全部课堂和版本，不能撤销；上传者再次发布时作为新课程重新审核 |
 | `GET /lessons/{id}` | 课堂全文（原文和笔记），用于预览 |
 | `GET /lessons?withdrawRequested=true` | 撤回申请 |
 | `POST /lessons/{id}/takedown`、`/restore` | 下架或恢复单节课，下架同时了结撤回申请 |

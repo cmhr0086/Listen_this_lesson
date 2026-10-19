@@ -507,7 +507,7 @@ def test_signed_in_reader_sees_transcripts_only_after_approval(client):
     # Signing in again from another phone finds the same reader, still approved.
     again = sign_in(client)
     assert again["reader"] == {**login["reader"], "transcriptAccess": "approved", "requestedAt": pending["requestedAt"]}
-    assert again["reader"]["isAdmin"] is False
+    assert again["reader"]["isAdmin"] is False and again["reader"]["nickname"] is None
     assert len(client.get(lesson, headers=auth(again["token"])).json()["segments"]) == 2
 
     admin(client, "POST", f"/readers/{row['readerId']}/revoke")
@@ -584,3 +584,33 @@ def test_admin_reader_reviews_from_the_mini_program(client):
     assert client.get("/api/admin/v1/summary", headers=reader).status_code == 401
     # Uploader tokens never count as admin.
     assert client.get("/api/admin/v1/summary", headers=auth(token)).status_code == 401
+
+
+def test_reader_sets_nickname_and_avatar(client):
+    login = sign_in(client)
+    headers = auth(login["token"])
+    avatar = "data:image/jpeg;base64," + "A" * 2000
+    me = client.put("/api/public/v1/me/profile", headers=headers, json={"nickname": "  初梦浩然 ", "avatar": avatar}).json()
+    assert me["nickname"] == "初梦浩然" and me["avatar"] == avatar
+    # Leaving a field out keeps it; the admin list shows both.
+    assert client.put("/api/public/v1/me/profile", headers=headers, json={"nickname": "小林"}).json()["avatar"] == avatar
+    row = admin(client, "GET", "/readers")["readers"][0]
+    assert row["nickname"] == "小林" and row["avatar"] == avatar
+    bad = client.put("/api/public/v1/me/profile", headers=headers, json={"avatar": "https://example.com/a.png"})
+    assert bad.status_code == 422
+    assert client.put("/api/public/v1/me/profile", headers=headers, json={"nickname": "名" * 21}).status_code == 422
+
+
+def test_only_courses_off_the_reader_can_be_deleted(client):
+    token, result = publish_one(client)
+    url = f"/api/admin/v1/courses/{result['courseId']}"
+    headers = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
+    assert client.delete(url, headers=headers).status_code == 409
+    admin(client, "POST", f"/courses/{result['courseId']}/takedown", json={"note": "删掉"})
+    assert client.delete(url, headers=headers).json() == {"courseId": result["courseId"], "deleted": True}
+    assert client.get(url, headers=headers).status_code == 404
+    assert admin(client, "GET", "/courses", params={"status": "all"})["courses"] == []
+    assert any(e["action"] == "course.deleted" for e in admin(client, "GET", "/audit")["entries"])
+    # Uploading the same class again starts the course over, waiting for review.
+    again = submit(client, token, submission())
+    assert again["courseStatus"] == "pending" and again["courseId"] != result["courseId"]

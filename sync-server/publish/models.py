@@ -126,6 +126,9 @@ class Reader(Base):
     transcriptAccess: Mapped[str] = mapped_column(Text, nullable=False, default="none")
     # Can review from the mini program as well as the /admin page; set from /admin.
     isAdmin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+    # Filled in by the reader with WeChat's avatar and nickname pickers; shown in /admin.
+    nickname: Mapped[str | None] = mapped_column(Text)
+    avatar: Mapped[str | None] = mapped_column(Text)
     requestNote: Mapped[str | None] = mapped_column(Text)
     requestedAt: Mapped[int | None] = mapped_column(Integer)
     reviewedAt: Mapped[int | None] = mapped_column(Integer)

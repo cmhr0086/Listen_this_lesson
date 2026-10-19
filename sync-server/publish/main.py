@@ -32,6 +32,7 @@ from .models import AuditLog, Course, Lesson, Reader, Revision, RevisionNote, Re
 from .schemas import (
     CourseStatus,
     ReaderAccessRequest,
+    ReaderProfile,
     TimetableUpload,
     WechatLogin,
     LessonSubmissions,
@@ -269,6 +270,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
     def reader_me(reader: Reader = Depends(require_reader)):
         return readers.reader_dict(reader)
 
+    @public.put("/me/profile")
+    def reader_profile(body: ReaderProfile, reader: Reader = Depends(require_reader), db: Session = Depends(get_db)):
+        return readers.reader_dict(readers.save_profile(db, reader, body.nickname, body.avatar))
+
     @public.post("/me/transcript-access")
     def reader_request_access(
         body: ReaderAccessRequest | None = None, reader: Reader = Depends(require_reader), db: Session = Depends(get_db)
@@ -459,6 +464,11 @@ def create_app(database_url: str | None = None) -> FastAPI:
     @admin.post("/courses/{course_id}/takedown")
     def admin_course_takedown(course_id: str, body: ReviewDecision | None = None, db: Session = Depends(get_db)):
         return decide(course_id, "taken_down", body, db)
+
+    @admin.delete("/courses/{course_id}")
+    def admin_course_delete(course_id: str, db: Session = Depends(get_db)):
+        service.delete_course(db, course_id)
+        return {"courseId": course_id, "deleted": True}
 
     @admin.get("/lessons/{lesson_id}")
     def admin_lesson(lesson_id: str, db: Session = Depends(get_db)):
