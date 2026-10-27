@@ -55,6 +55,8 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material.icons.automirrored.outlined.Article
+import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.MaterialTheme
@@ -261,6 +263,10 @@ fun ListenApp(
         conversationId?.let(ai::conversation) ?: flowOf<com.cmhr.listen.data.ai.AiConversationEntity?>(null)
     }.collectAsStateWithLifecycle(initialValue = null)
     val aiContextSnapshot = headerResult?.sourceTextSnapshot ?: headerConversation?.sourceTextSnapshot
+    val conversationClass by remember(headerConversation?.recordId) {
+        headerConversation?.recordId?.let(courses::recordSummary) ?: flowOf(null)
+    }.collectAsStateWithLifecycle(initialValue = null)
+    var showAiDiagnostics by remember { mutableStateOf(false) }
     val selectionMode = route == "record/{recordId}" && recordId != null && aiState.selectionRecordId == recordId
     val contentSelectionMode = when {
         route == "record/{recordId}/ai-results" && recordId != null ->
@@ -596,7 +602,38 @@ fun ListenApp(
                         editingRecordCoursePrompt = currentCourse != null
                     }
                 )
-                route == "record/{recordId}/ai-result/{resultId}" || route == "record/{recordId}/ai-result/{resultId}/ask" || route == "ai/result/{recordId}/{resultId}" || route == "ai-conversation/{conversationId}" -> TopAppBar(
+                route == "ai-conversation/{conversationId}" -> TopAppBar(
+                    title = {
+                        Column {
+                            Text(headerConversation?.title ?: routeTitle(route), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            conversationClass?.let { summary ->
+                                Text(
+                                    listOfNotNull(summary.classNumber.takeIf { it > 0 }?.let { "第 $it 节" }, summary.courseName).joinToString(" · "),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = { nav.popBackStack() }) {
+                            Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
+                        }
+                    },
+                    actions = {
+                        if (!aiContextSnapshot.isNullOrBlank()) IconButton(onClick = { showAiContext = true }) {
+                            Icon(Icons.AutoMirrored.Outlined.Article, contentDescription = "课堂原文")
+                        }
+                        if (settingsState.developerMode && aiState.lastDiagnostics != null) {
+                            IconButton(onClick = { showAiDiagnostics = true }) {
+                                Icon(Icons.Outlined.BugReport, contentDescription = "请求诊断")
+                            }
+                        }
+                    }
+                )
+                route == "record/{recordId}/ai-result/{resultId}" || route == "record/{recordId}/ai-result/{resultId}/ask" || route == "ai/result/{recordId}/{resultId}" -> TopAppBar(
                     title = { Text(routeTitle(route)) },
                     navigationIcon = {
                         IconButton(onClick = { nav.popBackStack() }) {
@@ -1022,7 +1059,6 @@ fun ListenApp(
                 AiConversationScreen(
                     id,
                     ai,
-                    settingsState.developerMode,
                     onComposerClearanceChanged = { aiComposerClearance = it }
                 )
             }
