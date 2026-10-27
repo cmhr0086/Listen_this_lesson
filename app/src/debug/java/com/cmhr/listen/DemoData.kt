@@ -2,6 +2,8 @@ package com.cmhr.listen
 
 import android.content.Context
 import com.cmhr.listen.data.ai.AiActionType
+import com.cmhr.listen.data.ai.AiConversationEntity
+import com.cmhr.listen.data.ai.AiMessageEntity
 import com.cmhr.listen.data.ai.AiRequestStatus
 import com.cmhr.listen.data.ai.AiResultEntity
 import com.cmhr.listen.data.ai.AiResultSegmentEntity
@@ -10,7 +12,15 @@ import com.cmhr.listen.data.course.CourseEntity
 import com.cmhr.listen.data.course.ListenDatabase
 import com.cmhr.listen.data.course.SegmentEntity
 import com.cmhr.listen.data.course.SessionEntity
+import com.cmhr.listen.data.recording.RecordingEntity
+import com.cmhr.listen.data.recording.RecordingRepository
+import com.cmhr.listen.data.recording.RecordingState
+import com.cmhr.listen.audio.PcmRecorder
+import com.cmhr.listen.audio.StreamingWavRecorder
+import java.io.File
 import com.cmhr.listen.data.settings.AiPromptSettings
+import com.cmhr.listen.data.settings.LEGACY_QUICK_ANSWER_PROMPT
+import com.cmhr.listen.data.ai.LEGACY_CONVERSATION_PROMPT
 import kotlinx.coroutines.flow.first
 
 /**
@@ -21,11 +31,56 @@ import kotlinx.coroutines.flow.first
 object DemoData {
     suspend fun seedIfEmpty(context: Context) {
         val database = ListenDatabase.get(context)
-        if (database.courseDao().courses().first().isNotEmpty()) return
+        if (database.courseDao().courses().first().isEmpty()) seedClasses(database)
+        seedConversationIfMissing(database)
+        seedRecordingsIfMissing(context, database)
+    }
+
+    /** Two short tones on the 材料力学 demo class, so recording export can be tried without a microphone. */
+    private suspend fun seedRecordingsIfMissing(context: Context, database: ListenDatabase) {
+        val recordId = mechanicsRecordId(database) ?: return
+        if (database.recordingDao().observeForSession(recordId).first().isNotEmpty()) return
+        val session = database.recordDao().recordNow(recordId) ?: return
+        val directory = File(context.filesDir, RecordingRepository.DIRECTORY).apply { mkdirs() }
+        listOf(0L, 6 * 60_000L).forEachIndexed { index, offset ->
+            val seconds = 3 + index
+            val entity = RecordingEntity(recordId = recordId, sessionId = session.sessionId, localPath = "", startedAt = session.startedAt + offset)
+            val file = File(directory, RecordingRepository.audioFileName(entity.recordingId))
+            file.outputStream().use { out ->
+                out.write(ByteArray(StreamingWavRecorder.HEADER_BYTES.toInt()))
+                val samples = PcmRecorder.SAMPLE_RATE_HZ * seconds
+                val pcm = ByteArray(samples * 2)
+                for (i in 0 until samples) {
+                    val value = (Math.sin(2 * Math.PI * (440 + 220 * index) * i / PcmRecorder.SAMPLE_RATE_HZ) * 6000).toInt()
+                    pcm[2 * i] = value.toByte(); pcm[2 * i + 1] = (value shr 8).toByte()
+                }
+                out.write(pcm)
+            }
+            StreamingWavRecorder.repair(file)
+            val frames = StreamingWavRecorder.framesIn(file)
+            database.recordingDao().insert(
+                entity.copy(
+                    localPath = file.name,
+                    endedAt = entity.startedAt + seconds * 1_000L,
+                    durationMs = seconds * 1_000L,
+                    totalFrames = frames,
+                    processedFrames = frames,
+                    state = RecordingState.COMPLETED.name
+                )
+            )
+        }
+    }
+
+    private fun mechanicsRecordId(database: ListenDatabase): Long? = database.openHelper.writableDatabase.query(
+        "SELECT r.id FROM records r JOIN courses c ON c.id = r.courseId WHERE c.name = ? AND r.deleted = 0 LIMIT 1",
+        arrayOf<Any>(MECHANICS_COURSE)
+    ).use { if (it.moveToFirst()) it.getLong(0) else null }
+
+    private suspend fun seedClasses(database: ListenDatabase) {
         val now = System.currentTimeMillis()
         seedClass(
             database,
-            course = "示例 · 材料力学",
+            course = MECHANICS_COURSE,
             className = "截面的几何性质",
             topic = "静矩与惯性矩",
             startedAt = now - 26 * HOUR,
@@ -44,6 +99,35 @@ object DemoData {
             notes = OUTLINE_NOTES,
             notesPrompt = NoteStyle.buildPrompt(NoteStyle.OUTLINE, AiPromptSettings())
         )
+    }
+
+    /**
+     * A finished class Q&A on the 材料力学 demo class, saved with the pre-1.5.1 prompts, so the chat
+     * page and the prompt upgrade can be looked at without sending a question.
+     */
+    private suspend fun seedConversationIfMissing(database: ListenDatabase) {
+        val sql = database.openHelper.writableDatabase
+        val recordId = mechanicsRecordId(database) ?: return
+        val hasConversation = sql.query("SELECT 1 FROM ai_conversations WHERE recordId = ? LIMIT 1", arrayOf<Any>(recordId))
+            .use { it.moveToFirst() }
+        if (hasConversation) return
+        val now = System.currentTimeMillis()
+        val conversationId = database.aiDao().insertConversation(
+            AiConversationEntity(
+                recordId = recordId,
+                title = "静矩为什么可以是负的",
+                sourceTextSnapshot = MECHANICS_LINES.joinToString("\n") { it.first },
+                systemPrompt = "$LEGACY_CONVERSATION_PROMPT\n\n原始处理任务：$LEGACY_QUICK_ANSWER_PROMPT",
+                createdAt = now - 20 * 60_000L,
+                updatedAt = now - 19 * 60_000L
+            )
+        )
+        DEMO_CHAT.forEachIndexed { index, (role, content) ->
+            val at = now - 20 * 60_000L + index * 30_000L
+            database.aiDao().insertMessage(
+                AiMessageEntity(conversationId = conversationId, role = role, content = content, createdAt = at, finishedAt = at)
+            )
+        }
     }
 
     private suspend fun seedClass(
@@ -92,6 +176,29 @@ object DemoData {
     }
 
     private const val HOUR = 60 * 60_000L
+    private const val MECHANICS_COURSE = "示例 · 材料力学"
+
+    private val DEMO_CHAT = listOf(
+        "user" to "老师说静矩可正可负也可以是零，为什么面积乘坐标会是负的？",
+        "assistant" to """
+            因为静矩里乘的是 **带符号的坐标**，不是距离。
+
+            - 对 y 轴的静矩 Sy = ∫ x·dA，x 在 y 轴左边是负的
+            - 图形大部分面积在轴的左侧，Sy 就是负的；左右抵消时就是零
+            - 所以静矩的符号只说明形心在轴的哪一侧：Sy = A·xc，xc < 0 时 Sy < 0
+
+            这也是为什么 **对形心轴的静矩等于零**：形心轴两边的面积矩正好抵消。
+        """.trimIndent(),
+        "user" to "那惯性矩为什么一定是正的？",
+        "assistant" to """
+            惯性矩里坐标是 **平方**：Ix = ∫ y²·dA。
+
+            - y² 无论 y 正负都不小于零，dA 又是正的，积分只能是正数
+            - 极惯性矩同理：Ip = ∫ ρ²·dA，ρ 是到原点的距离
+
+            一句话：静矩看"在哪一边"，惯性矩看"离得有多远"。
+        """.trimIndent()
+    )
     private const val SEGMENT_MS = 30_000L
 
     private const val LEGACY_PROMPT = "你是课堂笔记整理助手。只依据原文，按主题、关键要点和专业术语整理成中文笔记；保留重要限定条件，不得虚构。"

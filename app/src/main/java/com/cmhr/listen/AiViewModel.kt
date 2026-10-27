@@ -27,6 +27,7 @@ import com.cmhr.listen.data.course.ListenDatabase
 import com.cmhr.listen.data.course.TranscriptEntity
 import com.cmhr.listen.data.settings.AppSettingsRepository
 import com.cmhr.listen.data.settings.AiPromptSettings
+import com.cmhr.listen.data.settings.upgradeLegacyPrompts
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -833,10 +834,11 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
             val originResult = conversation.originResultId?.let { resultId ->
                 repository.resultOnce(resultId)
             }
+            val prompts = settingsRepository.settings.first().aiPrompts
             val contextMessages = buildList {
-                add(AiChatMessage("system", conversation.systemPrompt))
+                add(AiChatMessage("system", prompts.upgradeLegacyPrompts(conversation.systemPrompt)))
                 if (conversation.sourceTextSnapshot.isNotBlank()) {
-                    add(AiChatMessage("user", "以下内容是本对话冻结的课堂原文，只能依据它回答：\n\n${conversation.sourceTextSnapshot}"))
+                    add(AiChatMessage("user", "以下是这节课的转写原文，供回答时参考：\n\n${conversation.sourceTextSnapshot}"))
                 }
                 originResult?.output?.takeIf { it.isNotBlank() }?.let { add(AiChatMessage("assistant", it)) }
             }

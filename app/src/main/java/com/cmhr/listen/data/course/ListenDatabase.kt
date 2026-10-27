@@ -23,7 +23,7 @@ import com.cmhr.listen.data.ai.AiMessageEntity
 import com.cmhr.listen.data.ai.AiResultEntity
 import com.cmhr.listen.data.ai.AiResultSegmentEntity
 import com.cmhr.listen.data.ai.AiAttachmentEntity
-import com.cmhr.listen.data.ai.DEFAULT_CONVERSATION_PROMPT
+import com.cmhr.listen.data.ai.LEGACY_CONVERSATION_PROMPT
 import com.cmhr.listen.data.stt.AsrDiagnosticsDao
 import com.cmhr.listen.data.stt.AsrNetworkEventEntity
 import com.cmhr.listen.data.stt.AsrSegmentDiagnosticEntity
@@ -468,7 +468,7 @@ abstract class ListenDatabase : RoomDatabase() {
         }
         val MIGRATION_3_4 = object : Migration(3, 4) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                val escapedPrompt = DEFAULT_CONVERSATION_PROMPT.replace("'", "''")
+                val escapedPrompt = LEGACY_CONVERSATION_PROMPT.replace("'", "''")
                 db.execSQL("ALTER TABLE ai_conversations ADD COLUMN systemPrompt TEXT NOT NULL DEFAULT '$escapedPrompt'")
                 db.execSQL("ALTER TABLE ai_messages ADD COLUMN contextPrompt TEXT NOT NULL DEFAULT ''")
                 db.execSQL("CREATE TABLE IF NOT EXISTS ai_image_attachments (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, recordId INTEGER NOT NULL, resultId INTEGER, messageId INTEGER, relativePath TEXT NOT NULL, mimeType TEXT NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL, createdAt INTEGER NOT NULL, FOREIGN KEY(recordId) REFERENCES records(id) ON UPDATE NO ACTION ON DELETE CASCADE, FOREIGN KEY(resultId) REFERENCES ai_results(id) ON UPDATE NO ACTION ON DELETE CASCADE, FOREIGN KEY(messageId) REFERENCES ai_messages(id) ON UPDATE NO ACTION ON DELETE CASCADE)")

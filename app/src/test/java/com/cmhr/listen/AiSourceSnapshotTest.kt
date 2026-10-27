@@ -55,12 +55,13 @@ class AiSourceSnapshotTest {
     }
 
     @Test
-    fun `quick answer prompt answers explicit teacher questions without inventing`() {
+    fun `quick answer prompt answers the teacher's questions instead of hedging`() {
         val prompt = AiViewModel.promptFor(AiActionType.QUICK_ANSWER)
 
-        assertTrue(prompt.contains("识别老师明确提出的问题"))
-        assertTrue(prompt.contains("逐条给出简洁答案"))
-        assertTrue(prompt.contains("不得虚构"))
+        assertTrue(prompt.contains("找出老师提出的问题"))
+        assertTrue(prompt.contains("直接给出答案"))
+        assertTrue(prompt.contains("用你的专业知识直接完整作答"))
+        assertFalse(prompt.contains("必须明确说明"))
     }
 
     @Test

@@ -36,6 +36,11 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material.icons.outlined.ArrowUpward
+import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -653,7 +658,6 @@ fun AiConversationsScreen(recordId: Long, model: AiViewModel, openConversation: 
 fun AiConversationScreen(
     conversationId: Long,
     model: AiViewModel,
-    developerMode: Boolean = false,
     onComposerClearanceChanged: (Dp) -> Unit = {}
 ) {
     val conversation by model.conversation(conversationId).collectAsStateWithLifecycle(initialValue = null)
@@ -661,19 +665,11 @@ fun AiConversationScreen(
     val aiState by model.uiState.collectAsStateWithLifecycle()
     var question by remember { mutableStateOf("") }
     var pendingAttachments by remember { mutableStateOf(emptyList<PendingAiAttachment>()) }
-    var contextExpanded by remember(conversationId) { mutableStateOf(false) }
-    var contextInitialized by remember(conversationId) { mutableStateOf(false) }
     val context = LocalContext.current
     val clipboard = remember(context) { context.getSystemService(ClipboardManager::class.java) }
     val latestAttachments by rememberUpdatedState(pendingAttachments)
     DisposableEffect(conversationId) {
         onDispose { latestAttachments.forEach(model::discardAttachment) }
-    }
-    LaunchedEffect(conversation?.id, messages.size) {
-        if (!contextInitialized && conversation != null) {
-            contextExpanded = messages.none { it.role == "user" }
-            contextInitialized = true
-        }
     }
     val listState = rememberLazyListState()
     var followLatest by remember { mutableStateOf(true) }
@@ -683,10 +679,7 @@ fun AiConversationScreen(
         }
     }
     LaunchedEffect(messages.size, messages.lastOrNull()?.content, conversation?.id) {
-        if (followLatest && messages.isNotEmpty()) {
-            val titleOffset = if (conversation != null) 1 else 0
-            listState.scrollToItem(messages.lastIndex + titleOffset)
-        }
+        if (followLatest && messages.isNotEmpty()) listState.scrollToItem(messages.lastIndex)
     }
     FloatingComposerLayout(
         onComposerClearanceChanged = onComposerClearanceChanged,
@@ -695,25 +688,12 @@ fun AiConversationScreen(
             Modifier.fillMaxSize().testTag("ai-conversation-message-list"),
             state = listState,
             contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = composerClearance),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(20.dp)
         ) {
-            conversation?.let { value ->
-                item("conversation-title") { Text(value.title, style = MaterialTheme.typography.titleLarge) }
-                if (value.sourceTextSnapshot.isNotBlank()) {
-                    item("conversation-context-preview") {
-                        ConversationContextCard(value.sourceTextSnapshot, contextExpanded) {
-                            contextExpanded = !contextExpanded
-                        }
-                    }
-                }
-            }
             items(messages, key = { "message-${it.id}" }) { message ->
                 ChatMessageBubble(message, aiState.messageStreamPhases[message.id], model, clipboard)
             }
             aiState.error?.let { item("conversation-error") { Text(it, color = MaterialTheme.colorScheme.error) } }
-            if (developerMode) aiState.lastDiagnostics?.let { diagnostics ->
-                item("conversation-diagnostics") { AiDiagnosticsCard(diagnostics) }
-            }
         }
         },
         composer = { composerModifier ->
@@ -724,6 +704,7 @@ fun AiConversationScreen(
                 model = model,
                 enabled = !aiState.isBusy,
                 updateAttachments = { pendingAttachments = it },
+                placeholder = if (conversation?.recordId != null) "问问这节课" else "输入消息",
                 send = {
                     val sentAttachments = pendingAttachments
                     model.sendMessage(conversationId, question, sentAttachments)
@@ -737,7 +718,7 @@ fun AiConversationScreen(
 }
 
 @Composable
-private fun AiDiagnosticsCard(value: com.cmhr.listen.AiRequestDiagnostics) = GroupCard(Modifier.fillMaxWidth()) {
+internal fun AiDiagnosticsCard(value: com.cmhr.listen.AiRequestDiagnostics) = GroupCard(Modifier.fillMaxWidth()) {
     Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
         Text("最近 AI 请求诊断", style = MaterialTheme.typography.titleSmall)
         Text("模型：${value.model}")
@@ -758,33 +739,37 @@ private fun ChatMessageBubble(
     clipboard: ClipboardManager?
 ) {
     val photos by model.messageAttachments(message.id).collectAsStateWithLifecycle(initialValue = emptyList())
-    val isUser = message.role == "user"
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start) {
-        Card(
-            modifier = if (isUser) Modifier.widthIn(max = 420.dp) else Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(22.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = if (isUser) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
-            )
-        ) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(if (isUser) "我" else "AI", style = MaterialTheme.typography.labelLarge)
-                if (isUser) {
-                    Text(message.content, style = MaterialTheme.typography.bodyLarge)
-                } else {
-                    ReasoningSection(message.reasoningContent, message.status, phase)
-                    if (message.content.isNotBlank()) MarkdownText(message.content)
-                    StreamStatus(message.status, phase, message.errorMessage)
-                }
-                if (photos.isNotEmpty()) PersistedAttachmentRow(photos, model)
-                if (!isUser && message.content.isNotBlank()) {
-                    Box(Modifier.fillMaxWidth()) { CopyButton(message.content, clipboard, Modifier.align(Alignment.CenterEnd)) }
-                }
-            }
-        }
+    if (message.role == "user") {
+        UserBubble(message.content, photos, model)
+    } else {
+        AssistantBubble(
+            text = message.content,
+            reasoning = message.reasoningContent,
+            status = message.status,
+            phase = phase,
+            error = message.errorMessage,
+            photos = photos,
+            model = model,
+            clipboard = clipboard
+        )
     }
 }
 
+@Composable
+private fun UserBubble(text: String, photos: List<AiAttachmentEntity>, model: AiViewModel) =
+    Column(Modifier.fillMaxWidth().padding(start = 48.dp), horizontalAlignment = Alignment.End) {
+        Surface(
+            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomEnd = 6.dp, bottomStart = 20.dp),
+            color = MaterialTheme.colorScheme.primaryContainer
+        ) {
+            Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (text.isNotBlank()) Text(text, style = MaterialTheme.typography.bodyLarge)
+                if (photos.isNotEmpty()) PersistedAttachmentRow(photos, model)
+            }
+        }
+    }
+
+/** An AI answer sits straight on the page, full width, with its actions underneath. */
 @Composable
 private fun AssistantBubble(
     text: String,
@@ -797,23 +782,19 @@ private fun AssistantBubble(
     clipboard: ClipboardManager?,
     retry: (() -> Unit)? = null,
     retryEnabled: Boolean = true
-) = Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
-    Card(
-        Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(22.dp)
+) = Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    ReasoningSection(reasoning, status, phase)
+    if (text.isNotBlank()) MarkdownText(text)
+    StreamStatus(status, phase, error)
+    if (photos.isNotEmpty()) PersistedAttachmentRow(photos, model)
+    val canRetry = status == AiRequestStatus.ERROR.name && retry != null
+    if (text.isNotBlank() || canRetry) Row(
+        Modifier.offset(x = (-8).dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("AI", style = MaterialTheme.typography.labelLarge)
-            ReasoningSection(reasoning, status, phase)
-            if (text.isNotBlank()) MarkdownText(text)
-            StreamStatus(status, phase, error)
-            if (photos.isNotEmpty()) PersistedAttachmentRow(photos, model)
-            if (text.isNotBlank()) {
-                Box(Modifier.fillMaxWidth()) { CopyButton(text, clipboard, Modifier.align(Alignment.CenterEnd)) }
-            }
-            if (status == AiRequestStatus.ERROR.name && retry != null) {
-                Button(onClick = retry, enabled = retryEnabled) { Text("重试") }
-            }
+        if (text.isNotBlank()) CopyButton(text, clipboard)
+        if (canRetry) IconButton(onClick = retry!!, enabled = retryEnabled, modifier = Modifier.size(36.dp)) {
+            Icon(Icons.Outlined.Refresh, contentDescription = "重试", modifier = Modifier.size(18.dp))
         }
     }
 }
@@ -1008,7 +989,8 @@ private fun AiChatComposer(
     enabled: Boolean,
     updateAttachments: (List<PendingAiAttachment>) -> Unit,
     send: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    placeholder: String = "输入消息"
 ) {
     var attachmentMenuExpanded by remember { mutableStateOf(false) }
     var refocusRequest by remember { mutableIntStateOf(0) }
@@ -1072,7 +1054,9 @@ private fun AiChatComposer(
     Column(
         modifier
             .fillMaxWidth()
-            .padding(start = 12.dp, end = 12.dp, bottom = bottomChrome.composerBottomPadding + 16.dp)
+            // Opaque, so answers scrolling underneath don't show around the pill.
+            .background(MaterialTheme.colorScheme.background)
+            .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = bottomChrome.composerBottomPadding + 12.dp)
             .testTag("ai-chat-composer"),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
@@ -1080,20 +1064,20 @@ private fun AiChatComposer(
             modifier = Modifier
                 .fillMaxWidth()
                 .testTag("ai-chat-composer-surface"),
-            shape = RoundedCornerShape(28.dp),
+            shape = RoundedCornerShape(24.dp),
             color = MaterialTheme.colorScheme.surfaceContainerHigh,
             tonalElevation = 0.dp,
             shadowElevation = 0.dp
         ) {
             Column(
-                Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
+                Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 if (attachments.isNotEmpty()) PendingAttachmentRow(attachments, model, updateAttachments)
                 Row(
                     Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
                     Box {
                         IconButton(
@@ -1106,8 +1090,8 @@ private fun AiChatComposer(
                                 }
                             },
                             enabled = enabled && attachments.size < AiAttachmentStore.MAX_ATTACHMENTS_PER_REQUEST,
-                            modifier = Modifier.testTag("attachment-button")
-                        ) { Icon(Icons.Outlined.Add, contentDescription = "添加附件") }
+                            modifier = Modifier.size(40.dp).testTag("attachment-button")
+                        ) { Icon(Icons.Outlined.Add, contentDescription = "添加附件", modifier = Modifier.size(22.dp)) }
                         DropdownMenu(
                             expanded = attachmentMenuExpanded,
                             onDismissRequest = {
@@ -1157,21 +1141,37 @@ private fun AiChatComposer(
                             )
                         }
                     }
-                    OutlinedTextField(
+                    // A plain field: Material's TextField is 56dp tall at minimum, too bulky for one line.
+                    BasicTextField(
                         value = value,
                         onValueChange = onValueChange,
                         modifier = Modifier
                             .weight(1f)
+                            .padding(vertical = 8.dp)
                             .focusRequester(focusRequester)
                             .onFocusChanged { textFieldFocused = it.isFocused }
                             .testTag("composer-input"),
-                        placeholder = { Text("输入消息") },
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                         minLines = 1,
                         maxLines = 6,
-                        shape = RoundedCornerShape(24.dp)
+                        decorationBox = { field ->
+                            Box(contentAlignment = Alignment.CenterStart) {
+                                if (value.isEmpty()) Text(
+                                    placeholder,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                field()
+                            }
+                        }
                     )
-                    FilledIconButton(onClick = send, enabled = enabled && value.isNotBlank()) {
-                        Icon(Icons.AutoMirrored.Outlined.Send, contentDescription = "发送")
+                    FilledIconButton(
+                        onClick = send,
+                        enabled = enabled && value.isNotBlank(),
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(Icons.Outlined.ArrowUpward, contentDescription = "发送", modifier = Modifier.size(20.dp))
                     }
                 }
             }

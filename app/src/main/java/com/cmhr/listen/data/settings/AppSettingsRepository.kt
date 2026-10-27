@@ -1,5 +1,7 @@
 package com.cmhr.listen.data.settings
 
+import com.cmhr.listen.data.ai.DEFAULT_CONVERSATION_PROMPT
+import com.cmhr.listen.data.ai.LEGACY_CONVERSATION_PROMPT
 import com.cmhr.listen.ui.theme.DarkModePreference
 import com.cmhr.listen.ui.theme.ThemePalette
 
@@ -65,8 +67,8 @@ data class AiPromptSettings(
     val summary: String = "你是课堂内容整理助手。只依据提供的课堂原文，输出结构清晰的重点摘要；不要虚构原文没有的信息，对不确定内容明确说明。",
     val organizeNotes: String = DEFAULT_NOTES_PROMPT,
     val correctAsr: String = "你是课堂语音转写校对助手。只修正原文中明显的 ASR 错字、同音词和标点，不改变原意；无法确认处保留原文并标记。只输出建议修正版。",
-    val quickAnswer: String = "你是课堂问题快速回答助手。先从原文中识别老师明确提出的问题，再按出现顺序逐条给出简洁答案。只能依据原文和可靠的通用知识；原文不足、说话人或问题不确定时必须明确说明，不得虚构课堂内容。",
-    val customConversation: String = "你是课堂内容问答助手。只能依据提供的冻结课堂原文回答；若原文不足以回答，应明确说明，不得虚构。",
+    val quickAnswer: String = DEFAULT_QUICK_ANSWER_PROMPT,
+    val customConversation: String = DEFAULT_CONVERSATION_PROMPT,
     val generalConversation: String = "你是可靠、清晰的中文 AI 助手。准确回答用户问题；不确定时明确说明，不得虚构事实。",
     val imageContext: String = "请结合附加课堂照片中清晰可见的黑板、课件、公式和图表补充判断；无法辨认的内容必须明确说明，不得猜测。",
     val noteStyleDetailed: String = "按讲课顺序分节，尽量完整保留讲解过程：概念是怎么引出的、推导步骤、例子和例题的完整解法、老师的补充说明。宁可详细，不要只列关键词；每个要点写成完整的句子。",
@@ -81,6 +83,16 @@ const val DEFAULT_NOTES_PROMPT = """你是课堂笔记整理助手，根据课�
 2. 保留老师强调的定义、公式、数值、限定条件、例题，以及考试相关信息（题型、分值、范围）。
 3. 使用规范 Markdown：小节标题用「## 」开头；要点用「- 」开头（短横线后有空格），子要点缩进两个空格；关键术语用 **加粗**。
 4. 不写开场白和客套话，直接输出笔记。"""
+
+const val DEFAULT_QUICK_ANSWER_PROMPT = "你是课堂问题快速回答助手。从课堂转写原文中找出老师提出的问题，按出现顺序逐条写出问题并直接给出答案。老师课上讲了答案的，以老师的讲法为准；没讲的，用你的专业知识直接完整作答，不要说明原文不足，也不要标注答案来源。转写可能有同音错字，按上下文理解问题；实在听不出问的是什么的就跳过。"
+
+/** Quick-answer prompt shipped before 1.5.1; like the old class chat prompt it made the AI hedge instead of answering. */
+internal const val LEGACY_QUICK_ANSWER_PROMPT = "你是课堂问题快速回答助手。先从原文中识别老师明确提出的问题，再按出现顺序逐条给出简洁答案。只能依据原文和可靠的通用知识；原文不足、说话人或问题不确定时必须明确说明，不得虚构课堂内容。"
+
+/** Swaps the old shipped prompts inside a saved system prompt for the current ones, so earlier chats stop hedging too. */
+fun AiPromptSettings.upgradeLegacyPrompts(systemPrompt: String): String = systemPrompt
+    .replace(LEGACY_CONVERSATION_PROMPT, customConversation)
+    .replace(LEGACY_QUICK_ANSWER_PROMPT, quickAnswer)
 
 /** Notes prompt shipped before 1.5; a stored copy of it is read as the current default. */
 internal const val LEGACY_NOTES_PROMPT = "你是课堂笔记整理助手。只依据原文，按主题、关键要点和专业术语整理成中文笔记；保留重要限定条件，不得虚构。"
@@ -154,8 +166,8 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
                 summary = preferences[AI_PROMPT_SUMMARY] ?: AiPromptSettings().summary,
                 organizeNotes = preferences[AI_PROMPT_NOTES]?.takeIf { it.trim() != LEGACY_NOTES_PROMPT } ?: AiPromptSettings().organizeNotes,
                 correctAsr = preferences[AI_PROMPT_CORRECT] ?: AiPromptSettings().correctAsr,
-                quickAnswer = preferences[AI_PROMPT_QUICK] ?: AiPromptSettings().quickAnswer,
-                customConversation = preferences[AI_PROMPT_CHAT] ?: AiPromptSettings().customConversation,
+                quickAnswer = preferences[AI_PROMPT_QUICK]?.takeIf { it.trim() != LEGACY_QUICK_ANSWER_PROMPT } ?: AiPromptSettings().quickAnswer,
+                customConversation = preferences[AI_PROMPT_CHAT]?.takeIf { it.trim() != LEGACY_CONVERSATION_PROMPT } ?: AiPromptSettings().customConversation,
                 generalConversation = preferences[AI_PROMPT_GENERAL_CHAT] ?: AiPromptSettings().generalConversation,
                 imageContext = preferences[AI_PROMPT_IMAGE] ?: AiPromptSettings().imageContext,
                 noteStyleDetailed = preferences[AI_PROMPT_STYLE_DETAILED] ?: AiPromptSettings().noteStyleDetailed,
