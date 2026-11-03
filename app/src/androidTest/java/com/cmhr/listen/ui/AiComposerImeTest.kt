@@ -14,7 +14,16 @@ import org.junit.Rule
 import org.junit.Test
 
 class AiComposerImeTest {
-    @get:Rule val composeRule = createAndroidComposeRule<MainActivity>()
+    // A clean test install would otherwise open on the first-run wizard.
+    @get:Rule(order = 0) val setupDone = object : org.junit.rules.ExternalResource() {
+        override fun before() = kotlinx.coroutines.runBlocking {
+            val context = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
+            com.cmhr.listen.data.settings.AppSettingsRepository(context).setSetupState(com.cmhr.listen.data.settings.SetupState.DONE)
+            Unit
+        }
+    }
+
+    @get:Rule(order = 1) val composeRule = createAndroidComposeRule<MainActivity>()
 
     @Test
     fun attachmentMenuDoesNotFocusInputAndCanBeReopened() {
