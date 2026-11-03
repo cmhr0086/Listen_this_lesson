@@ -189,6 +189,7 @@ private fun routeTitle(route: String?): String = when (route) {
     "settings/ai-service" -> "AI 服务"
     "settings/ai-service/models" -> "选择模型"
     "settings/asr-prompt-policy/thresholds" -> "自动模式门槛"
+    "settings/device" -> "设备绑定"
     "settings/cloud-sync" -> "云同步"
     "settings/publish" -> "公开发布"
     "course/{courseId}/publish" -> "公开发布"
