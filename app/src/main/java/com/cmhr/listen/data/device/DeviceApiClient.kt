@@ -111,6 +111,8 @@ class DeviceApiClient(
 
     private fun errorMessage(code: Int, text: String): String {
         val detail = runCatching { json.decodeFromString<JsonObject>(text)["detail"] as? JsonPrimitive }.getOrNull()
+        // FastAPI's bare "Not Found" means the route is missing: a server older than this app.
+        if (code == 404 && detail?.content == "Not Found") return "服务器还不支持设备绑定，请稍后再试。"
         return detail?.takeIf { it.isString }?.content ?: "服务暂时不可用（$code）。"
     }
 
