@@ -187,3 +187,63 @@ class MaterialUpdate(StrictModel):
 
 class MaterialOrder(StrictModel):
     materialIds: list[str] = Field(max_length=500)
+
+
+class ReaderRemark(StrictModel):
+    remark: str = Field(max_length=20)
+
+    @field_validator("remark")
+    @classmethod
+    def trimmed(cls, value: str) -> str:
+        return value.strip()
+
+
+class PairingRequest(StrictModel):
+    name: str = Field(min_length=1, max_length=100)
+
+    @field_validator("name")
+    @classmethod
+    def required(cls, value: str) -> str:
+        return _required_text(value)
+
+
+class PairingClaim(StrictModel):
+    claim: str = Field(min_length=1, max_length=200)
+
+
+class SttConfig(StrictModel):
+    provider: Literal["SELF_HOSTED", "OPENAI_COMPATIBLE"]
+    baseUrl: str = Field(max_length=500)
+    model: str = Field(default="", max_length=200)
+    apiKey: str | None = Field(default=None, max_length=1000)
+
+
+class AiConfig(StrictModel):
+    provider: Literal["OPENAI_COMPATIBLE", "DEEPSEEK"]
+    baseUrl: str = Field(max_length=500)
+    model: str = Field(default="", max_length=200)
+    apiKey: str | None = Field(default=None, max_length=1000)
+
+
+class SyncConfig(StrictModel):
+    baseUrl: str = Field(max_length=500)
+    apiToken: str | None = Field(default=None, max_length=1000)
+
+
+class PublishConfig(StrictModel):
+    token: str | None = Field(default=None, max_length=1000)
+    schoolName: str = Field(default="", max_length=200)
+
+
+class ConfigSections(StrictModel):
+    stt: SttConfig | None = None
+    ai: AiConfig | None = None
+    sync: SyncConfig | None = None
+    publish: PublishConfig | None = None
+
+
+class ConfigSync(StrictModel):
+    # changed: edited on this phone, replaces the cloud copy. offered: what a phone already had
+    # when it was bound, kept only for sections the cloud has nothing for.
+    changed: ConfigSections = ConfigSections()
+    offered: ConfigSections = ConfigSections()

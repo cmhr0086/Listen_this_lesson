@@ -25,16 +25,20 @@ from app.database import create_sync_engine
 
 from starlette.concurrency import run_in_threadpool
 
-from . import materials, queries, readers, service
+from . import devices, materials, queries, readers, service
 from .timetable_pdf import TimetableError, parse_timetable
 from .database import initialize_database
-from .models import AuditLog, Course, Lesson, Reader, Revision, RevisionNote, RevisionSegment, Uploader
+from .models import AuditLog, Course, Device, Lesson, Reader, Revision, RevisionNote, RevisionSegment, Uploader
 from .schemas import (
+    ConfigSync,
     CourseStatus,
     MaterialOrder,
     MaterialUpdate,
+    PairingClaim,
+    PairingRequest,
     ReaderAccessRequest,
     ReaderProfile,
+    ReaderRemark,
     TimetableUpload,
     WechatLogin,
     LessonSubmissions,
@@ -50,6 +54,8 @@ MAX_SUBMISSION_BYTES = 8 * 1024 * 1024
 MAX_TIMETABLE_PDF_BYTES = 2 * 1024 * 1024
 TIMETABLE_PDF_PER_HOUR = 20
 WECHAT_LOGINS_PER_HOUR = 30
+PAIRINGS_PER_HOUR = 20
+PAIRING_LOOKUPS_PER_HOUR = 10
 ADMIN_PAGE = Path(__file__).with_name("admin.html")
 
 
@@ -58,6 +64,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
     admin_token = os.getenv("PUBLISH_ADMIN_TOKEN")
     wechat_appid = os.getenv("WECHAT_APPID")
     wechat_secret = os.getenv("WECHAT_SECRET")
+    config_key = os.getenv("PUBLISH_CONFIG_KEY")
+    config_cipher = devices.ConfigCipher(config_key) if config_key else None
+    sync_url, sync_token = os.getenv("PUBLISH_SYNC_BASE_URL"), os.getenv("SYNC_API_TOKEN")
+    sync_defaults = {"baseUrl": sync_url, "apiToken": sync_token} if sync_url and sync_token else None
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -108,6 +118,13 @@ def create_app(database_url: str | None = None) -> FastAPI:
         if reader is None:
             raise unauthorized()
         return reader
+
+    def require_device(authorization: Annotated[str | None, Header()] = None, db: Session = Depends(get_db)) -> Device:
+        token = bearer(authorization)
+        device = devices.authenticate(db, token) if token else None
+        if device is None:
+            raise unauthorized()
+        return device
 
     def require_admin(authorization: Annotated[str | None, Header()] = None, db: Session = Depends(get_db)) -> None:
         # The /admin page sends the admin token; the mini program sends an admin reader's token.
@@ -322,6 +339,74 @@ def create_app(database_url: str | None = None) -> FastAPI:
         except readers.TimetableConflict as conflict:
             # Changed later on another phone: hand that copy back so this one can take it.
             return JSONResponse(status_code=409, content={"detail": "课表在另一台手机上更新过", **conflict.current})
+
+    # ---- devices: bind a phone, then keep its service settings in the cloud ---------------
+
+    pairing_calls: dict[str, list[float]] = {}
+
+    def limit_pairing(key: str, per_hour: int) -> None:
+        now = time.monotonic()
+        recent = [t for t in pairing_calls.get(key, []) if now - t < 3600]
+        if len(recent) >= per_hour:
+            raise HTTPException(429, "尝试太频繁，请稍后再试")
+        pairing_calls[key] = recent + [now]
+        if len(pairing_calls) > 10_000:
+            pairing_calls.clear()
+
+    def require_config_cipher() -> devices.ConfigCipher:
+        if config_cipher is None:
+            raise HTTPException(503, "服务端未配置设备绑定")
+        return config_cipher
+
+    def require_binding_admin(reader: Reader = Depends(require_reader)) -> Reader:
+        require_config_cipher()
+        if not reader.isAdmin:
+            raise HTTPException(403, "这个账号不能绑定设备")
+        limit_pairing(f"reader:{reader.id}", PAIRING_LOOKUPS_PER_HOUR)
+        return reader
+
+    def no_store(payload) -> JSONResponse:
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+    @public.post("/devices/pairings")
+    def device_pairing(body: PairingRequest, request: Request, db: Session = Depends(get_db)):
+        require_config_cipher()
+        client = request.headers.get("x-real-ip") or (request.client.host if request.client else "")
+        limit_pairing(f"ip:{client}", PAIRINGS_PER_HOUR)
+        return no_store(devices.create_pairing(db, body.name))
+
+    @public.post("/devices/pairings/claim")
+    def device_claim(body: PairingClaim, db: Session = Depends(get_db)):
+        return no_store(devices.claim_pairing(db, body.claim))
+
+    @public.post("/devices/config/sync")
+    def device_config(body: ConfigSync, device: Device = Depends(require_device), db: Session = Depends(get_db)):
+        return no_store(devices.sync_config(db, device, require_config_cipher(), body, sync_defaults))
+
+    @public.delete("/devices/current")
+    def device_unbind(device: Device = Depends(require_device), db: Session = Depends(get_db)):
+        devices.remove(db, device, f"device:{device.id}")
+        return {"removed": True}
+
+    @public.get("/me/device-pairings/{code}")
+    def reader_pairing(code: str, _reader: Reader = Depends(require_binding_admin), db: Session = Depends(get_db)):
+        return devices.preview_pairing(db, code)
+
+    @public.post("/me/device-pairings/{code}/approve")
+    def reader_approve_pairing(code: str, reader: Reader = Depends(require_binding_admin), db: Session = Depends(get_db)):
+        return devices.approve_pairing(db, reader, code)
+
+    @public.get("/me/devices")
+    def reader_devices(reader: Reader = Depends(require_reader), db: Session = Depends(get_db)):
+        return {"devices": devices.list_devices(db, reader)}
+
+    @public.delete("/me/devices/{device_id}")
+    def reader_remove_device(device_id: str, reader: Reader = Depends(require_reader), db: Session = Depends(get_db)):
+        device = db.get(Device, device_id)
+        if device is None or device.readerId != reader.id:
+            raise not_found("设备不存在")
+        devices.remove(db, device, f"reader:{reader.id}")
+        return {"removed": True}
 
     # ---- uploaders ----------------------------------------------------------------------
 
@@ -589,6 +674,11 @@ def create_app(database_url: str | None = None) -> FastAPI:
             stmt = stmt.where(Reader.transcriptAccess == status)
         rows = db.scalars(stmt.order_by(Reader.requestedAt.desc().nulls_last(), Reader.lastSeenAt.desc()).limit(200))
         return {"readers": [readers.admin_reader_dict(reader) for reader in rows]}
+
+    @admin.post("/readers/{reader_id}/remark")
+    def admin_reader_remark(reader_id: int, body: ReaderRemark, db: Session = Depends(get_db)):
+        reader = service.require(db.get(Reader, reader_id), "读者不存在")
+        return readers.admin_reader_dict(readers.set_remark(db, reader, body.remark))
 
     @admin.post("/readers/{reader_id}/approve")
     def admin_reader_approve(reader_id: int, db: Session = Depends(get_db)):

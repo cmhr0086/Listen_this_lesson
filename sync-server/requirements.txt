@@ -6,3 +6,5 @@ pydantic>=2.9,<3
 tzdata>=2024.1
 # Reads timetable PDFs printed from the school system (layout-aware text extraction).
 pdfminer.six==20240706
+# Encrypts each account's service keys at rest (AES-GCM).
+cryptography>=42,<46

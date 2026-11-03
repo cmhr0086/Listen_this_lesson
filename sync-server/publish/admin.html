@@ -243,6 +243,7 @@ const ACTIONS = {
   "uploader.create": "新建上传者", "uploader.rotate": "更换 Token", "uploader.disabled": "停用上传者", "uploader.active": "启用上传者",
   "reader.request_transcripts": "申请查看原文", "reader.approve": "允许查看原文", "reader.revoke": "收回原文权限",
   "reader.make_admin": "设为管理员", "reader.remove_admin": "取消管理员", "course.deleted": "删除课程",
+  "reader.remark": "修改备注", "device.approve": "绑定设备", "device.remove": "移除设备", "config.update": "更新云端配置",
 };
 const READER_ACCESS = { none: "未申请", pending: "等待批准", approved: "可看原文", revoked: "已收回" };
 const ICON = {
@@ -528,12 +529,13 @@ async function lessonAct(button) {
 async function renderReaders() {
   const { readers } = await api("/readers");
   const rows = readers.map((r) => `<tr>
-      <td style="white-space:nowrap"><span class="who">${r.avatar ? `<img class="avatar" src="${esc(r.avatar)}" alt="">` : ""}<span>${esc(r.nickname || `读者 #${r.readerId}`)}<br><span class="mono muted" style="font-size:12px">${esc(r.openidHint)}</span></span></span>${r.isAdmin ? ` ${pill("approved", "管理员")}` : ""}</td>
+      <td style="white-space:nowrap"><span class="who">${r.avatar ? `<img class="avatar" src="${esc(r.avatar)}" alt="">` : ""}<span>${esc(r.displayName || "未命名")}<br><span class="mono muted" style="font-size:12px">${esc(r.openidHint)}</span></span></span>${r.isAdmin ? ` ${pill("approved", "管理员")}` : ""}</td>
       <td>${pill(r.transcriptAccess === "approved" ? "active" : r.transcriptAccess === "pending" ? "pending" : "disabled", READER_ACCESS[r.transcriptAccess])}</td>
       <td style="color:var(--ink-2)">${esc(r.requestNote || "—")}</td>
       <td class="mono" style="font-size:14px;color:var(--ink-2)">${short(r.requestedAt)}</td>
       <td class="mono" style="font-size:14px"><span class="muted">${short(r.lastSeenAt)}</span></td>
       <td class="actions">
+        <button type="button" class="btn small" data-reader="remark" data-id="${r.readerId}" data-remark="${esc(r.remark || "")}">备注</button>
         ${r.transcriptAccess === "approved"
           ? `<button type="button" class="btn small plain-danger" data-reader="revoke" data-id="${r.readerId}">收回</button>`
           : `<button type="button" class="btn small" style="color:var(--primary)" data-reader="approve" data-id="${r.readerId}">允许</button>`}
@@ -553,6 +555,13 @@ async function renderReaders() {
 
 async function readerAct(button) {
   const action = button.dataset.reader;
+  if (action === "remark") {
+    const remark = prompt("给这位读者起个备注名（20 字以内）", button.dataset.remark);
+    if (remark === null) return;
+    try { await post(`/readers/${button.dataset.id}/remark`, { remark: remark.trim().slice(0, 20) }); state.flash = "备注已保存。"; render(); }
+    catch (e) { alert(e.message); }
+    return;
+  }
   if (action === "revoke" && !confirm("收回这位读者查看原文的权限？")) return;
   if (action === "make-admin" && !confirm("设为管理员？这个微信账号将能在小程序里审核课程、批准原文权限和下架课堂。")) return;
   if (action === "remove-admin" && !confirm("取消这个账号的管理员身份？")) return;

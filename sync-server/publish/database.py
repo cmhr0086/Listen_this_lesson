@@ -16,6 +16,7 @@ ADDED_COLUMNS = {
     "readers": {
         "nickname": "TEXT",
         "avatar": "TEXT",
+        "remark": "TEXT",
     },
 }
 

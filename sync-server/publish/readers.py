@@ -114,9 +114,19 @@ def reader_dict(reader: Reader) -> dict:
     }
 
 
+def set_remark(db: Session, reader: Reader, remark: str) -> Reader:
+    reader.remark = remark or None
+    audit(db, "admin", "reader.remark", str(reader.id), remark or None)
+    db.commit()
+    return reader
+
+
 def admin_reader_dict(reader: Reader) -> dict:
     return {
         **reader_dict(reader),
+        "remark": reader.remark,
+        # None until the admin names them; the pages say so rather than inventing a number.
+        "displayName": reader.remark or reader.nickname,
         # Enough to tell people apart in the admin list without showing the whole openid.
         "openidHint": reader.openid[:4] + "…" + reader.openid[-4:],
         "requestNote": reader.requestNote,
