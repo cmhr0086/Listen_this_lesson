@@ -19,6 +19,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("PUBLISH_ADMIN_TOKEN", ADMIN_TOKEN)
     monkeypatch.setenv("WECHAT_APPID", "wx-test")
     monkeypatch.setenv("WECHAT_SECRET", "secret")
+    monkeypatch.setenv("PUBLISH_MATERIALS_DIR", str(tmp_path / "materials"))
     # wx.login codes stand in for openids, so a test can sign the same person in twice.
     monkeypatch.setattr(readers, "code_to_openid", lambda appid, secret, code: f"openid-{code}")
     app = create_app(f"sqlite:///{tmp_path / 'publish-test.db'}")
@@ -614,3 +615,98 @@ def test_only_courses_off_the_reader_can_be_deleted(client):
     # Uploading the same class again starts the course over, waiting for review.
     again = submit(client, token, submission())
     assert again["courseStatus"] == "pending" and again["courseId"] != result["courseId"]
+
+
+# ---- course materials --------------------------------------------------------------------
+
+DOCX = b"PK\x03\x04 pretend docx"
+
+
+def upload_material(client, course_id, file_name, body=DOCX, headers=None, **params):
+    return client.post(
+        f"/api/admin/v1/courses/{course_id}/materials",
+        params={"fileName": file_name, **params},
+        content=body,
+        headers={"Authorization": f"Bearer {ADMIN_TOKEN}"} if headers is None else headers,
+    )
+
+
+def test_admin_uploads_and_readers_open_course_materials(client, tmp_path):
+    _, result = publish_one(client)
+    course_id = result["courseId"]
+    uploaded = upload_material(client, course_id, "期末复习.docx")
+    assert uploaded.status_code == 200, uploaded.text
+    material = uploaded.json()
+    assert (material["title"], material["ext"], material["viewer"], material["size"]) == ("期末复习", "docx", "document", len(DOCX))
+    upload_material(client, course_id, "公式表.PNG", body=b"\x89PNG")
+    upload_material(client, course_id, "习题.zip", body=b"PK")
+
+    listed = client.get(f"/api/public/v1/courses/{course_id}/materials").json()
+    assert [(m["fileName"], m["viewer"]) for m in listed["materials"]] == [
+        ("期末复习.docx", "document"), ("公式表.png", "image"), ("习题.zip", "none")]
+    file = client.get(f"/api/public/v1/materials/{material['materialId']}/file")
+    assert file.status_code == 200 and file.content == DOCX
+    assert file.headers["content-type"].startswith("application/vnd.openxmlformats-officedocument.wordprocessingml")
+
+
+def test_readers_cannot_upload_or_change_materials(client):
+    _, result = publish_one(client)
+    course_id = result["courseId"]
+    reader = auth(sign_in(client, "reader")["token"])
+    assert upload_material(client, course_id, "a.docx", headers=reader).status_code == 401
+    assert upload_material(client, course_id, "a.docx", headers={}).status_code == 401
+    material = upload_material(client, course_id, "a.docx").json()
+    assert client.patch(f"/api/admin/v1/materials/{material['materialId']}", headers=reader, json={"title": "x"}).status_code == 401
+    assert client.delete(f"/api/admin/v1/materials/{material['materialId']}", headers=reader).status_code == 401
+    # An admin reader may manage them from the mini program.
+    login = sign_in(client, "boss")
+    admin(client, "POST", f"/readers/{login['reader']['readerId']}/make-admin")
+    assert upload_material(client, course_id, "b.pdf", headers=auth(login["token"])).status_code == 200
+
+
+def test_material_formats_and_size_are_checked(client):
+    _, result = publish_one(client)
+    course_id = result["courseId"]
+    refused = upload_material(client, course_id, "病毒.exe")
+    assert refused.status_code == 415 and "不支持 .exe" in refused.json()["detail"]
+    assert upload_material(client, course_id, "没有扩展名").status_code == 415
+    assert upload_material(client, course_id, "空.docx", body=b"").status_code == 400
+    from publish import materials
+    big = upload_material(client, course_id, "大.pdf", body=b"0" * (materials.MAX_MATERIAL_BYTES + 1))
+    assert big.status_code == 413
+
+
+def test_materials_are_renamed_ordered_moved_and_deleted(client, tmp_path):
+    _, first = publish_one(client)
+    _, second = publish_one(client, course={"schoolName": "某某大学", "term": "2026-2027 第一学期", "courseName": "线性代数", "teacherName": "李老师"})
+    a = upload_material(client, first["courseId"], "a.docx").json()
+    b = upload_material(client, first["courseId"], "b.pdf").json()
+    admin(client, "PATCH", f"/materials/{a['materialId']}", json={"title": "  第一章  讲义 "})
+    ordered = admin(client, "PUT", f"/courses/{first['courseId']}/materials/order", json={"materialIds": [b["materialId"], a["materialId"]]})
+    assert [m["title"] for m in ordered["materials"]] == ["b", "第一章 讲义"]
+    stale = client.put(f"/api/admin/v1/courses/{first['courseId']}/materials/order", headers=auth(ADMIN_TOKEN), json={"materialIds": [a["materialId"]]})
+    assert stale.status_code == 409
+
+    admin(client, "PATCH", f"/materials/{b['materialId']}", json={"courseId": second["courseId"]})
+    assert [m["title"] for m in client.get(f"/api/public/v1/courses/{second['courseId']}/materials").json()["materials"]] == ["b"]
+
+    admin(client, "DELETE", f"/materials/{b['materialId']}")
+    assert client.get(f"/api/public/v1/materials/{b['materialId']}/file").status_code == 404
+    assert not (tmp_path / "materials" / f"{b['materialId']}.pdf").exists()
+
+
+def test_materials_follow_the_course_review_state(client, tmp_path):
+    token = new_uploader(client)
+    result = submit(client, token, submission())
+    course_id = result["courseId"]
+    material = upload_material(client, course_id, "a.docx").json()
+    # Pending: the admin sees it, readers do not.
+    assert client.get(f"/api/public/v1/courses/{course_id}/materials").status_code == 404
+    assert client.get(f"/api/public/v1/materials/{material['materialId']}/file").status_code == 404
+    assert client.get(f"/api/admin/v1/materials/{material['materialId']}/file", headers=auth(ADMIN_TOKEN)).content == DOCX
+    approve(client, course_id)
+    assert client.get(f"/api/public/v1/materials/{material['materialId']}/file").status_code == 200
+    admin(client, "POST", f"/courses/{course_id}/takedown", json={"note": None})
+    assert client.get(f"/api/public/v1/courses/{course_id}/materials").status_code == 404
+    admin(client, "DELETE", f"/courses/{course_id}")
+    assert not (tmp_path / "materials" / f"{material['materialId']}.docx").exists()

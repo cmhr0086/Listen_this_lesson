@@ -13,7 +13,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.security.utils import get_authorization_scheme_param
 from pydantic import ValidationError
 from sqlalchemy import func, or_, select
@@ -25,12 +25,14 @@ from app.database import create_sync_engine
 
 from starlette.concurrency import run_in_threadpool
 
-from . import queries, readers, service
+from . import materials, queries, readers, service
 from .timetable_pdf import TimetableError, parse_timetable
 from .database import initialize_database
 from .models import AuditLog, Course, Lesson, Reader, Revision, RevisionNote, RevisionSegment, Uploader
 from .schemas import (
     CourseStatus,
+    MaterialOrder,
+    MaterialUpdate,
     ReaderAccessRequest,
     ReaderProfile,
     TimetableUpload,
@@ -220,6 +222,35 @@ def create_app(database_url: str | None = None) -> FastAPI:
                 "Vary": "Authorization",
             },
         )
+
+    # ---- course materials ---------------------------------------------------------------
+
+    def material_file(material) -> FileResponse:
+        path = materials.file_path(material)
+        if not path.is_file():
+            raise not_found("资料文件不存在，请联系管理员重新上传")
+        # Every upload gets a new id, so a file at a given URL never changes.
+        return FileResponse(
+            path,
+            media_type=materials.CONTENT_TYPES[material.ext],
+            filename=f"{material.title}.{material.ext}",
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
+    @public.get("/courses/{course_id}/materials")
+    def course_materials(request: Request, course_id: str, db: Session = Depends(get_db)):
+        course = materials.public_course(db, course_id)
+        if course is None:
+            raise not_found("课程不存在或未公开")
+        rows = materials.course_materials(db, course.id)
+        return cached(request, {"course": queries.course_dict(course), "materials": [materials.material_dict(m) for m in rows]})
+
+    @public.get("/materials/{material_id}/file")
+    def material_download(material_id: str, db: Session = Depends(get_db)):
+        material = materials.public_material(db, material_id)
+        if material is None:
+            raise not_found("资料不存在或已删除")
+        return material_file(material)
 
     # A stateless helper for the mini program's timetable: the PDF is parsed in memory and
     # dropped; nothing is stored or logged. It lives under /api/public so the existing proxy
@@ -583,6 +614,44 @@ def create_app(database_url: str | None = None) -> FastAPI:
     def admin_audit(db: Session = Depends(get_db)):
         rows = db.scalars(select(AuditLog).order_by(AuditLog.id.desc()).limit(100))
         return {"entries": [{"at": r.at, "actor": r.actor, "action": r.action, "target": r.target, "detail": r.detail} for r in rows]}
+
+    @admin.get("/courses/{course_id}/materials")
+    def admin_materials(course_id: str, db: Session = Depends(get_db)):
+        course = service.require(db.get(Course, course_id), "课程不存在")
+        return {"course": queries.course_dict(course), "materials": [materials.material_dict(m) for m in materials.course_materials(db, course.id)]}
+
+    @admin.post("/courses/{course_id}/materials")
+    async def admin_upload_material(
+        request: Request,
+        course_id: str,
+        fileName: Annotated[str, Query(max_length=255)],
+        title: Annotated[str | None, Query(max_length=200)] = None,
+        db: Session = Depends(get_db),
+    ):
+        # The raw file is the body, as with the timetable PDF, so the mini program can send it
+        # with wx.request and needs no separate upload domain.
+        declared = request.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > materials.MAX_MATERIAL_BYTES:
+            raise HTTPException(413, f"文件超过 {materials.MAX_MATERIAL_BYTES // 1024 // 1024} MB")
+        body = await request.body()
+        return materials.material_dict(materials.upload(db, course_id, fileName, body, title))
+
+    @admin.patch("/materials/{material_id}")
+    def admin_update_material(material_id: str, body: MaterialUpdate, db: Session = Depends(get_db)):
+        return materials.material_dict(materials.update(db, material_id, body.title, body.courseId))
+
+    @admin.put("/courses/{course_id}/materials/order")
+    def admin_order_materials(course_id: str, body: MaterialOrder, db: Session = Depends(get_db)):
+        return {"materials": [materials.material_dict(m) for m in materials.reorder(db, course_id, body.materialIds)]}
+
+    @admin.delete("/materials/{material_id}")
+    def admin_delete_material(material_id: str, db: Session = Depends(get_db)):
+        materials.remove(db, material_id)
+        return {"materialId": material_id, "deleted": True}
+
+    @admin.get("/materials/{material_id}/file")
+    def admin_material_download(material_id: str, db: Session = Depends(get_db)):
+        return material_file(service.require(db.get(materials.CourseMaterial, material_id), "资料不存在"))
 
     @app.get("/admin", response_class=HTMLResponse, include_in_schema=False)
     def admin_page() -> HTMLResponse:

@@ -155,3 +155,21 @@ class ReaderTimetable(Base):
     # When the phone last changed it; the newer copy wins.
     updatedAt: Mapped[int] = mapped_column(Integer, nullable=False)
     savedAt: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class CourseMaterial(Base):
+    """A file the admin attaches to a course (slides, DOCX notes, review sheets). The bytes live
+    on disk under the materials directory; readers see it once the course is approved."""
+
+    __tablename__ = "course_materials"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    courseId: Mapped[str] = mapped_column(ForeignKey("courses.id"), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    # Lower-case extension without the dot; decides how the mini program opens it.
+    ext: Mapped[str] = mapped_column(Text, nullable=False)
+    size: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    createdAt: Mapped[int] = mapped_column(Integer, nullable=False)
+    updatedAt: Mapped[int] = mapped_column(Integer, nullable=False)

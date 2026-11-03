@@ -178,3 +178,12 @@ class ReaderProfile(StrictModel):
     @classmethod
     def _strip(cls, value: str | None) -> str | None:
         return value.strip() if value is not None else None
+
+
+class MaterialUpdate(StrictModel):
+    title: str | None = Field(default=None, max_length=200)
+    courseId: str | None = Field(default=None, max_length=100)
+
+
+class MaterialOrder(StrictModel):
+    materialIds: list[str] = Field(max_length=500)
