@@ -4,6 +4,7 @@ import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.Palette
+import androidx.compose.material.icons.outlined.PhoneAndroid
 import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.Translate
 import androidx.compose.material.icons.outlined.Description
@@ -51,6 +52,7 @@ fun SettingsScreen(
     onAsrDiagnostics: () -> Unit = {},
     onAppearance: () -> Unit = {},
     onPublish: () -> Unit = {},
+    onDevice: () -> Unit = {},
     vadSummary: String = ""
 ) = SettingsOverview(
     state = state,
@@ -66,7 +68,8 @@ fun SettingsScreen(
     onCloudSync = onCloudSync,
     onAsrDiagnostics = onAsrDiagnostics,
     onAppearance = onAppearance,
-    onPublish = onPublish
+    onPublish = onPublish,
+    onDevice = onDevice
 )
 
 @Composable
@@ -83,6 +86,7 @@ internal fun SettingsOverview(
     onAsrDiagnostics: () -> Unit = {},
     onAppearance: () -> Unit = {},
     onPublish: () -> Unit = {},
+    onDevice: () -> Unit = {},
     setAutoNotes: (Boolean) -> Unit = {},
     vadSummary: String = ""
 ) {
@@ -97,6 +101,14 @@ internal fun SettingsOverview(
         item("services-heading") { SectionHeader("服务") }
         item("services") {
             ListGroup {
+                SettingsRow(
+                    "设备绑定",
+                    if (state.device.bound) "配置保存在云端，换手机不用重填" else "用微信绑定，把配置存到云端",
+                    Icons.Outlined.PhoneAndroid, onDevice,
+                    status = if (state.device.bound) "已绑定" to StatusTone.DONE else null,
+                    modifier = Modifier.testTag("settings-device")
+                )
+                ListDivider(62.dp)
                 SettingsRow(
                     "语音识别", state.server.baseUrl.ifBlank { "未设置地址" }, Icons.Outlined.Mic, onSttService,
                     status = when {

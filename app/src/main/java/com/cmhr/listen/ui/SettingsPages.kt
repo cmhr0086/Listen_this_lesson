@@ -314,7 +314,7 @@ private enum class EditTarget { URL, KEY, MODEL }
 // ---------- 语音识别 ----------
 
 @Composable
-fun SttServiceSettingsScreen(state: SettingsUiState, model: SettingsViewModel, openAsrPrompt: () -> Unit = {}) {
+fun SttServiceSettingsScreen(state: SettingsUiState, model: SettingsViewModel, openAsrPrompt: () -> Unit = {}, inSetup: Boolean = false) {
     var editing by rememberSaveable { mutableStateOf<EditTarget?>(null) }
     var confirmClear by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { model.checkSttIfUnknown() }
@@ -357,7 +357,7 @@ fun SttServiceSettingsScreen(state: SettingsUiState, model: SettingsViewModel, o
                 ListDivider(16.dp)
                 ValueRow(
                     "API Key", if (server.hasApiKey) SECRET_DOTS else "未填写", { editing = EditTarget.KEY }, Modifier.testTag("stt-key"),
-                    subtitle = if (server.hasApiKey) "已加密保存在本机" else null
+                    subtitle = if (server.hasApiKey) "已加密保存" else null
                 )
             }
         }
@@ -367,11 +367,13 @@ fun SttServiceSettingsScreen(state: SettingsUiState, model: SettingsViewModel, o
                 else "改完地址或 Key 会立即保存，并自动测试一次。"
             )
         }
-        item("related-heading") { SectionHeader("相关", Modifier.padding(top = 12.dp)) }
-        item("related") {
-            ListGroup { ValueRow("专业词提示", state.globalAsrPromptMode.displayName, openAsrPrompt) }
+        if (!inSetup) {
+            item("related-heading") { SectionHeader("相关", Modifier.padding(top = 12.dp)) }
+            item("related") {
+                ListGroup { ValueRow("专业词提示", state.globalAsrPromptMode.displayName, openAsrPrompt) }
+            }
         }
-        if (server.hasApiKey) item("clear") { DangerRow("清除 API Key", null, { confirmClear = true }, Modifier.testTag("stt-clear-key")) }
+        if (server.hasApiKey && !inSetup) item("clear") { DangerRow("清除 API Key", null, { confirmClear = true }, Modifier.testTag("stt-clear-key")) }
     }
     when (editing) {
         EditTarget.URL -> TextEditSheet(
@@ -388,7 +390,7 @@ fun SttServiceSettingsScreen(state: SettingsUiState, model: SettingsViewModel, o
             onConfirm = model::saveSttModel, dismiss = { editing = null }
         )
         EditTarget.KEY -> TextEditSheet(
-            title = "API Key", description = "粘贴识别服务给你的 Key。只保存在本机，不会同步到其他设备。", label = "新的 API Key",
+            title = "API Key", description = "粘贴识别服务给你的 Key。加密保存；绑定设备后会同步到你的其他设备。", label = "新的 API Key",
             initial = "", secret = true, confirmLabel = "保存并测试",
             hint = "保存后会马上用新 Key 测试一次。",
             onConfirm = model::saveSttKey, dismiss = { editing = null }
@@ -401,7 +403,7 @@ fun SttServiceSettingsScreen(state: SettingsUiState, model: SettingsViewModel, o
 // ---------- AI 服务 ----------
 
 @Composable
-fun AiServiceSettingsScreen(state: SettingsUiState, model: SettingsViewModel, openModels: () -> Unit = {}) {
+fun AiServiceSettingsScreen(state: SettingsUiState, model: SettingsViewModel, openModels: () -> Unit = {}, inSetup: Boolean = false) {
     var editing by rememberSaveable { mutableStateOf<EditTarget?>(null) }
     var confirmClear by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { model.checkAiIfUnknown() }
@@ -449,8 +451,8 @@ fun AiServiceSettingsScreen(state: SettingsUiState, model: SettingsViewModel, op
                 else "地址必须使用 HTTPS。改动会立即保存并自动测试。"
             )
         }
-        item("use-heading") { SectionHeader("用在哪里", Modifier.padding(top = 12.dp)) }
-        item("use") {
+        if (!inSetup) item("use-heading") { SectionHeader("用在哪里", Modifier.padding(top = 12.dp)) }
+        if (!inSetup) item("use") {
             ListGroup {
                 ListRow(
                     "下课后自动整理笔记", subtitle = "归档或识别完成后生成整节课笔记",
@@ -459,7 +461,7 @@ fun AiServiceSettingsScreen(state: SettingsUiState, model: SettingsViewModel, op
                 )
             }
         }
-        if (ai.hasApiKey) item("clear") { DangerRow("清除 API Key", null, { confirmClear = true }) }
+        if (ai.hasApiKey && !inSetup) item("clear") { DangerRow("清除 API Key", null, { confirmClear = true }) }
     }
     when (editing) {
         EditTarget.URL -> TextEditSheet(
@@ -468,7 +470,7 @@ fun AiServiceSettingsScreen(state: SettingsUiState, model: SettingsViewModel, op
             onConfirm = model::saveAiBaseUrl, dismiss = { editing = null }
         )
         EditTarget.KEY -> TextEditSheet(
-            title = "API Key", description = "只保存在本机，不会同步到其他设备。", label = "新的 API Key",
+            title = "API Key", description = "加密保存；绑定设备后会同步到你的其他设备。", label = "新的 API Key",
             initial = "", secret = true, confirmLabel = "保存并测试",
             onConfirm = model::saveAiKey, dismiss = { editing = null }
         )
@@ -606,7 +608,7 @@ fun CloudSyncSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
         }
         item("note") { Note("同步课程、课堂、文字、主题和重点标记。录音文件只留在本机。") }
         if (sync.hasApiToken) item("stop") {
-            DangerRow("停用云同步", "清除本机保存的 Token；服务器上的数据不受影响", { confirmStop = true })
+            DangerRow("停用云同步", "清除保存的 Token；服务器上的数据不受影响", { confirmStop = true })
         }
     }
     when (editing) {
@@ -616,7 +618,7 @@ fun CloudSyncSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
             onConfirm = model::saveCloudSyncUrl, dismiss = { editing = null }
         )
         EditTarget.KEY -> TextEditSheet(
-            title = "Token", description = "同步服务器的访问 Token，只保存在本机。", label = "新的 Token",
+            title = "Token", description = "同步服务器的访问 Token，加密保存。", label = "新的 Token",
             initial = "", secret = true, confirmLabel = "保存",
             onConfirm = model::saveCloudSyncToken, dismiss = { editing = null }
         )
@@ -670,7 +672,7 @@ fun PublishSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
                 ListDivider(16.dp)
                 ValueRow(
                     "上传 Token", if (publish.hasToken) SECRET_DOTS else "未填写", { editing = EditTarget.KEY }, Modifier.testTag("publish-token"),
-                    subtitle = if (publish.hasToken) "已加密保存在本机" else null
+                    subtitle = if (publish.hasToken) "已加密保存" else null
                 )
             }
         }
@@ -686,7 +688,7 @@ fun PublishSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
             keyboardType = KeyboardType.Text, onConfirm = model::savePublishSchool, dismiss = { editing = null }
         )
         EditTarget.KEY -> TextEditSheet(
-            title = "上传 Token", description = "管理员开通上传资格时给你的 Token，只保存在本机。", label = "新的 Token",
+            title = "上传 Token", description = "管理员开通上传资格时给你的 Token，加密保存。", label = "新的 Token",
             initial = "", secret = true, confirmLabel = "保存并测试",
             onConfirm = model::savePublishToken, dismiss = { editing = null }
         )

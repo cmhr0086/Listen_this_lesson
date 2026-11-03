@@ -7,7 +7,9 @@ import com.cmhr.listen.ui.theme.ThemePalette
 import android.app.Application
 import com.cmhr.listen.data.publish.PublishApiClient
 import com.cmhr.listen.data.publish.PUBLISH_BASE_URL
+import com.cmhr.listen.data.settings.DeviceSettings
 import com.cmhr.listen.data.settings.PublishSettings
+import com.cmhr.listen.data.settings.SetupState
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.cmhr.listen.data.settings.AppSettingsRepository
@@ -29,6 +31,14 @@ import com.cmhr.listen.data.course.ListenDatabase
 import com.cmhr.listen.data.sync.SyncRepository
 import com.cmhr.listen.data.sync.SyncProgress
 import com.cmhr.listen.data.sync.SyncSummary
+import com.cmhr.listen.data.device.CloudConfigSync
+import com.cmhr.listen.data.device.DeviceApiClient
+import com.cmhr.listen.data.device.DeviceApiException
+import android.os.Build
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -60,6 +70,7 @@ data class SettingsUiState(
     val aiCheck: ServiceCheck = ServiceCheck.Unknown,
     val autoNotes: Boolean = true,
     val publish: PublishSettings = PublishSettings(),
+    val device: DeviceSettings = DeviceSettings(),
     val publishCheck: ServiceCheck = ServiceCheck.Unknown,
     /** Nickname the publish service knows this token by, from the last successful check. */
     val publishUploader: String? = null
@@ -81,6 +92,17 @@ sealed interface CloudSyncRunState {
 }
 
 data class UiMessage(val text: String)
+
+/** Where binding this phone stands; Waiting holds the code to type into the mini program. */
+sealed interface BindingState {
+    data object Idle : BindingState
+    data object Requesting : BindingState
+    data class Waiting(val code: String) : BindingState
+    data object Applying : BindingState
+    data class Failed(val message: String) : BindingState
+    /** Bound; hasStt says the cloud already had a speech service, so setup has nothing left to ask. */
+    data class Done(val hasStt: Boolean) : BindingState
+}
 
 /** The AI prompts a user can edit, one page each. */
 enum class AiPromptKind(val label: String, val usage: String) {
@@ -124,6 +146,8 @@ enum class AiPromptKind(val label: String, val usage: String) {
     fun isDefault(value: AiPromptSettings) = read(value).trim() == read(AiPromptSettings()).trim()
 }
 
+private const val BINDING_POLL_MS = 3_000L
+
 const val DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
 /** "https://x/v1/audio/transcriptions/" → "https://x/v1". */
@@ -146,6 +170,14 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private var aiCheckJob: Job? = null
     private var publishCheckJob: Job? = null
     private val publishClient = PublishApiClient()
+    private val deviceClient = DeviceApiClient()
+    private val cloudConfig = CloudConfigSync(repository, deviceClient)
+    private var bindingJob: Job? = null
+    private val _binding = MutableStateFlow<BindingState>(BindingState.Idle)
+    val binding = _binding.asStateFlow()
+    /** null until settings have loaded, so the app can wait a frame rather than flash the wrong screen. */
+    private val _showSetup = MutableStateFlow<Boolean?>(null)
+    val showSetup = _showSetup.asStateFlow()
 
     init { viewModelScope.launch { repository.settings.collect { settings ->
         _uiState.update { it.copy(
@@ -159,9 +191,98 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             asrPromptAutoConfig = settings.asrPromptAutoConfig,
             cloudSync = settings.cloudSync,
             autoNotes = settings.autoNotes,
-            publish = settings.publish
+            publish = settings.publish,
+            device = settings.device
         ) }
-    } } }
+    } }
+        viewModelScope.launch { decideSetup() }
+        viewModelScope.launch { keepConfigInSync() }
+    }
+
+    // 设备绑定与配置向导
+
+    /** A fresh install gets the wizard; a phone upgraded with keys in place is left alone. */
+    private suspend fun decideSetup() {
+        val settings = repository.settings.first()
+        val show = when (settings.setupState) {
+            SetupState.DONE -> false
+            SetupState.IN_PROGRESS -> true
+            null -> !settings.server.hasApiKey && !settings.ai.hasApiKey && !settings.cloudSync.hasApiToken && !settings.publish.hasToken
+        }
+        repository.setSetupState(if (show) SetupState.IN_PROGRESS else SetupState.DONE)
+        _showSetup.value = show
+    }
+
+    fun finishSetup() = viewModelScope.launch {
+        repository.setSetupState(SetupState.DONE)
+        _showSetup.value = false
+    }
+
+    /** Pulls on launch, then pushes whenever a section is edited; retries until the edit gets through. */
+    private suspend fun keepConfigInSync() {
+        if (repository.settings.first().device.bound) runCatching { cloudConfig.sync() }
+        repository.settings.map { it.device.dirty.isNotEmpty() && it.device.bound }.distinctUntilChanged().collectLatest { pending ->
+            if (!pending) return@collectLatest
+            // A section edited again mid-sync stays dirty, so this runs until nothing is left.
+            while (repository.settings.first().device.dirty.isNotEmpty()) {
+                delay(1_500)
+                if (runCatching { cloudConfig.sync() }.isFailure) delay(60_000)
+            }
+        }
+    }
+
+    fun startBinding() {
+        bindingJob?.cancel()
+        bindingJob = viewModelScope.launch {
+            _binding.value = BindingState.Requesting
+            val ticket = runCatching { deviceClient.createPairing("${Build.MANUFACTURER} ${Build.MODEL}") }.getOrElse {
+                _binding.value = BindingState.Failed(it.message ?: "获取绑定码失败。")
+                return@launch
+            }
+            _binding.value = BindingState.Waiting(ticket.code)
+            while (true) {
+                delay(BINDING_POLL_MS)
+                val result = try {
+                    deviceClient.claim(ticket.claim)
+                } catch (error: DeviceApiException) {
+                    // Only an expired code ends the wait; a network blip just means asking again.
+                    if (error.httpCode == 410) {
+                        _binding.value = BindingState.Failed(error.message ?: "绑定码已过期。")
+                        return@launch
+                    }
+                    continue
+                }
+                val token = result.deviceToken
+                if (result.status == "approved" && token != null) {
+                    _binding.value = BindingState.Applying
+                    repository.bindDevice(token)
+                    val synced = runCatching { cloudConfig.sync() }
+                    synced.exceptionOrNull()?.let { messageFlow.emit(UiMessage("已绑定，配置稍后同步：${it.message}")) }
+                    val settings = repository.settings.first()
+                    if (settings.server.hasApiKey) checkStt()
+                    if (settings.ai.hasApiKey) checkAi()
+                    _binding.value = BindingState.Done(settings.server.hasApiKey)
+                    return@launch
+                }
+            }
+        }
+    }
+
+    fun cancelBinding() {
+        bindingJob?.cancel()
+        _binding.value = BindingState.Idle
+    }
+
+    fun syncDeviceConfig() = viewModelScope.launch {
+        val result = runCatching { cloudConfig.sync() }
+        messageFlow.emit(UiMessage(result.fold({ "配置已同步。" }, { it.message ?: "同步失败。" })))
+    }
+
+    fun unbindDevice() = viewModelScope.launch {
+        cloudConfig.unbind()
+        _binding.value = BindingState.Idle
+        messageFlow.emit(UiMessage("已解除绑定。"))
+    }
 
     fun setDeveloperMode(enabled: Boolean) = viewModelScope.launch { repository.setDeveloperMode(enabled) }
     fun setAutoNotes(enabled: Boolean) = viewModelScope.launch { repository.setAutoNotes(enabled) }

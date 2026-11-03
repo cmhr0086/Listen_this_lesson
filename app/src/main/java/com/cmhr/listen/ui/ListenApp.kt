@@ -189,6 +189,7 @@ private fun routeTitle(route: String?): String = when (route) {
     "settings/ai-service" -> "AI 服务"
     "settings/ai-service/models" -> "选择模型"
     "settings/asr-prompt-policy/thresholds" -> "自动模式门槛"
+    "settings/device" -> "设备绑定"
     "settings/cloud-sync" -> "云同步"
     "settings/publish" -> "公开发布"
     "course/{courseId}/publish" -> "公开发布"
@@ -979,6 +980,7 @@ fun ListenApp(
                     onAsrDiagnostics = { nav.navigate("settings/asr-diagnostics") },
                     onAppearance = { nav.navigate("settings/appearance") },
                     onPublish = { nav.navigate("settings/publish") },
+                    onDevice = { nav.navigate("settings/device") },
                     vadSummary = sttState.selectedVadPreset?.displayName ?: "自定义（基于「${nearestVadPreset(sttState.configuredVadConfig).displayName}」）"
                 )
             }
@@ -989,6 +991,7 @@ fun ListenApp(
                 AiServiceSettingsScreen(settingsState, settings, openModels = { nav.navigate("settings/ai-service/models") })
             }
             composable("settings/ai-service/models") { AiModelsScreen(settingsState, settings, done = { nav.popBackStack() }) }
+            composable("settings/device") { DeviceSettingsScreen(settingsState, settings) }
             composable("settings/cloud-sync") { CloudSyncSettingsScreen(settingsState, settings) }
             composable("settings/publish") { PublishSettingsScreen(settingsState, settings) }
             composable("course/{courseId}/publish") { entry ->

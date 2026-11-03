@@ -6,17 +6,24 @@ import com.cmhr.listen.ui.theme.DarkModePreference
 import com.cmhr.listen.ui.theme.ThemePalette
 
 import android.content.Context
+import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import com.cmhr.listen.data.device.CloudAi
+import com.cmhr.listen.data.device.CloudConfig
+import com.cmhr.listen.data.device.CloudPublish
+import com.cmhr.listen.data.device.CloudStt
+import com.cmhr.listen.data.device.CloudSync
 import com.cmhr.listen.data.stt.AsrPromptAutoConfig
 import com.cmhr.listen.data.stt.AsrPromptMode
 import com.cmhr.listen.data.publish.PublishCourseState
@@ -52,6 +59,27 @@ data class PublishSettings(
     /** Local course id → its publishing state. */
     val courses: Map<Long, PublishCourseState> = emptyMap()
 )
+/** This phone's link to an account, whose service settings live in the cloud. */
+data class DeviceSettings(
+    val bound: Boolean = false,
+    /** Sections edited here and not yet accepted by the cloud. */
+    val dirty: Set<String> = emptySet(),
+    val lastSyncedAt: Long = 0
+)
+const val SECTION_STT = "stt"
+const val SECTION_AI = "ai"
+const val SECTION_SYNC = "sync"
+const val SECTION_PUBLISH = "publish"
+
+/**
+ * Sections still waiting to go up once a sync has come back: anything edited here that the request
+ * did not carry, or that was edited again while it was out. The cloud copy must not overwrite these.
+ */
+internal fun sectionsStillDirty(dirtyNow: Set<String>, sent: Set<String>, editedSinceSent: Set<String>): Set<String> =
+    dirtyNow - (sent - editedSinceSent)
+
+/** First-run wizard: null until decided, then one of these. */
+enum class SetupState { IN_PROGRESS, DONE }
 enum class AiProvider { OPENAI_COMPATIBLE, DEEPSEEK }
 enum class AiThinkingMode(val displayName: String) {
     DISABLED("关闭"), ENABLED("开启"), SERVICE_DEFAULT("跟随服务")
@@ -125,6 +153,8 @@ data class AppSettings(
     val asrPromptAutoConfig: AsrPromptAutoConfig = AsrPromptAutoConfig(),
     val cloudSync: CloudSyncSettings = CloudSyncSettings(),
     val publish: PublishSettings = PublishSettings(),
+    val device: DeviceSettings = DeviceSettings(),
+    val setupState: SetupState? = null,
     val selectedCourseId: Long? = null,
     val selectedRecordId: Long? = null,
     /** Generate whole-class notes after a class is filed, when an AI service is configured. */
@@ -141,6 +171,7 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
     private val aiApiKeyStore = EncryptedSecretStore(AI_KEY_ALIAS)
     private val syncApiTokenStore = EncryptedSecretStore(SYNC_TOKEN_KEY_ALIAS)
     private val publishTokenStore = EncryptedSecretStore(PUBLISH_TOKEN_KEY_ALIAS)
+    private val deviceTokenStore = EncryptedSecretStore(DEVICE_TOKEN_KEY_ALIAS)
 
     val settings: Flow<AppSettings> = context.appSettingsDataStore.data.map { preferences ->
         AppSettings(
@@ -207,6 +238,12 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
                 schoolName = preferences[PUBLISH_SCHOOL].orEmpty(),
                 courses = decodePublishCourses(preferences[PUBLISH_COURSES])
             ),
+            device = DeviceSettings(
+                bound = preferences[DEVICE_TOKEN] != null,
+                dirty = preferences[DEVICE_DIRTY].orEmpty(),
+                lastSyncedAt = preferences[DEVICE_LAST_SYNCED_AT] ?: 0
+            ),
+            setupState = preferences[SETUP_STATE]?.let { runCatching { SetupState.valueOf(it) }.getOrNull() },
             selectedCourseId = preferences[SELECTED_COURSE],
             selectedRecordId = preferences[SELECTED_RECORD],
             autoNotes = preferences[AUTO_NOTES] ?: true,
@@ -231,23 +268,24 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
         require(normalized.startsWith("http://") || normalized.startsWith("https://")) { "服务器地址必须以 http:// 或 https:// 开头。" }
         context.appSettingsDataStore.edit { preferences ->
             preferences[BASE_URL] = normalized
+            preferences.markDirty(SECTION_STT)
             if (!apiKey.isNullOrBlank()) preferences[API_KEY] = sttApiKeyStore.encrypt(apiKey.trim())
         }
     }
 
-    suspend fun clearApiKey() = context.appSettingsDataStore.edit { it.remove(API_KEY) }
+    suspend fun clearApiKey() = context.appSettingsDataStore.edit { it.remove(API_KEY); it.markDirty(SECTION_STT) }
 
-    suspend fun saveSttProvider(provider: SttProvider) = context.appSettingsDataStore.edit { it[STT_PROVIDER] = provider.name }
+    suspend fun saveSttProvider(provider: SttProvider) = context.appSettingsDataStore.edit { it[STT_PROVIDER] = provider.name; it.markDirty(SECTION_STT) }
 
     suspend fun saveSttModel(model: String) {
         require(model.isNotBlank()) { "请填写识别模型名称。" }
-        context.appSettingsDataStore.edit { it[STT_MODEL] = model.trim() }
+        context.appSettingsDataStore.edit { it[STT_MODEL] = model.trim(); it.markDirty(SECTION_STT) }
     }
 
     /** Saves only the ASR key, so it can be set before the address. */
     suspend fun saveSttApiKey(apiKey: String) {
         require(apiKey.isNotBlank()) { "API Key 不能为空。" }
-        context.appSettingsDataStore.edit { it[API_KEY] = sttApiKeyStore.encrypt(apiKey.trim()) }
+        context.appSettingsDataStore.edit { it[API_KEY] = sttApiKeyStore.encrypt(apiKey.trim()); it.markDirty(SECTION_STT) }
     }
 
     suspend fun readApiKey(): String? = context.appSettingsDataStore.data.first()[API_KEY]?.let(sttApiKeyStore::decrypt)
@@ -261,11 +299,12 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
             preferences[AI_PROVIDER] = provider.name
             preferences[AI_BASE_URL] = normalized
             preferences[AI_MODEL] = model.trim()
+            preferences.markDirty(SECTION_AI)
             if (!apiKey.isNullOrBlank()) preferences[AI_API_KEY] = aiApiKeyStore.encrypt(apiKey.trim())
         }
     }
 
-    suspend fun clearAiApiKey() = context.appSettingsDataStore.edit { it.remove(AI_API_KEY) }
+    suspend fun clearAiApiKey() = context.appSettingsDataStore.edit { it.remove(AI_API_KEY); it.markDirty(SECTION_AI) }
 
     /** Provider and address change together; the model may still be empty until one is picked. */
     suspend fun saveAiEndpoint(provider: AiProvider, baseUrl: String, model: String) {
@@ -276,17 +315,18 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
             preferences[AI_PROVIDER] = provider.name
             preferences[AI_BASE_URL] = normalized
             preferences[AI_MODEL] = model.trim()
+            preferences.markDirty(SECTION_AI)
         }
     }
 
     suspend fun saveAiModel(model: String) {
         require(model.isNotBlank()) { "请填写 AI 模型名称。" }
-        context.appSettingsDataStore.edit { it[AI_MODEL] = model.trim() }
+        context.appSettingsDataStore.edit { it[AI_MODEL] = model.trim(); it.markDirty(SECTION_AI) }
     }
 
     suspend fun saveAiApiKey(apiKey: String) {
         require(apiKey.isNotBlank()) { "API Key 不能为空。" }
-        context.appSettingsDataStore.edit { it[AI_API_KEY] = aiApiKeyStore.encrypt(apiKey.trim()) }
+        context.appSettingsDataStore.edit { it[AI_API_KEY] = aiApiKeyStore.encrypt(apiKey.trim()); it.markDirty(SECTION_AI) }
     }
     suspend fun readAiApiKey(): String? = context.appSettingsDataStore.data.first()[AI_API_KEY]?.let(aiApiKeyStore::decrypt)
 
@@ -370,6 +410,7 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
         }
         context.appSettingsDataStore.edit { preferences ->
             preferences[CLOUD_SYNC_BASE_URL] = normalized
+            preferences.markDirty(SECTION_SYNC)
             if (!apiToken.isNullOrBlank()) {
                 preferences[CLOUD_SYNC_API_TOKEN] = syncApiTokenStore.encrypt(apiToken.trim())
             }
@@ -378,11 +419,11 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
 
     suspend fun saveCloudSyncToken(apiToken: String) {
         require(apiToken.isNotBlank()) { "Token 不能为空。" }
-        context.appSettingsDataStore.edit { it[CLOUD_SYNC_API_TOKEN] = syncApiTokenStore.encrypt(apiToken.trim()) }
+        context.appSettingsDataStore.edit { it[CLOUD_SYNC_API_TOKEN] = syncApiTokenStore.encrypt(apiToken.trim()); it.markDirty(SECTION_SYNC) }
     }
 
     suspend fun clearCloudSyncApiToken() =
-        context.appSettingsDataStore.edit { it.remove(CLOUD_SYNC_API_TOKEN) }
+        context.appSettingsDataStore.edit { it.remove(CLOUD_SYNC_API_TOKEN); it.markDirty(SECTION_SYNC) }
 
     override suspend fun readSyncApiToken(): String? =
         context.appSettingsDataStore.data.first()[CLOUD_SYNC_API_TOKEN]?.let(syncApiTokenStore::decrypt)
@@ -406,15 +447,15 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
 
     suspend fun savePublishSchool(name: String) {
         require(name.isNotBlank()) { "学校不能为空。" }
-        context.appSettingsDataStore.edit { it[PUBLISH_SCHOOL] = name.trim() }
+        context.appSettingsDataStore.edit { it[PUBLISH_SCHOOL] = name.trim(); it.markDirty(SECTION_PUBLISH) }
     }
 
     suspend fun savePublishToken(token: String) {
         require(token.isNotBlank()) { "Token 不能为空。" }
-        context.appSettingsDataStore.edit { it[PUBLISH_TOKEN] = publishTokenStore.encrypt(token.trim()) }
+        context.appSettingsDataStore.edit { it[PUBLISH_TOKEN] = publishTokenStore.encrypt(token.trim()); it.markDirty(SECTION_PUBLISH) }
     }
 
-    suspend fun clearPublishToken() = context.appSettingsDataStore.edit { it.remove(PUBLISH_TOKEN) }
+    suspend fun clearPublishToken() = context.appSettingsDataStore.edit { it.remove(PUBLISH_TOKEN); it.markDirty(SECTION_PUBLISH) }
 
     suspend fun readPublishToken(): String? =
         context.appSettingsDataStore.data.first()[PUBLISH_TOKEN]?.let(publishTokenStore::decrypt)
@@ -436,7 +477,97 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
         preferences[SELECTED_RECORD] = recordId
     }
 
+    // ---- device binding and cloud settings ----
+
+    suspend fun setSetupState(state: SetupState) = context.appSettingsDataStore.edit { it[SETUP_STATE] = state.name }
+
+    /** Whatever this phone already has is offered once, so binding a configured phone migrates it. */
+    suspend fun bindDevice(deviceToken: String) = context.appSettingsDataStore.edit {
+        it[DEVICE_TOKEN] = deviceTokenStore.encrypt(deviceToken)
+        it[DEVICE_OFFER_PENDING] = true
+    }
+
+    suspend fun readDeviceToken(): String? =
+        context.appSettingsDataStore.data.first()[DEVICE_TOKEN]?.let(deviceTokenStore::decrypt)
+
+    suspend fun isOfferPending(): Boolean = context.appSettingsDataStore.data.first()[DEVICE_OFFER_PENDING] == true
+
+    /** Stops following the cloud; what this phone has saved stays usable. */
+    suspend fun unbindDevice() = context.appSettingsDataStore.edit {
+        it.remove(DEVICE_TOKEN); it.remove(DEVICE_DIRTY); it.remove(DEVICE_OFFER_PENDING); it.remove(DEVICE_LAST_SYNCED_AT)
+    }
+
+    /** The account removed this phone: it gives up its link and every key it was holding. */
+    suspend fun forgetRemovedDevice() = context.appSettingsDataStore.edit {
+        it.remove(DEVICE_TOKEN); it.remove(DEVICE_DIRTY); it.remove(DEVICE_OFFER_PENDING); it.remove(DEVICE_LAST_SYNCED_AT)
+        it.remove(API_KEY); it.remove(AI_API_KEY); it.remove(CLOUD_SYNC_API_TOKEN); it.remove(PUBLISH_TOKEN)
+    }
+
+    /** This phone's copy of the named sections, keys included. */
+    suspend fun readCloudSections(sections: Set<String>): CloudConfig {
+        val settings = settings.first()
+        return CloudConfig(
+            stt = if (SECTION_STT in sections) settings.server.run { CloudStt(provider.name, baseUrl, model, readApiKey()) } else null,
+            ai = if (SECTION_AI in sections) settings.ai.run { CloudAi(provider.name, baseUrl, model, readAiApiKey()) } else null,
+            sync = if (SECTION_SYNC in sections) CloudSync(settings.cloudSync.baseUrl, readSyncApiToken()) else null,
+            publish = if (SECTION_PUBLISH in sections) CloudPublish(readPublishToken(), settings.publish.schoolName) else null
+        )
+    }
+
+    /** The sections worth offering to an empty cloud: those holding a key, not just default values. */
+    suspend fun configuredSections(): Set<String> = settings.first().let { settings ->
+        buildSet {
+            if (settings.server.hasApiKey) add(SECTION_STT)
+            if (settings.ai.hasApiKey) add(SECTION_AI)
+            if (settings.cloudSync.hasApiToken) add(SECTION_SYNC)
+            if (settings.publish.hasToken) add(SECTION_PUBLISH)
+        }
+    }
+
+    /** Takes the cloud's copy, except sections edited here again while the request was out. */
+    suspend fun applyCloudConfig(config: CloudConfig, sent: Set<String>, editedSinceSent: Set<String>) = context.appSettingsDataStore.edit { preferences ->
+        val edited = sectionsStillDirty(preferences[DEVICE_DIRTY].orEmpty(), sent, editedSinceSent)
+        if (SECTION_STT !in edited) config.stt?.let { stt ->
+            runCatching { SttProvider.valueOf(stt.provider) }.getOrNull()?.let { preferences[STT_PROVIDER] = it.name }
+            preferences[BASE_URL] = stt.baseUrl
+            preferences[STT_MODEL] = stt.model
+            preferences.putSecret(API_KEY, stt.apiKey, sttApiKeyStore)
+        }
+        if (SECTION_AI !in edited) config.ai?.let { ai ->
+            runCatching { AiProvider.valueOf(ai.provider) }.getOrNull()?.let { preferences[AI_PROVIDER] = it.name }
+            preferences[AI_BASE_URL] = ai.baseUrl
+            preferences[AI_MODEL] = ai.model
+            preferences.putSecret(AI_API_KEY, ai.apiKey, aiApiKeyStore)
+        }
+        if (SECTION_SYNC !in edited) config.sync?.let { sync ->
+            preferences[CLOUD_SYNC_BASE_URL] = sync.baseUrl
+            preferences.putSecret(CLOUD_SYNC_API_TOKEN, sync.apiToken, syncApiTokenStore)
+        }
+        if (SECTION_PUBLISH !in edited) config.publish?.let { publish ->
+            preferences[PUBLISH_SCHOOL] = publish.schoolName
+            preferences.putSecret(PUBLISH_TOKEN, publish.token, publishTokenStore)
+        }
+        preferences[DEVICE_DIRTY] = edited
+        preferences.remove(DEVICE_OFFER_PENDING)
+        preferences[DEVICE_LAST_SYNCED_AT] = System.currentTimeMillis()
+    }
+
+    private fun MutablePreferences.putSecret(key: androidx.datastore.preferences.core.Preferences.Key<String>, value: String?, store: EncryptedSecretStore) {
+        if (value.isNullOrBlank()) remove(key) else this[key] = store.encrypt(value)
+    }
+
+    /** Unbound phones have nothing to report: binding offers everything anyway. */
+    private fun MutablePreferences.markDirty(section: String) {
+        if (this[DEVICE_TOKEN] != null) this[DEVICE_DIRTY] = this[DEVICE_DIRTY].orEmpty() + section
+    }
+
     private companion object {
+        val DEVICE_TOKEN = stringPreferencesKey("encrypted_device_token")
+        val DEVICE_DIRTY = stringSetPreferencesKey("device_dirty_sections")
+        val DEVICE_OFFER_PENDING = booleanPreferencesKey("device_offer_pending")
+        val DEVICE_LAST_SYNCED_AT = longPreferencesKey("device_last_synced_at")
+        val SETUP_STATE = stringPreferencesKey("setup_state")
+        const val DEVICE_TOKEN_KEY_ALIAS = "listen_device_token"
         val DEVELOPER_MODE = booleanPreferencesKey("developer_mode")
         val THEME_PALETTE = stringPreferencesKey("theme_palette")
         val DARK_MODE = stringPreferencesKey("dark_mode")

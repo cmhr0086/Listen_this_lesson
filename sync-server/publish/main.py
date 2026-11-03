@@ -13,7 +13,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.security.utils import get_authorization_scheme_param
 from pydantic import ValidationError
 from sqlalchemy import func, or_, select
@@ -25,14 +25,20 @@ from app.database import create_sync_engine
 
 from starlette.concurrency import run_in_threadpool
 
-from . import queries, readers, service
+from . import devices, materials, queries, readers, service
 from .timetable_pdf import TimetableError, parse_timetable
 from .database import initialize_database
-from .models import AuditLog, Course, Lesson, Reader, Revision, RevisionNote, RevisionSegment, Uploader
+from .models import AuditLog, Course, Device, Lesson, Reader, Revision, RevisionNote, RevisionSegment, Uploader
 from .schemas import (
+    ConfigSync,
     CourseStatus,
+    MaterialOrder,
+    MaterialUpdate,
+    PairingClaim,
+    PairingRequest,
     ReaderAccessRequest,
     ReaderProfile,
+    ReaderRemark,
     TimetableUpload,
     WechatLogin,
     LessonSubmissions,
@@ -48,6 +54,8 @@ MAX_SUBMISSION_BYTES = 8 * 1024 * 1024
 MAX_TIMETABLE_PDF_BYTES = 2 * 1024 * 1024
 TIMETABLE_PDF_PER_HOUR = 20
 WECHAT_LOGINS_PER_HOUR = 30
+PAIRINGS_PER_HOUR = 20
+PAIRING_LOOKUPS_PER_HOUR = 10
 ADMIN_PAGE = Path(__file__).with_name("admin.html")
 
 
@@ -56,6 +64,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
     admin_token = os.getenv("PUBLISH_ADMIN_TOKEN")
     wechat_appid = os.getenv("WECHAT_APPID")
     wechat_secret = os.getenv("WECHAT_SECRET")
+    config_key = os.getenv("PUBLISH_CONFIG_KEY")
+    config_cipher = devices.ConfigCipher(config_key) if config_key else None
+    sync_url, sync_token = os.getenv("PUBLISH_SYNC_BASE_URL"), os.getenv("SYNC_API_TOKEN")
+    sync_defaults = {"baseUrl": sync_url, "apiToken": sync_token} if sync_url and sync_token else None
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -106,6 +118,13 @@ def create_app(database_url: str | None = None) -> FastAPI:
         if reader is None:
             raise unauthorized()
         return reader
+
+    def require_device(authorization: Annotated[str | None, Header()] = None, db: Session = Depends(get_db)) -> Device:
+        token = bearer(authorization)
+        device = devices.authenticate(db, token) if token else None
+        if device is None:
+            raise unauthorized()
+        return device
 
     def require_admin(authorization: Annotated[str | None, Header()] = None, db: Session = Depends(get_db)) -> None:
         # The /admin page sends the admin token; the mini program sends an admin reader's token.
@@ -221,6 +240,35 @@ def create_app(database_url: str | None = None) -> FastAPI:
             },
         )
 
+    # ---- course materials ---------------------------------------------------------------
+
+    def material_file(material) -> FileResponse:
+        path = materials.file_path(material)
+        if not path.is_file():
+            raise not_found("资料文件不存在，请联系管理员重新上传")
+        # Every upload gets a new id, so a file at a given URL never changes.
+        return FileResponse(
+            path,
+            media_type=materials.CONTENT_TYPES[material.ext],
+            filename=f"{material.title}.{material.ext}",
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
+    @public.get("/courses/{course_id}/materials")
+    def course_materials(request: Request, course_id: str, db: Session = Depends(get_db)):
+        course = materials.public_course(db, course_id)
+        if course is None:
+            raise not_found("课程不存在或未公开")
+        rows = materials.course_materials(db, course.id)
+        return cached(request, {"course": queries.course_dict(course), "materials": [materials.material_dict(m) for m in rows]})
+
+    @public.get("/materials/{material_id}/file")
+    def material_download(material_id: str, db: Session = Depends(get_db)):
+        material = materials.public_material(db, material_id)
+        if material is None:
+            raise not_found("资料不存在或已删除")
+        return material_file(material)
+
     # A stateless helper for the mini program's timetable: the PDF is parsed in memory and
     # dropped; nothing is stored or logged. It lives under /api/public so the existing proxy
     # route and the mini program's request domain cover it.
@@ -291,6 +339,74 @@ def create_app(database_url: str | None = None) -> FastAPI:
         except readers.TimetableConflict as conflict:
             # Changed later on another phone: hand that copy back so this one can take it.
             return JSONResponse(status_code=409, content={"detail": "课表在另一台手机上更新过", **conflict.current})
+
+    # ---- devices: bind a phone, then keep its service settings in the cloud ---------------
+
+    pairing_calls: dict[str, list[float]] = {}
+
+    def limit_pairing(key: str, per_hour: int) -> None:
+        now = time.monotonic()
+        recent = [t for t in pairing_calls.get(key, []) if now - t < 3600]
+        if len(recent) >= per_hour:
+            raise HTTPException(429, "尝试太频繁，请稍后再试")
+        pairing_calls[key] = recent + [now]
+        if len(pairing_calls) > 10_000:
+            pairing_calls.clear()
+
+    def require_config_cipher() -> devices.ConfigCipher:
+        if config_cipher is None:
+            raise HTTPException(503, "服务端未配置设备绑定")
+        return config_cipher
+
+    def require_binding_admin(reader: Reader = Depends(require_reader)) -> Reader:
+        require_config_cipher()
+        if not reader.isAdmin:
+            raise HTTPException(403, "这个账号不能绑定设备")
+        limit_pairing(f"reader:{reader.id}", PAIRING_LOOKUPS_PER_HOUR)
+        return reader
+
+    def no_store(payload) -> JSONResponse:
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+    @public.post("/devices/pairings")
+    def device_pairing(body: PairingRequest, request: Request, db: Session = Depends(get_db)):
+        require_config_cipher()
+        client = request.headers.get("x-real-ip") or (request.client.host if request.client else "")
+        limit_pairing(f"ip:{client}", PAIRINGS_PER_HOUR)
+        return no_store(devices.create_pairing(db, body.name))
+
+    @public.post("/devices/pairings/claim")
+    def device_claim(body: PairingClaim, db: Session = Depends(get_db)):
+        return no_store(devices.claim_pairing(db, body.claim))
+
+    @public.post("/devices/config/sync")
+    def device_config(body: ConfigSync, device: Device = Depends(require_device), db: Session = Depends(get_db)):
+        return no_store(devices.sync_config(db, device, require_config_cipher(), body, sync_defaults))
+
+    @public.delete("/devices/current")
+    def device_unbind(device: Device = Depends(require_device), db: Session = Depends(get_db)):
+        devices.remove(db, device, f"device:{device.id}")
+        return {"removed": True}
+
+    @public.get("/me/device-pairings/{code}")
+    def reader_pairing(code: str, _reader: Reader = Depends(require_binding_admin), db: Session = Depends(get_db)):
+        return devices.preview_pairing(db, code)
+
+    @public.post("/me/device-pairings/{code}/approve")
+    def reader_approve_pairing(code: str, reader: Reader = Depends(require_binding_admin), db: Session = Depends(get_db)):
+        return devices.approve_pairing(db, reader, code)
+
+    @public.get("/me/devices")
+    def reader_devices(reader: Reader = Depends(require_reader), db: Session = Depends(get_db)):
+        return {"devices": devices.list_devices(db, reader)}
+
+    @public.delete("/me/devices/{device_id}")
+    def reader_remove_device(device_id: str, reader: Reader = Depends(require_reader), db: Session = Depends(get_db)):
+        device = db.get(Device, device_id)
+        if device is None or device.readerId != reader.id:
+            raise not_found("设备不存在")
+        devices.remove(db, device, f"reader:{reader.id}")
+        return {"removed": True}
 
     # ---- uploaders ----------------------------------------------------------------------
 
@@ -559,6 +675,11 @@ def create_app(database_url: str | None = None) -> FastAPI:
         rows = db.scalars(stmt.order_by(Reader.requestedAt.desc().nulls_last(), Reader.lastSeenAt.desc()).limit(200))
         return {"readers": [readers.admin_reader_dict(reader) for reader in rows]}
 
+    @admin.post("/readers/{reader_id}/remark")
+    def admin_reader_remark(reader_id: int, body: ReaderRemark, db: Session = Depends(get_db)):
+        reader = service.require(db.get(Reader, reader_id), "读者不存在")
+        return readers.admin_reader_dict(readers.set_remark(db, reader, body.remark))
+
     @admin.post("/readers/{reader_id}/approve")
     def admin_reader_approve(reader_id: int, db: Session = Depends(get_db)):
         reader = service.require(db.get(Reader, reader_id), "读者不存在")
@@ -583,6 +704,44 @@ def create_app(database_url: str | None = None) -> FastAPI:
     def admin_audit(db: Session = Depends(get_db)):
         rows = db.scalars(select(AuditLog).order_by(AuditLog.id.desc()).limit(100))
         return {"entries": [{"at": r.at, "actor": r.actor, "action": r.action, "target": r.target, "detail": r.detail} for r in rows]}
+
+    @admin.get("/courses/{course_id}/materials")
+    def admin_materials(course_id: str, db: Session = Depends(get_db)):
+        course = service.require(db.get(Course, course_id), "课程不存在")
+        return {"course": queries.course_dict(course), "materials": [materials.material_dict(m) for m in materials.course_materials(db, course.id)]}
+
+    @admin.post("/courses/{course_id}/materials")
+    async def admin_upload_material(
+        request: Request,
+        course_id: str,
+        fileName: Annotated[str, Query(max_length=255)],
+        title: Annotated[str | None, Query(max_length=200)] = None,
+        db: Session = Depends(get_db),
+    ):
+        # The raw file is the body, as with the timetable PDF, so the mini program can send it
+        # with wx.request and needs no separate upload domain.
+        declared = request.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > materials.MAX_MATERIAL_BYTES:
+            raise HTTPException(413, f"文件超过 {materials.MAX_MATERIAL_BYTES // 1024 // 1024} MB")
+        body = await request.body()
+        return materials.material_dict(materials.upload(db, course_id, fileName, body, title))
+
+    @admin.patch("/materials/{material_id}")
+    def admin_update_material(material_id: str, body: MaterialUpdate, db: Session = Depends(get_db)):
+        return materials.material_dict(materials.update(db, material_id, body.title, body.courseId))
+
+    @admin.put("/courses/{course_id}/materials/order")
+    def admin_order_materials(course_id: str, body: MaterialOrder, db: Session = Depends(get_db)):
+        return {"materials": [materials.material_dict(m) for m in materials.reorder(db, course_id, body.materialIds)]}
+
+    @admin.delete("/materials/{material_id}")
+    def admin_delete_material(material_id: str, db: Session = Depends(get_db)):
+        materials.remove(db, material_id)
+        return {"materialId": material_id, "deleted": True}
+
+    @admin.get("/materials/{material_id}/file")
+    def admin_material_download(material_id: str, db: Session = Depends(get_db)):
+        return material_file(service.require(db.get(materials.CourseMaterial, material_id), "资料不存在"))
 
     @app.get("/admin", response_class=HTMLResponse, include_in_schema=False)
     def admin_page() -> HTMLResponse:

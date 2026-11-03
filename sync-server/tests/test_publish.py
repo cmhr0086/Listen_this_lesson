@@ -19,6 +19,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("PUBLISH_ADMIN_TOKEN", ADMIN_TOKEN)
     monkeypatch.setenv("WECHAT_APPID", "wx-test")
     monkeypatch.setenv("WECHAT_SECRET", "secret")
+    monkeypatch.setenv("PUBLISH_MATERIALS_DIR", str(tmp_path / "materials"))
     # wx.login codes stand in for openids, so a test can sign the same person in twice.
     monkeypatch.setattr(readers, "code_to_openid", lambda appid, secret, code: f"openid-{code}")
     app = create_app(f"sqlite:///{tmp_path / 'publish-test.db'}")
@@ -614,3 +615,310 @@ def test_only_courses_off_the_reader_can_be_deleted(client):
     # Uploading the same class again starts the course over, waiting for review.
     again = submit(client, token, submission())
     assert again["courseStatus"] == "pending" and again["courseId"] != result["courseId"]
+
+
+# ---- course materials --------------------------------------------------------------------
+
+DOCX = b"PK\x03\x04 pretend docx"
+
+
+def upload_material(client, course_id, file_name, body=DOCX, headers=None, **params):
+    return client.post(
+        f"/api/admin/v1/courses/{course_id}/materials",
+        params={"fileName": file_name, **params},
+        content=body,
+        headers={"Authorization": f"Bearer {ADMIN_TOKEN}"} if headers is None else headers,
+    )
+
+
+def test_admin_uploads_and_readers_open_course_materials(client, tmp_path):
+    _, result = publish_one(client)
+    course_id = result["courseId"]
+    uploaded = upload_material(client, course_id, "期末复习.docx")
+    assert uploaded.status_code == 200, uploaded.text
+    material = uploaded.json()
+    assert (material["title"], material["ext"], material["viewer"], material["size"]) == ("期末复习", "docx", "document", len(DOCX))
+    upload_material(client, course_id, "公式表.PNG", body=b"\x89PNG")
+    upload_material(client, course_id, "习题.zip", body=b"PK")
+
+    listed = client.get(f"/api/public/v1/courses/{course_id}/materials").json()
+    assert [(m["fileName"], m["viewer"]) for m in listed["materials"]] == [
+        ("期末复习.docx", "document"), ("公式表.png", "image"), ("习题.zip", "none")]
+    file = client.get(f"/api/public/v1/materials/{material['materialId']}/file")
+    assert file.status_code == 200 and file.content == DOCX
+    assert file.headers["content-type"].startswith("application/vnd.openxmlformats-officedocument.wordprocessingml")
+
+
+def test_readers_cannot_upload_or_change_materials(client):
+    _, result = publish_one(client)
+    course_id = result["courseId"]
+    reader = auth(sign_in(client, "reader")["token"])
+    assert upload_material(client, course_id, "a.docx", headers=reader).status_code == 401
+    assert upload_material(client, course_id, "a.docx", headers={}).status_code == 401
+    material = upload_material(client, course_id, "a.docx").json()
+    assert client.patch(f"/api/admin/v1/materials/{material['materialId']}", headers=reader, json={"title": "x"}).status_code == 401
+    assert client.delete(f"/api/admin/v1/materials/{material['materialId']}", headers=reader).status_code == 401
+    # An admin reader may manage them from the mini program.
+    login = sign_in(client, "boss")
+    admin(client, "POST", f"/readers/{login['reader']['readerId']}/make-admin")
+    assert upload_material(client, course_id, "b.pdf", headers=auth(login["token"])).status_code == 200
+
+
+def test_material_formats_and_size_are_checked(client):
+    _, result = publish_one(client)
+    course_id = result["courseId"]
+    refused = upload_material(client, course_id, "病毒.exe")
+    assert refused.status_code == 415 and "不支持 .exe" in refused.json()["detail"]
+    assert upload_material(client, course_id, "没有扩展名").status_code == 415
+    assert upload_material(client, course_id, "空.docx", body=b"").status_code == 400
+    from publish import materials
+    big = upload_material(client, course_id, "大.pdf", body=b"0" * (materials.MAX_MATERIAL_BYTES + 1))
+    assert big.status_code == 413
+
+
+def test_materials_are_renamed_ordered_moved_and_deleted(client, tmp_path):
+    _, first = publish_one(client)
+    _, second = publish_one(client, course={"schoolName": "某某大学", "term": "2026-2027 第一学期", "courseName": "线性代数", "teacherName": "李老师"})
+    a = upload_material(client, first["courseId"], "a.docx").json()
+    b = upload_material(client, first["courseId"], "b.pdf").json()
+    admin(client, "PATCH", f"/materials/{a['materialId']}", json={"title": "  第一章  讲义 "})
+    ordered = admin(client, "PUT", f"/courses/{first['courseId']}/materials/order", json={"materialIds": [b["materialId"], a["materialId"]]})
+    assert [m["title"] for m in ordered["materials"]] == ["b", "第一章 讲义"]
+    stale = client.put(f"/api/admin/v1/courses/{first['courseId']}/materials/order", headers=auth(ADMIN_TOKEN), json={"materialIds": [a["materialId"]]})
+    assert stale.status_code == 409
+
+    admin(client, "PATCH", f"/materials/{b['materialId']}", json={"courseId": second["courseId"]})
+    assert [m["title"] for m in client.get(f"/api/public/v1/courses/{second['courseId']}/materials").json()["materials"]] == ["b"]
+
+    admin(client, "DELETE", f"/materials/{b['materialId']}")
+    assert client.get(f"/api/public/v1/materials/{b['materialId']}/file").status_code == 404
+    assert not (tmp_path / "materials" / f"{b['materialId']}.pdf").exists()
+
+
+def test_materials_follow_the_course_review_state(client, tmp_path):
+    token = new_uploader(client)
+    result = submit(client, token, submission())
+    course_id = result["courseId"]
+    material = upload_material(client, course_id, "a.docx").json()
+    # Pending: the admin sees it, readers do not.
+    assert client.get(f"/api/public/v1/courses/{course_id}/materials").status_code == 404
+    assert client.get(f"/api/public/v1/materials/{material['materialId']}/file").status_code == 404
+    assert client.get(f"/api/admin/v1/materials/{material['materialId']}/file", headers=auth(ADMIN_TOKEN)).content == DOCX
+    approve(client, course_id)
+    assert client.get(f"/api/public/v1/materials/{material['materialId']}/file").status_code == 200
+    admin(client, "POST", f"/courses/{course_id}/takedown", json={"note": None})
+    assert client.get(f"/api/public/v1/courses/{course_id}/materials").status_code == 404
+    admin(client, "DELETE", f"/courses/{course_id}")
+    assert not (tmp_path / "materials" / f"{material['materialId']}.docx").exists()
+
+
+# ---- device binding and cloud config --------------------------------------------------------
+
+CONFIG_KEY = "MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE="
+STT = {"provider": "SELF_HOSTED", "baseUrl": "http://mac.local:8765", "model": "", "apiKey": "stt-secret"}
+AI = {"provider": "DEEPSEEK", "baseUrl": "https://api.deepseek.com", "model": "deepseek-v4-flash", "apiKey": "ai-secret"}
+
+
+@pytest.fixture
+def device_client(tmp_path, monkeypatch):
+    monkeypatch.setenv("PUBLISH_ADMIN_TOKEN", ADMIN_TOKEN)
+    monkeypatch.setenv("WECHAT_APPID", "wx-test")
+    monkeypatch.setenv("WECHAT_SECRET", "secret")
+    monkeypatch.setenv("PUBLISH_MATERIALS_DIR", str(tmp_path / "materials"))
+    monkeypatch.setenv("PUBLISH_CONFIG_KEY", CONFIG_KEY)
+    monkeypatch.setenv("PUBLISH_SYNC_BASE_URL", "https://sync.example.com")
+    monkeypatch.setenv("SYNC_API_TOKEN", "sync-secret")
+    monkeypatch.setattr(readers, "code_to_openid", lambda appid, secret, code: f"openid-{code}")
+    app = create_app(f"sqlite:///{tmp_path / 'publish-test.db'}")
+    with TestClient(app) as value:
+        value.db_path = tmp_path / "publish-test.db"
+        yield value
+
+
+def admin_reader(client, code="me"):
+    login = sign_in(client, code)
+    admin(client, "POST", f"/readers/{login['reader']['readerId']}/make-admin")
+    return auth(login["token"])
+
+
+def start_pairing(client, name="Mate 9"):
+    response = client.post("/api/public/v1/devices/pairings", json={"name": name})
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def claim(client, pairing):
+    return client.post("/api/public/v1/devices/pairings/claim", json={"claim": pairing["claim"]})
+
+
+def bind(client, headers, name="Mate 9"):
+    pairing = start_pairing(client, name)
+    approved = client.post(f"/api/public/v1/me/device-pairings/{pairing['code']}/approve", headers=headers)
+    assert approved.status_code == 200, approved.text
+    return auth(claim(client, pairing).json()["deviceToken"])
+
+
+def sync_config(client, headers, **body):
+    response = client.post("/api/public/v1/devices/config/sync", headers=headers, json=body)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_phone_binds_with_a_code_and_collects_its_token(device_client):
+    headers = admin_reader(device_client)
+    pairing = start_pairing(device_client)
+    assert len(pairing["code"]) == 6 and pairing["code"].isdigit()
+    assert claim(device_client, pairing).json() == {"status": "pending"}
+
+    preview = device_client.get(f"/api/public/v1/me/device-pairings/{pairing['code']}", headers=headers)
+    assert preview.json()["name"] == "Mate 9"
+    assert device_client.post(f"/api/public/v1/me/device-pairings/{pairing['code']}/approve", headers=headers).status_code == 200
+
+    claimed = claim(device_client, pairing).json()
+    assert claimed["status"] == "approved" and claimed["deviceToken"].startswith("ld_")
+    # The claim works once, and the used code is gone.
+    assert claim(device_client, pairing).status_code == 410
+    assert device_client.get(f"/api/public/v1/me/device-pairings/{pairing['code']}", headers=headers).status_code == 404
+    listed = device_client.get("/api/public/v1/me/devices", headers=headers).json()["devices"]
+    assert [d["name"] for d in listed] == ["Mate 9"]
+
+
+def test_only_admin_readers_can_approve_a_code(device_client):
+    pairing = start_pairing(device_client)
+    other = auth(sign_in(device_client, "stranger")["token"])
+    url = f"/api/public/v1/me/device-pairings/{pairing['code']}"
+    assert device_client.get(url, headers=other).status_code == 403
+    assert device_client.post(url + "/approve", headers=other).status_code == 403
+    assert device_client.post(url + "/approve").status_code == 401
+    assert claim(device_client, pairing).json() == {"status": "pending"}
+
+
+def test_expired_code_cannot_be_approved_or_claimed(device_client, monkeypatch):
+    from publish import devices
+
+    headers = admin_reader(device_client)
+    pairing = start_pairing(device_client)
+    real_now = devices.now_ms
+    monkeypatch.setattr(devices, "now_ms", lambda: real_now() + devices.PAIRING_TTL_MS + 1000)
+    assert device_client.post(f"/api/public/v1/me/device-pairings/{pairing['code']}/approve", headers=headers).status_code == 404
+    assert claim(device_client, pairing).status_code == 410
+
+
+def test_wrong_codes_are_rate_limited(device_client):
+    headers = admin_reader(device_client)
+    statuses = [device_client.get("/api/public/v1/me/device-pairings/000000", headers=headers).status_code for _ in range(11)]
+    assert statuses[:10] == [404] * 10 and statuses[10] == 429
+
+
+def test_config_follows_the_account_to_a_new_device(device_client):
+    headers = admin_reader(device_client)
+    first = bind(device_client, headers, "旧手机")
+    saved = sync_config(device_client, first, offered={"stt": STT, "ai": AI})
+    assert saved["config"]["stt"] == STT and saved["version"] == 1
+
+    second = bind(device_client, headers, "新手机")
+    pulled = sync_config(device_client, second)
+    assert pulled["config"]["ai"]["apiKey"] == "ai-secret" and pulled["version"] == 1
+
+    # An edit reaches the other phone; a section nobody edited is left alone.
+    edited = sync_config(device_client, second, changed={"ai": {**AI, "apiKey": "new-secret"}})
+    assert edited["version"] == 2
+    latest = sync_config(device_client, first)
+    assert latest["config"]["ai"]["apiKey"] == "new-secret" and latest["config"]["stt"] == STT
+
+
+def test_cloud_wins_over_what_a_phone_offers(device_client):
+    headers = admin_reader(device_client)
+    first = bind(device_client, headers)
+    sync_config(device_client, first, offered={"ai": AI})
+    second = bind(device_client, headers, "另一台")
+    result = sync_config(device_client, second, offered={"ai": {**AI, "apiKey": "stale"}})
+    assert result["config"]["ai"]["apiKey"] == "ai-secret" and result["version"] == 1
+
+
+def test_config_is_encrypted_at_rest(device_client):
+    import sqlite3
+
+    headers = admin_reader(device_client)
+    sync_config(device_client, bind(device_client, headers), offered={"ai": AI})
+    with sqlite3.connect(device_client.db_path) as db:
+        sealed = db.execute("select sealed from account_configs").fetchone()[0]
+        log = str(db.execute("select * from audit_log").fetchall())
+    assert sealed.startswith("v1:") and "ai-secret" not in sealed and "ai-secret" not in log
+
+
+def test_sealed_config_only_opens_for_its_account():
+    from publish.devices import ConfigCipher
+    from publish.service import ServiceError
+
+    cipher = ConfigCipher(CONFIG_KEY)
+    sealed = cipher.seal(1, {"a": 1})
+    assert cipher.open(1, sealed) == {"a": 1}
+    with pytest.raises(ServiceError):
+        cipher.open(2, sealed)
+
+
+def test_sync_settings_come_from_the_server_until_edited(device_client):
+    headers = admin_reader(device_client)
+    device = bind(device_client, headers)
+    assert sync_config(device_client, device)["config"]["sync"] == {"baseUrl": "https://sync.example.com", "apiToken": "sync-secret"}
+    own = {"baseUrl": "https://other.example.com", "apiToken": "mine"}
+    assert sync_config(device_client, device, changed={"sync": own})["config"]["sync"] == own
+
+
+def test_uploader_is_created_only_when_the_server_has_none(device_client):
+    headers = admin_reader(device_client)
+    device = bind(device_client, headers)
+    token = sync_config(device_client, device)["config"]["publish"]["token"]
+    assert device_client.get("/api/publish/v1/me", headers=auth(token)).status_code == 200
+    # Stable from then on: the second sync hands back the same token, no second uploader.
+    assert sync_config(device_client, device)["config"]["publish"]["token"] == token
+    assert len(admin(device_client, "GET", "/uploaders")["uploaders"]) == 1
+
+
+def test_existing_uploader_is_not_replaced_before_its_phone_syncs(device_client):
+    real_token = new_uploader(device_client)
+    headers = admin_reader(device_client)
+    newcomer = bind(device_client, headers, "测试机")
+    assert "publish" not in sync_config(device_client, newcomer)["config"]
+    assert len(admin(device_client, "GET", "/uploaders")["uploaders"]) == 1
+    # The phone holding the real token supplies it, and everyone gets that one.
+    owner = bind(device_client, headers, "主力机")
+    sync_config(device_client, owner, offered={"publish": {"token": real_token, "schoolName": "西建大"}})
+    assert sync_config(device_client, newcomer)["config"]["publish"]["token"] == real_token
+
+
+def test_removed_device_and_demoted_account_lose_access(device_client):
+    headers = admin_reader(device_client)
+    device = bind(device_client, headers)
+    device_id = device_client.get("/api/public/v1/me/devices", headers=headers).json()["devices"][0]["deviceId"]
+    assert device_client.delete(f"/api/public/v1/me/devices/{device_id}", headers=headers).status_code == 200
+    assert device_client.post("/api/public/v1/devices/config/sync", headers=device, json={}).status_code == 401
+
+    again = bind(device_client, headers)
+    reader_id = device_client.get("/api/public/v1/me", headers=headers).json()["readerId"]
+    admin(device_client, "POST", f"/readers/{reader_id}/remove-admin")
+    assert device_client.post("/api/public/v1/devices/config/sync", headers=again, json={}).status_code == 401
+
+
+def test_a_reader_cannot_remove_someone_elses_device(device_client):
+    headers = admin_reader(device_client)
+    bind(device_client, headers)
+    device_id = device_client.get("/api/public/v1/me/devices", headers=headers).json()["devices"][0]["deviceId"]
+    other = auth(sign_in(device_client, "stranger")["token"])
+    assert device_client.delete(f"/api/public/v1/me/devices/{device_id}", headers=other).status_code == 404
+
+
+def test_binding_is_refused_without_a_config_key(client):
+    assert client.post("/api/public/v1/devices/pairings", json={"name": "x"}).status_code == 503
+
+
+def test_admin_names_readers_with_a_remark(client):
+    reader = sign_in(client)["reader"]
+    row = admin(client, "GET", "/readers")["readers"][0]
+    assert row["displayName"] is None
+    saved = admin(client, "POST", f"/readers/{reader['readerId']}/remark", json={"remark": "  小林 "})
+    assert saved["displayName"] == "小林" and saved["remark"] == "小林"
+    # Clearing it goes back to having no name, and readers never see the admin's remark.
+    assert admin(client, "POST", f"/readers/{reader['readerId']}/remark", json={"remark": ""})["displayName"] is None
+    assert "remark" not in client.get("/api/public/v1/me", headers=auth(sign_in(client)["token"])).json()

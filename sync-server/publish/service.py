@@ -307,9 +307,15 @@ def delete_course(db: Session, course_id: str) -> None:
     db.execute(delete(Revision).where(Revision.lessonId.in_(lesson_ids)))
     db.execute(delete(Revision).where(Revision.courseId == course.id))
     db.execute(delete(Lesson).where(Lesson.courseId == course.id))
+    from .materials import remove_for_course
+
+    files = remove_for_course(db, course.id)
+    db.flush()
     audit(db, "admin", "course.deleted", f"course:{course.id}", f"{course.courseName} · {course.teacherName}，{lesson_count} 节")
     db.delete(course)
     db.commit()
+    for path in files:
+        path.unlink(missing_ok=True)
 
 
 def set_lesson_status(db: Session, lesson_id: str, status: str, reason: str | None = None) -> Lesson:

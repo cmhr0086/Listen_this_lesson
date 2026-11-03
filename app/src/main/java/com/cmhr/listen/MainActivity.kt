@@ -12,7 +12,15 @@ import android.graphics.Color
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.DisposableEffect
 import com.cmhr.listen.ui.theme.DarkModePreference
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.Modifier
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.cmhr.listen.ui.ListenApp
+import com.cmhr.listen.ui.SetupFlow
 import com.cmhr.listen.ui.theme.ListenTheme
 import com.cmhr.listen.data.settings.AppSettingsRepository
 import com.cmhr.listen.data.settings.AppearanceSettings
@@ -50,7 +58,16 @@ class MainActivity : ComponentActivity() {
                 enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
                 onDispose {}
             }
-            ListenTheme(palette = settings.palette, darkMode = settings.darkMode) { ListenApp() }
+            ListenTheme(palette = settings.palette, darkMode = settings.darkMode) {
+                // The same SettingsViewModel ListenApp gets; a blank frame until it knows, rather than a flash of home.
+                val settingsModel: SettingsViewModel = viewModel()
+                val showSetup by settingsModel.showSetup.collectAsStateWithLifecycle()
+                when (showSetup) {
+                    null -> Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background))
+                    true -> SetupFlow(settingsModel)
+                    false -> ListenApp()
+                }
+            }
         }
         intent.getLongExtra(ListeningForegroundService.EXTRA_RECORD_ID, -1L).let(AppNavigationRequests::openRecord)
     }

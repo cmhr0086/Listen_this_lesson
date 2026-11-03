@@ -129,6 +129,8 @@ class Reader(Base):
     # Filled in by the reader with WeChat's avatar and nickname pickers; shown in /admin.
     nickname: Mapped[str | None] = mapped_column(Text)
     avatar: Mapped[str | None] = mapped_column(Text)
+    # The admin's own name for this person; WeChat gives the server no name to go by.
+    remark: Mapped[str | None] = mapped_column(Text)
     requestNote: Mapped[str | None] = mapped_column(Text)
     requestedAt: Mapped[int | None] = mapped_column(Integer)
     reviewedAt: Mapped[int | None] = mapped_column(Integer)
@@ -155,3 +157,59 @@ class ReaderTimetable(Base):
     # When the phone last changed it; the newer copy wins.
     updatedAt: Mapped[int] = mapped_column(Integer, nullable=False)
     savedAt: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class CourseMaterial(Base):
+    """A file the admin attaches to a course (slides, DOCX notes, review sheets). The bytes live
+    on disk under the materials directory; readers see it once the course is approved."""
+
+    __tablename__ = "course_materials"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    courseId: Mapped[str] = mapped_column(ForeignKey("courses.id"), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    # Lower-case extension without the dot; decides how the mini program opens it.
+    ext: Mapped[str] = mapped_column(Text, nullable=False)
+    size: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    createdAt: Mapped[int] = mapped_column(Integer, nullable=False)
+    updatedAt: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class DevicePairing(Base):
+    """A phone waiting to be bound. It shows the short code; only it holds the claim secret, so
+    seeing the code on its screen is not enough to collect what the approval releases."""
+
+    __tablename__ = "device_pairings"
+
+    claimHash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    code: Mapped[str] = mapped_column(String(6), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    # Set when an admin reader approves it.
+    readerId: Mapped[int | None] = mapped_column(ForeignKey("readers.id"))
+    createdAt: Mapped[int] = mapped_column(Integer, nullable=False)
+    expiresAt: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+
+
+class Device(Base):
+    __tablename__ = "devices"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    readerId: Mapped[int] = mapped_column(ForeignKey("readers.id"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    tokenHash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    createdAt: Mapped[int] = mapped_column(Integer, nullable=False)
+    lastSeenAt: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class AccountConfig(Base):
+    """An account's service settings and keys, AES-GCM sealed with the server's config key."""
+
+    __tablename__ = "account_configs"
+
+    readerId: Mapped[int] = mapped_column(ForeignKey("readers.id"), primary_key=True)
+    sealed: Mapped[str] = mapped_column(Text, nullable=False)
+    # Goes up on every real change, so a phone can tell whether it has the latest.
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    updatedAt: Mapped[int] = mapped_column(Integer, nullable=False)

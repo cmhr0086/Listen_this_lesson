@@ -137,10 +137,26 @@ audit_log        id, at, actor(uploader:<id>|admin), action, target, detail
 | `POST /uploaders/{id}/disable`、`/enable`、`/rotate-token` | 停用、启用上传者、更换 Token |
 | `GET /readers?status=` | 小程序读者：openid 只露首尾、申请留言、原文权限、最近登录 |
 | `POST /readers/{id}/approve`、`/revoke` | 允许或收回查看原文 |
+| `POST /readers/{id}/remark {remark}` | 管理员给读者起备注名；没有备注时显示“未命名” |
 | `POST /readers/{id}/make-admin`、`/remove-admin` | 把小程序账号设为（或取消）管理员：它的读者 Token 也能调用整个管理接口，小程序「设置 › 管理」里审核；管理员可看全部原文 |
 | `GET /audit` | 最近 100 条操作日志 |
 
 - `/admin` 是服务端自带的单页（HTML 加 fetch），电脑上左右分栏，手机上列表和详情分屏，底部固定审核按钮。管理员 Token 只存在浏览器标签页里。读者在网页和小程序里都看不到它。
+
+### 4.4 设备绑定和云端配置（`/api/public/v1`）
+
+| 接口 | 鉴权 | 说明 |
+|---|---|---|
+| `POST /devices/pairings {name}` | 无（按 IP 限流） | 新手机申请绑定，返回 6 位绑定码和只有它持有的 `claim`，5 分钟有效 |
+| `POST /devices/pairings/claim {claim}` | `claim` | 等待中返回 `pending`；批准后返回一次设备 Token |
+| `GET /me/device-pairings/{code}`、`POST .../approve` | 管理员读者 | 小程序查看设备信息并批准，每小时最多 10 次 |
+| `GET /me/devices`、`DELETE /me/devices/{id}` | 读者 | 我的设备、移除设备 |
+| `POST /devices/config/sync {changed, offered}` | 设备 Token | `changed` 覆盖云端；`offered` 只填云端没有的部分；返回完整配置 |
+| `DELETE /devices/current` | 设备 Token | 手机自己解除绑定 |
+
+- 配置按账号用 AES-GCM 加密入库（`PUBLISH_CONFIG_KEY`），只有数据库拿不到明文。服务器本身能解密。
+- 设备移除后，或账号不再是管理员时，设备 Token 立即失效；手机下次同步收到 401 就清除本地密钥。离线的手机清除不了，手机丢失时要更换相关密钥。
+- 服务器一个上传者都没有时，才自动创建一个；已有上传者时，等持有其 Token 的手机上传，避免新 Token 让旧手机失去已发布课堂的归属。
 
 ## 5. Android 端（1.4.0）
 
