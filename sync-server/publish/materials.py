@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import os
+import tempfile
+import time
+import zipfile
 from pathlib import Path
 from uuid import uuid4
 
@@ -16,6 +19,8 @@ from .service import ServiceError, audit, now_ms, require
 
 MAX_MATERIAL_BYTES = 20 * 1024 * 1024
 MAX_TITLE_CHARS = 100
+MAX_PACKAGE_BYTES = 100 * 1024 * 1024
+STALE_PACKAGE_SECONDS = 3600
 
 # Formats the mini program can open in place: wx.openDocument handles these documents...
 DOCUMENT_TYPES = {
@@ -81,11 +86,31 @@ def _lesson_title(material: CourseMaterial) -> str | None:
     return revision.title if revision else None
 
 
+def _lesson_number(material: CourseMaterial) -> int | None:
+    """Which lesson of the course this is, counting published lessons from the first."""
+    db = object_session(material)
+    lesson = db.get(Lesson, material.lessonId) if material.lessonId and db else None
+    revision = db.get(Revision, lesson.publishedRevisionId) if lesson and lesson.publishedRevisionId else None
+    if revision is None:
+        return None
+    return db.scalar(
+        select(func.count()).select_from(Lesson)
+        .join(Revision, Revision.id == Lesson.publishedRevisionId)
+        .where(
+            Lesson.courseId == lesson.courseId,
+            Lesson.status == "active",
+            # Lessons recorded at the same moment still get a number each.
+            (Revision.startedAt < revision.startedAt) | ((Revision.startedAt == revision.startedAt) & (Lesson.id <= lesson.id)),
+        )
+    )
+
+
 def material_dict(material: CourseMaterial) -> dict:
     return {
         "category": material.category,
         "lessonId": material.lessonId,
         "lessonTitle": _lesson_title(material),
+        "lessonNumber": _lesson_number(material),
         "materialId": material.id,
         "courseId": material.courseId,
         "title": material.title,
@@ -116,6 +141,64 @@ def public_material(db: Session, material_id: str) -> CourseMaterial | None:
     if material is None or public_course(db, material.courseId) is None:
         return None
     return material
+
+
+def packages_directory() -> Path:
+    """Apart from the materials, where a .zip file is an upload that must stay."""
+    path = directory() / "packages"
+    path.mkdir(exist_ok=True)
+    return path
+
+
+def _drop_stale_packages() -> None:
+    # A package is removed once sent; one whose download was cut off may be left behind.
+    cutoff = time.time() - STALE_PACKAGE_SECONDS
+    for package in packages_directory().glob("*.zip"):
+        if package.stat().st_mtime < cutoff:
+            package.unlink(missing_ok=True)
+
+
+def _unique_name(name: str, used: set[str]) -> str:
+    stem, dot, ext = name.rpartition(".")
+    candidate, copy = name, 1
+    while candidate.lower() in used:
+        copy += 1
+        candidate = f"{stem} ({copy}){dot}{ext}"
+    used.add(candidate.lower())
+    return candidate
+
+
+def build_package(db: Session, course: Course, material_ids: list[str]) -> tuple[Path, str]:
+    """Zips the chosen files of a public course and returns the file and its name.
+
+    Documents and pictures are already compressed, so the files are stored as they are.
+    The caller removes the file once it has been sent.
+    """
+    wanted = list(dict.fromkeys(material_ids))
+    if not wanted:
+        raise ServiceError(422, "请先选择资料")
+    by_id = {m.id: m for m in course_materials(db, course.id)}
+    if any(material_id not in by_id for material_id in wanted):
+        raise ServiceError(409, "资料列表已变化，请刷新后再选")
+    chosen = [by_id[material_id] for material_id in wanted]
+    if sum(m.size for m in chosen) > MAX_PACKAGE_BYTES:
+        raise ServiceError(413, f"一次最多打包 {MAX_PACKAGE_BYTES // 1024 // 1024} MB，请少选几份")
+    for material in chosen:
+        if not file_path(material).is_file():
+            raise ServiceError(404, f"{material.title}.{material.ext} 的文件不存在，请联系管理员重新上传")
+    _drop_stale_packages()
+    handle, name = tempfile.mkstemp(suffix=".zip", dir=packages_directory())
+    os.close(handle)
+    package = Path(name)
+    used: set[str] = set()
+    try:
+        with zipfile.ZipFile(package, "w", zipfile.ZIP_STORED) as archive:
+            for material in chosen:
+                archive.write(file_path(material), _unique_name(f"{material.title}.{material.ext}", used))
+    except Exception:
+        package.unlink(missing_ok=True)
+        raise
+    return package, f"{course.courseName}-资料.zip"
 
 
 def next_position(db: Session, course_id: str) -> int:
