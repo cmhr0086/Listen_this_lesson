@@ -9,6 +9,7 @@ import {
   ReadOutlined, TeamOutlined, UploadOutlined, UserOutlined
 } from '@ant-design/icons'
 import zhCN from 'antd/locale/zh_CN'
+import { StyleProvider, legacyLogicalPropertiesTransformer } from '@ant-design/cssinjs'
 import { api, createPairing, claimPairing, deviceToken, setDeviceToken, signOut, onSignedOut } from './api'
 
 const { Sider, Content, Header } = Layout
@@ -479,7 +480,7 @@ function Login({ onDone }) {
     return () => clearInterval(timer)
   }, [ticket, onDone])
   return (
-    <div style={{ minHeight: '100%', display: 'grid', placeItems: 'center', padding: 16, background: '#17211f' }}>
+    <div style={{ minHeight: '100%', boxSizing: 'border-box', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16, background: '#17211f' }}>
       <Card style={{ width: '100%', maxWidth: 400 }} title="听这节课后台">
         <Space direction="vertical" size={14} style={{ width: '100%' }}>
           {ticket && <div style={{ fontSize: 44, fontWeight: 600, letterSpacing: 6, textAlign: 'center', fontVariantNumeric: 'tabular-nums' }}>{ticket.code.slice(0, 3)} {ticket.code.slice(3)}</div>}
@@ -568,6 +569,9 @@ function Console() {
 
 createRoot(document.getElementById('root')).render(
   <ConfigProvider locale={zhCN} button={{ autoInsertSpace: false }} theme={{ token: { colorPrimary: '#00696b', borderRadius: 6, fontSize: 13 } }}>
-    <AntApp style={{ height: '100%' }}><Console /></AntApp>
+    {/* Old engines lack :where() and logical properties, which Ant Design's styles lean on. */}
+    <StyleProvider hashPriority="high" transformers={[legacyLogicalPropertiesTransformer]}>
+      <AntApp style={{ height: '100%' }}><Console /></AntApp>
+    </StyleProvider>
   </ConfigProvider>
 )
