@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import gzip
+import io
 import json
+import os
+import zipfile
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.main import create_app as create_sync_app
-from publish import readers
+from publish import materials, readers
 from publish.main import create_app
 
 ADMIN_TOKEN = "test-admin-token"
@@ -651,6 +654,59 @@ def test_admin_uploads_and_readers_open_course_materials(client, tmp_path):
     assert file.headers["content-type"].startswith("application/vnd.openxmlformats-officedocument.wordprocessingml")
 
 
+def test_signed_in_reader_packs_chosen_materials(client, monkeypatch):
+    _, result = publish_one(client)
+    course_id = result["courseId"]
+    first = upload_material(client, course_id, "第一章 课件.pdf", body=b"one").json()
+    same = upload_material(client, course_id, "第一章 课件.pdf", body=b"two").json()
+    other = upload_material(client, course_id, "公式.png", body=b"three").json()
+    url = f"/api/public/v1/courses/{course_id}/materials/package"
+    ids = ",".join(m["materialId"] for m in (first, same, other))
+
+    assert client.get(url, params={"ids": ids}).status_code == 401
+    assert client.get(url, params={"ids": ids}, headers=auth("lr_nonsense")).status_code == 401
+
+    reader = auth(sign_in(client)["token"])
+    packed = client.get(url, params={"ids": ids}, headers=reader)
+    assert packed.status_code == 200 and packed.headers["content-type"] == "application/zip"
+    assert "no-store" in packed.headers["cache-control"]
+    assert "attachment" in packed.headers["content-disposition"]
+    assert "content-encoding" not in packed.headers and int(packed.headers["content-length"]) == len(packed.content)
+    with zipfile.ZipFile(io.BytesIO(packed.content)) as archive:
+        assert archive.namelist() == ["第一章 课件.pdf", "第一章 课件 (2).pdf", "公式.png"]
+        assert archive.read("第一章 课件 (2).pdf") == b"two"
+    # Each package is built for its download and not kept; one left by a cut-off download goes
+    # later, and an uploaded .zip is never mistaken for a package.
+    assert not list(materials.packages_directory().glob("*.zip"))
+    uploaded_zip = upload_material(client, course_id, "习题.zip", body=b"PK").json()
+    left = materials.packages_directory() / "left.zip"
+    left.write_bytes(b"x")
+    os.utime(left, (1, 1))
+    client.get(url, params={"ids": first["materialId"]}, headers=reader)
+    assert not left.exists()
+    assert client.get(f"/api/public/v1/materials/{uploaded_zip['materialId']}/file").content == b"PK"
+
+    assert client.get(url, params={"ids": ""}, headers=reader).status_code == 422
+    assert client.get(url, params={"ids": "nope"}, headers=reader).status_code == 409
+    monkeypatch.setattr(materials, "MAX_PACKAGE_BYTES", 5)
+    too_big = client.get(url, params={"ids": ids}, headers=reader)
+    assert too_big.status_code == 413 and "少选" in too_big.json()["detail"]
+
+
+def test_package_refuses_a_course_that_is_not_public_and_other_courses_files(client):
+    _, result = publish_one(client)
+    course_id = result["courseId"]
+    _, other = publish_one(client, course={"schoolName": "某某大学", "term": "2026-2027 第一学期", "courseName": "线性代数", "teacherName": "李老师"})
+    foreign = upload_material(client, other["courseId"], "a.pdf", body=b"x").json()
+    reader = auth(sign_in(client)["token"])
+    url = f"/api/public/v1/courses/{course_id}/materials/package"
+    assert client.get(url, params={"ids": foreign["materialId"]}, headers=reader).status_code == 409
+    assert client.get("/api/public/v1/courses/nope/materials/package", params={"ids": "x"}, headers=reader).status_code == 404
+    admin(client, "POST", f"/courses/{course_id}/return", json={"note": "再改改"})
+    own = upload_material(client, course_id, "b.pdf", body=b"y").json()
+    assert client.get(url, params={"ids": own["materialId"]}, headers=reader).status_code == 404
+
+
 def test_readers_cannot_upload_or_change_materials(client):
     _, result = publish_one(client)
     course_id = result["courseId"]
@@ -1235,6 +1291,14 @@ def test_notes_and_materials_can_belong_to_one_lesson(client):
     one = client.post(url, params={"fileName": "补充.pdf", "lessonId": lesson}, headers=auth(ADMIN_TOKEN), content=b"x").json()
     assert (one["category"], one["lessonId"]) == ("material", lesson)
     assert one["lessonTitle"] == "第一课 极限"
+    assert (one["lessonNumber"], whole["lessonNumber"]) == (1, None)
+    # Same course, same start time: each lesson still gets its own number.
+    token = _token
+    later = submit(client, token, submission(title="第二课"))
+    assert later["courseId"] == course
+    two = client.post(url, params={"fileName": "b.pdf", "lessonId": later["lessonId"]}, headers=auth(ADMIN_TOKEN), content=b"x").json()
+    again = client.post(url, params={"fileName": "c.pdf", "lessonId": lesson}, headers=auth(ADMIN_TOKEN), content=b"x").json()
+    assert {two["lessonNumber"], again["lessonNumber"]} == {1, 2}
     assert client.post(url, params={"fileName": "a.pdf", "lessonId": "nope"}, headers=auth(ADMIN_TOKEN), content=b"x").status_code == 404
     assert client.post(url, params={"fileName": "a.pdf", "category": "x"}, headers=auth(ADMIN_TOKEN), content=b"x").status_code == 422
 

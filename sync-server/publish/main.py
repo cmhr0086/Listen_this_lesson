@@ -14,6 +14,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from starlette.background import BackgroundTask
 from fastapi.security.utils import get_authorization_scheme_param
 from pydantic import ValidationError
 from sqlalchemy import func, or_, select
@@ -58,6 +59,7 @@ TIMETABLE_PDF_PER_HOUR = 20
 WECHAT_LOGINS_PER_HOUR = 30
 PAIRINGS_PER_HOUR = 20
 PAIRING_LOOKUPS_PER_HOUR = 10
+PACKAGES_PER_HOUR = 30
 ADMIN_PAGE = Path(__file__).with_name("admin.html")
 
 
@@ -79,7 +81,8 @@ def create_app(database_url: str | None = None) -> FastAPI:
         engine.dispose()
 
     app = FastAPI(title="Listen Publish Server", version="0.1.0", lifespan=lifespan)
-    app.add_middleware(GZipMiddleware, minimum_size=1024)
+    # Zips are already compressed, and gzip would hide a download's length.
+    app.add_middleware(GZipMiddleware, minimum_size=1024, exclude_content_types=("text/event-stream", "application/zip"))
     app.add_middleware(GzipRequestMiddleware)
     origins = [origin.strip() for origin in os.getenv("PUBLISH_CORS_ORIGINS", "").split(",") if origin.strip()]
     if origins:
@@ -270,6 +273,28 @@ def create_app(database_url: str | None = None) -> FastAPI:
         rows = materials.course_materials(db, course.id)
         return cached(request, {"course": queries.course_dict(course), "materials": [materials.material_dict(m) for m in rows]})
 
+    # Signed-in readers only. A GET with the ids in the query, because that is all
+    # wx.downloadFile can send.
+    @public.get("/courses/{course_id}/materials/package")
+    def material_package(
+        course_id: str,
+        ids: Annotated[str, Query(max_length=8000)],
+        reader: Reader = Depends(require_reader),
+        db: Session = Depends(get_db),
+    ):
+        course = materials.public_course(db, course_id)
+        if course is None:
+            raise not_found("课程不存在或未公开")
+        limit_calls(f"package:{reader.id}", PACKAGES_PER_HOUR)
+        package, name = materials.build_package(db, course, [i for i in ids.split(",") if i])
+        return FileResponse(
+            package,
+            media_type="application/zip",
+            filename=name,
+            headers={"Cache-Control": "private, no-store"},
+            background=BackgroundTask(package.unlink, missing_ok=True),
+        )
+
     @public.get("/materials/{material_id}/file")
     def material_download(material_id: str, db: Session = Depends(get_db)):
         material = materials.public_material(db, material_id)
@@ -356,7 +381,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     pairing_calls: dict[str, list[float]] = {}
 
-    def limit_pairing(key: str, per_hour: int) -> None:
+    def limit_calls(key: str, per_hour: int) -> None:
         now = time.monotonic()
         recent = [t for t in pairing_calls.get(key, []) if now - t < 3600]
         if len(recent) >= per_hour:
@@ -374,7 +399,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
         require_config_cipher()
         if not devices.can_bind(reader):
             raise HTTPException(403, "这个账号不能绑定设备")
-        limit_pairing(f"reader:{reader.id}", PAIRING_LOOKUPS_PER_HOUR)
+        limit_calls(f"reader:{reader.id}", PAIRING_LOOKUPS_PER_HOUR)
         return reader
 
     def no_store(payload) -> JSONResponse:
@@ -384,7 +409,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
     def device_pairing(body: PairingRequest, request: Request, db: Session = Depends(get_db)):
         require_config_cipher()
         client = request.headers.get("x-real-ip") or (request.client.host if request.client else "")
-        limit_pairing(f"ip:{client}", PAIRINGS_PER_HOUR)
+        limit_calls(f"ip:{client}", PAIRINGS_PER_HOUR)
         return no_store(devices.create_pairing(db, body.name))
 
     @public.post("/devices/pairings/claim")
