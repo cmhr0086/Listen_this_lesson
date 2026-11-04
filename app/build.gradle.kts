@@ -8,8 +8,12 @@ plugins {
 }
 
 val releaseKeystorePropertiesFile = rootProject.file("keystore.properties")
+// Debug development must never open the owner's release signing credentials.
+val needsReleaseSigning = gradle.startParameter.taskNames.any {
+    it.substringAfterLast(':').let { name -> name.contains("Release", ignoreCase = true) || name in listOf("build", "assemble", "bundle") }
+}
 val releaseKeystoreProperties = Properties().apply {
-    if (releaseKeystorePropertiesFile.isFile) {
+    if (needsReleaseSigning && releaseKeystorePropertiesFile.isFile) {
         releaseKeystorePropertiesFile.inputStream().use(::load)
     }
 }
@@ -93,6 +97,7 @@ tasks.matching { it.name == "assembleRelease" || it.name == "bundleRelease" }.co
 }
 
 dependencies {
+    implementation("org.telegram.ui:tgui:11.4.2-ui5")
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.runtime.compose)
@@ -125,6 +130,10 @@ dependencies {
     testImplementation(libs.okhttp.mockwebserver)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
+    androidTestImplementation(libs.okhttp.mockwebserver)
+    androidTestImplementation("androidx.test:core-ktx:1.7.0")
+    androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
+    androidTestImplementation("androidx.test.espresso:espresso-intents:3.7.0")
     androidTestImplementation(libs.androidx.room.testing)
     androidTestImplementation(libs.androidx.work.testing)
     androidTestImplementation(platform(libs.androidx.compose.bom))

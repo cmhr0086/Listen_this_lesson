@@ -1,0 +1,35 @@
+<resources>
+    <string name="Send">发送</string>
+    <string name="TypeMessage">输入消息</string>
+    <string name="AccDescrAttachButton">添加附件</string>
+    <string name="AccDescrEmojiButton">表情</string>
+    <string name="AccDescrCollapsePanel">收起面板</string>
+    <string name="AccDescrExpandPanel">展开面板</string>
+    <string name="AccDescrBackspace">删除</string>
+    <string name="Bold">加粗</string>
+    <string name="Italic">斜体</string>
+    <string name="Mono">等宽字体</string>
+    <string name="Paste">粘贴</string>
+    <string name="Regular">正文</string>
+    <string name="Underline">下划线</string>
+    <string name="Strike">删除线</string>
+    <string name="Spoiler">隐藏文字</string>
+    <string name="CreateLink">添加链接</string>
+    <string name="Quote">引用</string>
+    <string name="QuoteCollapse">收起</string>
+    <string name="QuoteExpand">展开</string>
+    <string name="URL">链接</string>
+    <string name="Emoji">表情</string>
+    <string name="Emoji1">表情与人物</string>
+    <string name="Emoji2">动物与自然</string>
+    <string name="Emoji3">食物与饮品</string>
+    <string name="Emoji4">活动</string>
+    <string name="Emoji5">旅行与地点</string>
+    <string name="Emoji6">物品</string>
+    <string name="Emoji7">符号</string>
+    <string name="Emoji8">旗帜</string>
+    <string name="RecentlyUsed">最近使用</string>
+    <string name="ClearRecentEmojiTitle">清空最近表情</string>
+    <string name="ClearRecentEmojiText">清空最近使用的表情？</string>
+    <string name="ExactTextCopied">已复制“%s”</string>
+</resources>
