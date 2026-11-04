@@ -330,6 +330,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
     def reader_profile(body: ReaderProfile, reader: Reader = Depends(require_reader), db: Session = Depends(get_db)):
         return readers.reader_dict(readers.save_profile(db, reader, body.nickname, body.avatar))
 
+    @public.put("/me/name")
+    def reader_name(body: ReaderRemark, reader: Reader = Depends(require_reader), db: Session = Depends(get_db)):
+        return readers.reader_dict(readers.set_own_name(db, reader, body.remark))
+
     @public.post("/me/transcript-access")
     def reader_request_access(
         body: ReaderAccessRequest | None = None, reader: Reader = Depends(require_reader), db: Session = Depends(get_db)
@@ -752,7 +756,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
         rows = db.scalars(select(Device).order_by(Device.lastSeenAt.desc()))
         def owner(device: Device) -> str:
             reader = db.get(Reader, device.readerId)
-            return (reader.remark or reader.nickname or "未命名") if reader else "—"
+            return readers.name_of(reader) if reader else "—"
         return {"devices": [{**devices.device_dict(d), "owner": owner(d)} for d in rows]}
 
     @admin.delete("/devices/{device_id}")
@@ -791,7 +795,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
             kind, _, key = actor.partition(":")
             row = db.get(Reader, int(key)) if kind == "reader" and key.isdigit() else None
             if row is not None:
-                return row.remark or row.nickname or "未命名读者"
+                return readers.name_of(row)
             uploader = db.get(Uploader, int(key)) if kind == "uploader" and key.isdigit() else None
             if uploader is not None:
                 return uploader.displayName

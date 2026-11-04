@@ -24,7 +24,7 @@ const AUDIT_ACTIONS = {
   'material.uploaded': '上传资料', 'material.moved': '移动资料', 'material.deleted': '删除资料',
   'uploader.create': '开通上传', 'uploader.linked': '关联上传者', 'uploader.rotate': '更换 Token', 'uploader.disabled': '停用上传', 'uploader.active': '启用上传',
   'reader.request_transcripts': '申请查看原文', 'reader.approve': '允许查看原文', 'reader.revoke': '收回原文权限',
-  'reader.role': '修改角色', 'reader.make_admin': '设为管理员', 'reader.remove_admin': '取消管理员', 'reader.remark': '修改备注',
+  'reader.role': '修改角色', 'reader.rename': '修改名称', 'reader.make_admin': '设为管理员', 'reader.remove_admin': '取消管理员', 'reader.remark': '修改备注',
   'device.approve': '绑定设备', 'device.remove': '移除设备', 'config.update': '更新云端配置'
 }
 
@@ -159,7 +159,7 @@ async function loadQueue() {
   return [
     ...courses.map((c) => ({ key: `c${c.courseId}`, type: '课程', color: 'gold', title: courseLabel(c), detail: `${c.lessonCount} 节 · ${c.requestedBy || ''}${c.reRequested ? ` · 重新申请，上次：${c.reviewNote}` : ''}`, at: c.requestedAt, course: c })),
     ...lessons.filter((l) => l.status === 'active').map((l) => ({ key: `l${l.lessonId}`, type: '撤回', color: 'red', title: `${l.title} · ${l.course.courseName}`, detail: l.withdrawReason, at: l.withdrawRequestedAt, lesson: l })),
-    ...readers.filter((r) => r.transcriptAccess === 'pending').map((r) => ({ key: `r${r.readerId}`, type: '原文', color: 'blue', title: r.displayName || '未命名', detail: r.requestNote || '', at: r.requestedAt, reader: r }))
+    ...readers.filter((r) => r.transcriptAccess === 'pending').map((r) => ({ key: `r${r.readerId}`, type: '原文', color: 'blue', title: r.displayName, detail: r.requestNote || '', at: r.requestedAt, reader: r }))
   ].sort((a, b) => (a.at || 0) - (b.at || 0))
 }
 
@@ -340,7 +340,7 @@ const ROLES = [
 
 function RoleDialog({ user, mine, close }) {
   const { message } = AntApp.useApp()
-  const [name, setName] = useState(user.displayName || '')
+  const [name, setName] = useState(user.remark || '')
   const [role, setRole] = useState(user.role)
   const [busy, setBusy] = useState(false)
   const publishes = role === 'uploader' || role === 'admin'
@@ -354,7 +354,7 @@ function RoleDialog({ user, mine, close }) {
     <Modal open title="修改用户" okText="保存" cancelText="取消" confirmLoading={busy} onCancel={() => close(false)} onOk={save} okButtonProps={{ disabled: publishes && !name.trim() }}>
       <Space direction="vertical" size={14} style={{ width: '100%' }}>
         <div><label htmlFor="user-name">名称</label>
-          <Input id="user-name" maxLength={20} value={name} onChange={(e) => setName(e.target.value)} />
+          <Input id="user-name" maxLength={20} placeholder={user.displayName} value={name} onChange={(e) => setName(e.target.value)} />
           <div style={{ ...muted, fontSize: 12, marginTop: 4 }}>{publishes ? '会公开显示在 Ta 上传的课堂上。' : '只有管理员看得到。'}</div></div>
         {user.requestNote && <div><span style={muted}>申请留言</span> {user.requestNote}</div>}
         <div><div style={{ marginBottom: 6 }}>角色</div>
@@ -386,7 +386,7 @@ function Users({ refresh }) {
       </Space>
       <Card size="small" styles={{ body: { padding: 0 } }}>
         <Table size="small" rowKey="readerId" loading={loading} dataSource={rows} scroll={{ x: 760 }} pagination={{ pageSize: 30, hideOnSinglePage: true }} columns={[
-          { title: '名称', render: (_, r) => <Space>{r.displayName || '未命名'}{r.readerId === me.data?.readerId && <Tag color="blue">你</Tag>}</Space> },
+          { title: '名称', render: (_, r) => <Space>{r.displayName}{r.readerId === me.data?.readerId && <Tag color="blue">你</Tag>}</Space> },
           { title: '角色', width: 170, render: (_, r) => { const x = ROLES.find((o) => o[0] === r.role); return <Space size={4}><Tag color={x[2]}>{x[1]}</Tag>{r.transcriptAccess === 'pending' && <Tag color="gold">申请原文</Tag>}</Space> } },
           { title: '微信账号', dataIndex: 'openidHint', width: 110, render: (v) => <span style={muted}>{v}</span> },
           { title: '申请留言', dataIndex: 'requestNote', render: (v) => <span style={muted}>{v || '—'}</span> },

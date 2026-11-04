@@ -908,11 +908,11 @@ def test_binding_is_refused_without_a_config_key(client):
 def test_admin_names_readers_with_a_remark(client):
     reader = sign_in(client)["reader"]
     row = admin(client, "GET", "/readers")["readers"][0]
-    assert row["displayName"] is None
+    assert row["displayName"] == reader["name"] and reader["name"].startswith("用户") and len(reader["name"]) == 8
     saved = admin(client, "POST", f"/readers/{reader['readerId']}/remark", json={"remark": "  小林 "})
     assert saved["displayName"] == "小林" and saved["remark"] == "小林"
     # Clearing it goes back to having no name, and readers never see the admin's remark.
-    assert admin(client, "POST", f"/readers/{reader['readerId']}/remark", json={"remark": ""})["displayName"] is None
+    assert admin(client, "POST", f"/readers/{reader['readerId']}/remark", json={"remark": ""})["displayName"] == reader["name"]
     assert "remark" not in client.get("/api/public/v1/me", headers=auth(sign_in(client)["token"])).json()
 
 
@@ -1237,3 +1237,24 @@ def test_notes_and_materials_can_belong_to_one_lesson(client):
     assert one["lessonTitle"] == "第一课 极限"
     assert client.post(url, params={"fileName": "a.pdf", "lessonId": "nope"}, headers=auth(ADMIN_TOKEN), content=b"x").status_code == 404
     assert client.post(url, params={"fileName": "a.pdf", "category": "x"}, headers=auth(ADMIN_TOKEN), content=b"x").status_code == 422
+
+
+def test_unnamed_people_get_a_stable_six_digit_name(client):
+    first = sign_in(client, "a")["reader"]["name"]
+    assert first == sign_in(client, "a")["reader"]["name"]
+    assert first != sign_in(client, "b")["reader"]["name"]
+    assert first[2:].isdigit() and len(first[2:]) == 6
+
+
+def test_anyone_can_name_themselves_and_uploaders_show_it(client):
+    login = sign_in(client)
+    headers = auth(login["token"])
+    me = client.put("/api/public/v1/me/name", headers=headers, json={"remark": " 小林 "}).json()
+    assert (me["name"], me["hasName"]) == ("小林", True)
+    assert client.put("/api/public/v1/me/name", json={"remark": "x"}).status_code == 401
+    assert client.put("/api/public/v1/me/name", headers=headers, json={"remark": "名" * 21}).status_code == 422
+    set_role(client, login["reader"]["readerId"], "uploader")
+    client.put("/api/public/v1/me/name", headers=headers, json={"remark": "林同学"})
+    assert admin(client, "GET", "/uploaders")["uploaders"][0]["displayName"] == "林同学"
+    # Clearing goes back to the number.
+    assert client.put("/api/public/v1/me/name", headers=headers, json={"remark": ""}).json()["hasName"] is False

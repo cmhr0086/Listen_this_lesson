@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import secrets
 import urllib.error
@@ -107,6 +108,28 @@ def reader_uploader(reader: Reader) -> Uploader | None:
     return object_session(reader).get(Uploader, reader.uploaderId) if reader.uploaderId else None
 
 
+def default_name(reader: Reader) -> str:
+    """Tells unnamed people apart without guessing. Stable, and reveals nothing of the openid."""
+    digest = hashlib.sha256(reader.openid.encode()).hexdigest()
+    return f"用户{int(digest[:12], 16) % 1_000_000:06d}"
+
+
+def name_of(reader: Reader) -> str:
+    uploader = reader_uploader(reader)
+    return reader.remark or (uploader.displayName if uploader else None) or reader.nickname or default_name(reader)
+
+
+def set_own_name(db: Session, reader: Reader, name: str) -> Reader:
+    """Anyone can name themselves; an uploader's lessons show the new name at once."""
+    reader.remark = name or None
+    uploader = reader_uploader(reader)
+    if uploader is not None and name:
+        uploader.displayName = name
+    audit(db, f"reader:{reader.id}", "reader.rename", str(reader.id), name or None)
+    db.commit()
+    return reader
+
+
 def role_of(reader: Reader) -> str:
     """Each role includes the one before it, so permissions can never contradict each other."""
     uploader = reader_uploader(reader)
@@ -121,6 +144,8 @@ def reader_dict(reader: Reader) -> dict:
     uploader = reader_uploader(reader)
     return {
         "role": role_of(reader),
+        "name": name_of(reader),
+        "hasName": bool(reader.remark),
         "canUpload": uploader is not None and uploader.status == "active",
         "readerId": reader.id,
         "nickname": reader.nickname,
@@ -147,8 +172,7 @@ def admin_reader_dict(reader: Reader) -> dict:
         **reader_dict(reader),
         "remark": reader.remark,
         "uploaderName": uploader.displayName if uploader else None,
-        # None until the admin names them; the pages say so rather than inventing a number.
-        "displayName": reader.remark or (uploader.displayName if uploader else None) or reader.nickname,
+        "displayName": name_of(reader),
         # Enough to tell people apart in the admin list without showing the whole openid.
         "openidHint": reader.openid[:4] + "…" + reader.openid[-4:],
         "requestNote": reader.requestNote,
