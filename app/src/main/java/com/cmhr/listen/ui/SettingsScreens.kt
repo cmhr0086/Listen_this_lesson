@@ -145,7 +145,7 @@ internal fun SettingsOverview(
                 ListDivider(62.dp)
                 SettingsRow(
                     "公开发布",
-                    if (state.publish.hasToken) "提交课堂给同学们阅读，经管理员审核后公开" else "需要管理员开通的上传 Token",
+                    if (state.publish.hasToken) "提交课堂给同学们阅读，经管理员审核后公开" else "绑定设备后，请管理员开通上传",
                     Icons.Outlined.Public, onPublish,
                     status = when {
                         !state.publish.hasToken -> "可选" to StatusTone.READY

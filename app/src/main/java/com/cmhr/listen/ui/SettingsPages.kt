@@ -650,9 +650,9 @@ fun PublishSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
             when {
                 !publish.hasToken -> StatusCard(
                     CardTone.NEUTRAL, Icons.Outlined.Public, "还没设置",
-                    "向管理员要一个上传 Token，就能把课堂文字和笔记提交给同学们看。"
+                    "在「设备绑定」里用微信绑定这台设备，再请管理员开通上传，就能把课堂文字和笔记提交给同学们看。"
                 )
-                check is ServiceCheck.Testing -> StatusCard(CardTone.BUSY, Icons.Outlined.Sync, "正在测试…", "连接发布服务并检查 Token")
+                check is ServiceCheck.Testing -> StatusCard(CardTone.BUSY, Icons.Outlined.Sync, "正在测试…", "连接发布服务并检查权限")
                 check is ServiceCheck.Passed -> StatusCard(
                     CardTone.OK, Icons.Outlined.Check, "可以发布",
                     "${checkTime(check.at)} 测试 · 上传者「${state.publishUploader.orEmpty()}」 · ${check.latencyMs} ms",
@@ -669,17 +669,19 @@ fun PublishSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
         item("server") {
             ListGroup {
                 ValueRow("学校", publish.schoolName.ifBlank { "未填写" }, { editing = EditTarget.URL }, Modifier.testTag("publish-school-setting"), subtitle = "所有公开的课程共用")
-                ListDivider(16.dp)
-                ValueRow(
-                    "上传 Token", if (publish.hasToken) SECRET_DOTS else "未填写", { editing = EditTarget.KEY }, Modifier.testTag("publish-token"),
-                    subtitle = if (publish.hasToken) "已加密保存" else null
-                )
+                if (!publish.viaDevice) {
+                    ListDivider(16.dp)
+                    ValueRow(
+                        "上传 Token", if (publish.hasToken) SECRET_DOTS else "未填写", { editing = EditTarget.KEY }, Modifier.testTag("publish-token"),
+                        subtitle = if (publish.hasToken) "已加密保存" else null
+                    )
+                }
             }
         }
         item("note") {
             Note("和云同步是两套系统：同步只给你自己的设备，发布的课程经管理员审核后对所有人公开。在课程页点「公开发布」，填好教师就能申请。")
         }
-        if (publish.hasToken) item("clear") { DangerRow("清除上传 Token", "已公开的课堂不受影响", { confirmClear = true }) }
+        if (publish.hasToken && !publish.viaDevice) item("clear") { DangerRow("清除上传 Token", "已公开的课堂不受影响", { confirmClear = true }) }
     }
     when (editing) {
         EditTarget.URL -> TextEditSheet(

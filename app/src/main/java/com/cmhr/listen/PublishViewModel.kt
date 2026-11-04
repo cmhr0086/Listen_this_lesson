@@ -66,7 +66,7 @@ data class CoursePublishUiState(
     val publicName: String get() = course.publicName.ifBlank { localName }
     val toSync: List<PublishClassRow> get() = classes.filter { it.state == ClassPublishState.NEW || it.state == ClassPublishState.CHANGED }
     val missing: List<String> get() = listOfNotNull(
-        "上传 Token".takeIf { !hasToken },
+        "设备绑定".takeIf { !hasToken },
         "学校".takeIf { school.isBlank() },
         "教师".takeIf { course.teacherName.isBlank() }
     )
@@ -174,7 +174,7 @@ class PublishViewModel(application: Application) : AndroidViewModel(application)
         val queue = state.toSync.sortedBy { it.startedAt }.mapNotNull { row -> drafts[row.recordId]?.let { row to it } }
         _uiState.update { it.copy(progress = 0 to queue.size, notice = null, error = null) }
         viewModelScope.launch {
-            val token = settings.readPublishToken().orEmpty()
+            val token = settings.readPublishCredential().orEmpty()
             var done = 0
             var failure: String? = null
             for ((row, submission) in queue) {
@@ -210,7 +210,7 @@ class PublishViewModel(application: Application) : AndroidViewModel(application)
         remoteJob?.cancel()
         remoteJob = viewModelScope.launch {
             _uiState.update { it.copy(refreshing = true) }
-            val token = settings.readPublishToken()
+            val token = settings.readPublishCredential()
             if (token.isNullOrBlank()) {
                 _uiState.update { it.copy(refreshing = false) }
                 return@launch
@@ -242,7 +242,7 @@ class PublishViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun requestReview(remoteCourseId: String) = viewModelScope.launch {
-        val result = runCatching { client.requestReview(PUBLISH_BASE_URL, settings.readPublishToken().orEmpty(), remoteCourseId) }
+        val result = runCatching { client.requestReview(PUBLISH_BASE_URL, settings.readPublishCredential().orEmpty(), remoteCourseId) }
         _uiState.update {
             result.fold(
                 { _ -> it.copy(notice = "已重新申请，等待管理员审核。", error = null) },
@@ -262,7 +262,7 @@ class PublishViewModel(application: Application) : AndroidViewModel(application)
         if (!excluded || lesson.status != "active" || lesson.withdrawRequested) return
         viewModelScope.launch {
             val result = runCatching {
-                client.requestWithdraw(PUBLISH_BASE_URL, settings.readPublishToken().orEmpty(), lesson.lessonId, "上传者不再公开这节课")
+                client.requestWithdraw(PUBLISH_BASE_URL, settings.readPublishCredential().orEmpty(), lesson.lessonId, "上传者不再公开这节课")
             }
             _uiState.update {
                 result.fold(
