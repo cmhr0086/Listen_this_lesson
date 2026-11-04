@@ -29,19 +29,6 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
-internal fun <K> rangeSelection(
-    orderedKeys: List<K>,
-    baseSelection: Set<K>,
-    anchor: K,
-    target: K,
-    selecting: Boolean
-): Set<K> {
-    val start = orderedKeys.indexOf(anchor)
-    val end = orderedKeys.indexOf(target)
-    if (start < 0 || end < 0) return baseSelection
-    val range = orderedKeys.subList(minOf(start, end), maxOf(start, end) + 1).toSet()
-    return if (selecting) baseSelection + range else baseSelection - range
-}
 
 internal class DragSelectionController<K>(
     private val listState: LazyListState,

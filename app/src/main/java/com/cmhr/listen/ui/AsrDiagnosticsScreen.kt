@@ -76,7 +76,6 @@ import java.util.Date
 import java.util.Locale
 
 private const val DIAGNOSTICS_PREVIEW_LIMIT = 15
-private const val SMOOTH_TIMER_TICK_MS = 100L
 
 /** The record-scoped overview. [diagnostics] is supplied by the latest-15 Room query. */
 @Composable
@@ -674,35 +673,6 @@ internal fun SmoothElapsedText(
     )
 }
 
-internal fun calculateElapsedMs(
-    startElapsedRealtimeMs: Long?,
-    fallbackStartWallTimeMs: Long?,
-    clockBasis: String,
-    elapsedRealtime: () -> Long,
-    wallTime: () -> Long
-): Long? {
-    return when (clockBasis) {
-        AsrClockBasis.ELAPSED_REALTIME.name -> {
-            val start = startElapsedRealtimeMs?.takeIf { it > 0L } ?: return null
-            val end = elapsedRealtime().takeIf { it >= start } ?: return null
-            end - start
-        }
-        AsrClockBasis.LEGACY_WALL_FALLBACK.name -> {
-            val start = fallbackStartWallTimeMs?.takeIf { it > 0L } ?: return null
-            val end = wallTime().takeIf { it >= start } ?: return null
-            end - start
-        }
-        else -> null
-    }
-}
-
-internal fun nextSmoothTickDelay(elapsedMs: Long?): Long {
-    if (elapsedMs == null) return SMOOTH_TIMER_TICK_MS
-    val remainder = elapsedMs % SMOOTH_TIMER_TICK_MS
-    return (SMOOTH_TIMER_TICK_MS - remainder).coerceIn(16L, SMOOTH_TIMER_TICK_MS)
-}
-
-internal fun formatSmoothMs(value: Long): String = String.format(Locale.US, "%.1fs", value / 1_000.0)
 
 @Composable
 private fun NetworkEventTimeline(flow: Flow<List<AsrNetworkEventEntity>>) {

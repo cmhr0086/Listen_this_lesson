@@ -393,17 +393,6 @@ internal fun buildTxt(course: CourseEntity, record: ClassRecordEntity, segments:
     }
 }
 
-/** 本周 / 上周 / 「10月」: weekly classes read best grouped by week, older ones by month. */
-internal fun weekGroupLabel(startedAt: Long, now: Long): String {
-    val zone = java.time.ZoneId.systemDefault()
-    val day = java.time.Instant.ofEpochMilli(startedAt).atZone(zone).toLocalDate()
-    val weekStart = java.time.Instant.ofEpochMilli(now).atZone(zone).toLocalDate().with(java.time.DayOfWeek.MONDAY)
-    return when {
-        !day.isBefore(weekStart) -> "本周"
-        !day.isBefore(weekStart.minusWeeks(1)) -> "上周"
-        else -> "${day.monthValue}月"
-    }
-}
 
 /** Picks one of the course colors; the badge previews the choice. */
 @Composable

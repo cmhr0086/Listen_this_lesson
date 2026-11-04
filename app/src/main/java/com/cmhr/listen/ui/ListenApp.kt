@@ -111,12 +111,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Locale
 
-internal enum class MainDestination(val route: String, val label: String) {
-    RECORD("record-home", "录音"),
-    COURSES("courses", "课程"),
-    AI("ai", "AI 会话"),
-    SETTINGS("settings", "设置")
-}
 
 internal val AppBottomNavigationHeight = 80.dp
 
@@ -149,21 +143,9 @@ private sealed interface FabState {
     data class NewRecord(val courseId: Long) : FabState
 }
 
-private fun isSettingsRoute(route: String?): Boolean = route == "settings" || route?.startsWith("settings/") == true
 private fun isAiWorkspaceRoute(route: String?): Boolean =
     route?.contains("ai-results") == true || route?.contains("ai-result/") == true || route?.startsWith("ai-conversation/") == true
 
-/**
- * Tab that owns a page, decided by what the page is rather than how it was reached: the class that
- * is recording or paused ([liveRecordId]) belongs to 录音, every other course/class page to 课程.
- */
-internal fun mainDestinationForRoute(route: String?, recordId: Long? = null, liveRecordId: Long? = null): MainDestination = when {
-    isSettingsRoute(route) -> MainDestination.SETTINGS
-    route == "ai" || route?.startsWith("ai/new") == true || route?.startsWith("ai-conversation/") == true || route?.startsWith("ai/result/") == true -> MainDestination.AI
-    route == MainDestination.RECORD.route || route == "search" -> MainDestination.RECORD
-    route == "record/{recordId}" && recordId != null && recordId == liveRecordId -> MainDestination.RECORD
-    else -> MainDestination.COURSES
-}
 
 /** What to do with a course created from the "新建课程" dialog. */
 private sealed interface CourseCreation {
@@ -208,8 +190,6 @@ private fun routeTitle(route: String?): String = when (route) {
     else -> "课堂提问识别助手"
 }
 
-internal fun newAiConversationRoute(activeRecordId: Long?, isListening: Boolean): String =
-    activeRecordId?.takeIf { isListening }?.let { "ai/new/$it" } ?: "ai/new"
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

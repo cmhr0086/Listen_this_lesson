@@ -137,18 +137,6 @@ fun RecordHomeScreen(
     }
 }
 
-/** 今天 / 本周 / 更早, so a long history still opens on this week's classes. */
-internal fun recentGroupLabel(startedAt: Long, now: Long): String {
-    val zone = java.time.ZoneId.systemDefault()
-    val day = java.time.Instant.ofEpochMilli(startedAt).atZone(zone).toLocalDate()
-    val today = java.time.Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
-    val weekStart = today.with(java.time.DayOfWeek.MONDAY)
-    return when {
-        day == today -> "今天"
-        !day.isBefore(weekStart) && day.isBefore(today) -> "本周"
-        else -> "更早"
-    }
-}
 
 /** 课程 tab: every course, most recently attended first. */
 @Composable
@@ -309,38 +297,6 @@ internal fun SessionRow(
     )
 }
 
-/** "函数的极限 · 周二 10:05–11:40 · 笔记 · 2 处重点"; today's classes leave out the day. */
-internal fun sessionSubtitle(summary: SessionSummary, includeDay: Boolean, includeTopic: Boolean = false, now: Long = System.currentTimeMillis()): String {
-    val session = summary.session
-    val time = SimpleDateFormat("HH:mm", Locale.CHINA)
-    val day = when {
-        !includeDay -> ""
-        recentGroupLabel(session.startedAt, now) == "今天" -> ""
-        recentGroupLabel(session.startedAt, now) == "本周" -> SimpleDateFormat("EEE ", Locale.CHINA).format(Date(session.startedAt))
-        else -> SimpleDateFormat("M月d日 ", Locale.CHINA).format(Date(session.startedAt))
-    }
-    val span = "$day${time.format(Date(session.startedAt))}" + (session.endedAt?.let { "–${time.format(Date(it))}" } ?: "")
-    return listOfNotNull(
-        session.topic?.takeIf { includeTopic && it.isNotBlank() },
-        span,
-        when {
-            summary.noteCount > 0 -> "笔记"
-            summary.segmentCount > 0 -> "${summary.segmentCount} 段文字"
-            else -> null
-        },
-        summary.markCount.takeIf { it > 0 }?.let { "$it 处重点" }
-    ).joinToString(" · ")
-}
-
-internal fun formatSpanMinutes(durationMs: Long): String? {
-    val minutes = (durationMs / 60_000).toInt()
-    return when {
-        minutes <= 0 -> null
-        minutes < 60 -> "$minutes 分钟"
-        minutes % 60 == 0 -> "${minutes / 60} 小时"
-        else -> "${minutes / 60} 小时 ${minutes % 60} 分"
-    }
-}
 
 @Composable
 private fun DateBlock(at: Long) {
@@ -433,12 +389,3 @@ internal fun CoursePickerDialog(
         dismissButton = { TextButton(onClick = dismiss) { Text(dismissLabel) } }
     )
 }
-
-/** "10月8日 周四 10:20–12:00": weekday matters more than seconds for weekly classes. */
-internal fun formatSessionWhen(startedAt: Long, endedAt: Long?): String {
-    val start = "${formatDayWithWeekday(startedAt)} ${SimpleDateFormat("HH:mm", Locale.CHINA).format(Date(startedAt))}"
-    val sameDay = endedAt != null && SimpleDateFormat("yyyyMMdd", Locale.CHINA).let { it.format(Date(endedAt)) == it.format(Date(startedAt)) }
-    return if (sameDay) "$start–${SimpleDateFormat("HH:mm", Locale.CHINA).format(Date(endedAt!!))}" else start
-}
-
-internal fun formatDayWithWeekday(epochMs: Long): String = SimpleDateFormat("M月d日 EEE", Locale.CHINA).format(Date(epochMs))

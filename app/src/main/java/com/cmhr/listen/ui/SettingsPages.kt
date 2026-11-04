@@ -104,6 +104,7 @@ import com.cmhr.listen.data.stt.AsrPromptAutoConfig
 import com.cmhr.listen.data.stt.AsrPromptMode
 import com.cmhr.listen.ui.theme.DarkModePreference
 import com.cmhr.listen.ui.theme.ThemePalette
+import com.cmhr.listen.ui.theme.swatch
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -119,7 +120,6 @@ import kotlin.math.roundToInt
 
 // ---------- Shared pieces ----------
 
-internal enum class CardTone { OK, PROBLEM, NEUTRAL, BUSY }
 
 @Composable
 private fun okColors(): Pair<Color, Color> =
@@ -295,15 +295,6 @@ internal fun TextEditSheet(
     }
 }
 
-/** 「今天 11:42」, 「刚刚」, 「10月8日 09:30」. */
-internal fun checkTime(at: Long, now: Long = System.currentTimeMillis()): String {
-    if (now - at in 0 until 60_000) return "刚刚"
-    val day = Calendar.getInstance().apply { timeInMillis = at }
-    val today = Calendar.getInstance().apply { timeInMillis = now }
-    val sameDay = day.get(Calendar.YEAR) == today.get(Calendar.YEAR) && day.get(Calendar.DAY_OF_YEAR) == today.get(Calendar.DAY_OF_YEAR)
-    val time = SimpleDateFormat("HH:mm", Locale.CHINA).format(Date(at))
-    return if (sameDay) "今天 $time" else SimpleDateFormat("M月d日 ", Locale.CHINA).format(Date(at)) + time
-}
 
 @Composable
 internal fun TestButton(testing: Boolean, label: String, onClick: () -> Unit) =
@@ -701,7 +692,6 @@ fun PublishSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
 
 // ---------- 专业词提示 ----------
 
-internal fun asrTermCount(prompt: String) = prompt.split(Regex("[，,、；;\\s]+")).count { it.isNotBlank() }
 
 private fun AsrPromptMode.explanation() = when (this) {
     AsrPromptMode.OFF -> "从不附带术语"
@@ -801,8 +791,6 @@ fun AsrPromptThresholdsScreen(state: SettingsUiState, model: SettingsViewModel) 
 }
 
 private fun Float.roundToLong(): Long = kotlin.math.round(this).toLong()
-internal fun formatMs(value: Float): String = if (value >= 10_000f && value % 1000f == 0f) "${(value / 1000f).roundToInt()} s" else "${value.roundToInt()} ms"
-internal fun formatFraction(value: Float): String = String.format(Locale.US, "%.2f", value)
 
 /**
  * One numeric parameter as a compact 「名称 · 数值」 row; tapping opens a slider with −/+ steps.
@@ -953,15 +941,6 @@ fun AppearanceSettingsScreen(state: SettingsUiState, model: SettingsViewModel) {
 
 // ---------- VAD 预设与参数（开发者） ----------
 
-private fun VadConfig.differences(other: VadConfig): Int = listOf(
-    threshold != other.threshold, startConfirmMs != other.startConfirmMs, endSilenceMs != other.endSilenceMs,
-    preRollMs != other.preRollMs, postRollMs != other.postRollMs, minSegmentMs != other.minSegmentMs,
-    softLimitMs != other.softLimitMs, hardLimitMs != other.hardLimitMs, overlapMs != other.overlapMs
-).count { it }
-
-/** The preset a custom config was most likely tuned from: the one it differs from least. */
-internal fun nearestVadPreset(config: VadConfig): VadPreset =
-    VadPreset.entries.minBy { config.differences(it.config.validated()) }
 
 @Composable
 fun VadSettingsScreen(config: VadConfig, selectedPreset: VadPreset?, model: SttViewModel) {

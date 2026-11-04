@@ -85,15 +85,6 @@ internal fun groupSearchHits(segments: List<SegmentSearchHit>, notes: List<NoteS
     }.sortedByDescending { it.startedAt }
 }
 
-/** A window of [text] around the first match, so long notes still show why they matched. */
-internal fun snippetAround(text: String, query: String, radius: Int = 40): String {
-    val flat = text.replace(Regex("\\s+"), " ").trim()
-    val at = if (query.isBlank()) -1 else flat.indexOf(query, ignoreCase = true)
-    if (at < 0) return flat.take(radius * 2)
-    val start = (at - radius).coerceAtLeast(0)
-    val end = (at + query.length + radius).coerceAtMost(flat.length)
-    return (if (start > 0) "…" else "") + flat.substring(start, end) + (if (end < flat.length) "…" else "")
-}
 
 @Composable
 private fun highlight(text: String, query: String, mark: Color): AnnotatedString = buildAnnotatedString {

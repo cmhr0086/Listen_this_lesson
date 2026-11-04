@@ -49,9 +49,9 @@
 | `editSheetOnlyConfirmsAChangedValueAndTrimsIt`：未改值不可保存，编辑后可保存，修剪空格，关闭编辑层 | 保留同名测试；真实服务地址编辑、按钮 enabled 状态、repository 保存值、EditText 消失 |
 | `failedSpeechCheckStaysOnThePage`：失败状态和 403 详情、地址及清除密钥入口可见 | 保留同名测试；MockWebServer `/health` 成功、鉴权 403，通过实际 ViewModel 得到失败；重进后仍显示失败 |
 | `promptEditorAsksBeforeDroppingEdits`：未编辑不能保存、编辑后能保存、退出确认、确认前不完成、放弃后完成 | 保留同名测试；验证对话框、取消与继续编辑、放弃后编辑框关闭，且 repository 原文未变 |
-| `reasoningOptionsFollowTheProvider`：其他服务不显示思考模式，DeepSeek 关闭时推理强度禁用，开启后可用 | 保留同名测试；直接写入真实服务设置（本地地址），断言原生设置行的 enabled 状态。旧长解释文案按精简文案要求删除，替代断言是对应控件确实不存在 |
+| `reasoningOptionsFollowTheProvider`：其他服务不显示思考模式，DeepSeek 关闭时推理强度禁用，开启后可用 | 保留同名测试；直接写入真实服务设置（保留生产 HTTPS 校验的 `https://ai-test.invalid/v1`，AI 密钥清空且不调用 AI），断言原生设置行的 enabled 状态。旧长解释文案按精简文案要求删除，替代断言是对应控件确实不存在 |
 | `asrPromptPageListsEachCourseAndEditsIt` | 按用户减法删除；专业词提示页面与开关不移植。新增测试验证入口不存在且保存的 `ALWAYS` 值未被重置 |
 
 新增 `SettingsNativeTest.kt`：三种外观切换并保留旧主题色、十种提示词路由、提示词保存与恢复、生成参数范围及保存、四种 VAD 预设入口与全部九项参数、向导跳过/回退/完成、浏览服务页面不触发请求或显示密钥。
 
-测试服务器只监听设备进程内的回环地址；测试启动前强制校验应用 ID 是 `com.cmhr.listen.debug` 并使演示设备保持未绑定。仅写入明确的合成测试凭据，不读取凭据明文。测试需要 debug-only 回环 HTTP 地址许可，由主任务集成。上述测试为已编写待运行，实际通过数以主任务的测试报告为准。
+测试服务器只监听设备进程内的回环地址；测试启动前强制校验应用 ID 是 `com.cmhr.listen.debug` 并使演示设备保持未绑定。仅写入明确的合成测试凭据，不读取凭据明文。ASR 使用现有允许的 HTTP 回环地址；AI 设置使用 `.invalid` HTTPS 地址且没有密钥、不发起 AI 请求，不放宽生产 HTTPS 校验。UiAutomator 仅在测试期间将空闲等待阈值调低，允许操作每 100 毫秒刷新的诊断列表，结束恢复原值。上述测试为已编写待运行，实际通过数以主任务的测试报告为准。

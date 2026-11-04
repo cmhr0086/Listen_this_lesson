@@ -5,22 +5,8 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.ui.graphics.Color
 
-/** User-selectable accent palettes. Neutrals and status colors are shared, so every palette reads the same. */
-enum class ThemePalette(val label: String, val swatch: Color) {
-    TEAL("墨青", Color(0xFF00696B)),
-    BLUE("海蓝", Color(0xFF2B5EA7)),
-    GREEN("松绿", Color(0xFF2E6A44)),
-    PURPLE("雅紫", Color(0xFF6750A4)),
-    ORANGE("暖橙", Color(0xFF8F4C00)),
-    /** Android 12+ wallpaper colors; falls back to [TEAL] on older systems. */
-    DYNAMIC("跟随系统", Color(0xFF7A7F80));
-
-    companion object {
-        val Default = TEAL
-    }
-}
-
-enum class DarkModePreference(val label: String) { SYSTEM("跟随系统"), LIGHT("浅色"), DARK("深色") }
+/** Compatibility adapter for the retired Compose appearance page. */
+internal val ThemePalette.swatch: Color get() = Color(swatchArgb)
 
 private data class Accent(
     val light: Tone, val dark: Tone

@@ -578,20 +578,6 @@ private fun resultTitle(result: AiResultEntity): String = when (result.actionTyp
     else -> "AI 结果"
 }
 
-/** How much of the class a new question carries along. */
-internal enum class AskScope(val label: String) { RECENT("最近 10 分钟"), WHOLE("整节课"), NONE("不带原文") }
-
-internal const val RECENT_SCOPE_MS = 10 * 60_000L
-
-/** Segment ids a question in [scope] is grounded on; the newest are kept if a class is long. */
-internal fun scopeSegmentIds(scope: AskScope, segments: List<TranscriptEntity>): Set<Long> = when (scope) {
-    AskScope.NONE -> emptySet()
-    AskScope.WHOLE -> segments.mapTo(linkedSetOf()) { it.id }
-    AskScope.RECENT -> {
-        val newest = segments.maxOfOrNull { it.endTime } ?: 0L
-        segments.filter { it.endTime >= newest - RECENT_SCOPE_MS }.mapTo(linkedSetOf()) { it.id }
-    }
-}
 
 /** 问答: this class's conversations, and a box to ask a new question about it. */
 @Composable

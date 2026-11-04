@@ -144,9 +144,7 @@ internal fun StatusPill(text: String, tone: StatusTone, modifier: Modifier = Mod
 /** Course colors: fixed pairs of similar lightness so no course shouts louder than another. */
 internal data class CourseTone(val foreground: Color, val background: Color)
 
-internal object CourseColors {
-    val names = listOf("蓝", "玫红", "橙", "绿", "紫", "青", "棕", "灰蓝")
-    private val light = listOf(
+private val courseLightTones = listOf(
         CourseTone(Color(0xFF2F64A8), Color(0xFFE3ECF7)),
         CourseTone(Color(0xFFA33A4F), Color(0xFFF6E4E8)),
         CourseTone(Color(0xFFA35A12), Color(0xFFF7EADC)),
@@ -156,7 +154,7 @@ internal object CourseColors {
         CourseTone(Color(0xFF7A5C2E), Color(0xFFF1E9DC)),
         CourseTone(Color(0xFF48607A), Color(0xFFE4EAF0))
     )
-    private val dark = listOf(
+private val courseDarkTones = listOf(
         CourseTone(Color(0xFFA9C7FF), Color(0xFF1E2C40)),
         CourseTone(Color(0xFFFFB1C1), Color(0xFF3A1F27)),
         CourseTone(Color(0xFFFFB871), Color(0xFF3A2814)),
@@ -166,14 +164,9 @@ internal object CourseColors {
         CourseTone(Color(0xFFE2C38F), Color(0xFF33291A)),
         CourseTone(Color(0xFFB5C8DE), Color(0xFF232C36))
     )
-    val count get() = light.size
 
-    /** A stable default from the course id, unless the user picked one. */
-    fun indexFor(courseId: Long, overrides: Map<Long, Int>): Int =
-        overrides[courseId]?.takeIf { it in 0 until count } ?: Math.floorMod(courseId - 1, count.toLong()).toInt()
-
-    fun tone(index: Int, dark: Boolean): CourseTone = (if (dark) this.dark else light)[Math.floorMod(index, count)]
-}
+internal fun CourseColors.tone(index: Int, dark: Boolean): CourseTone =
+    (if (dark) courseDarkTones else courseLightTones)[Math.floorMod(index, count)]
 
 /** Course id → color index overrides from settings, provided once at the app root. */
 internal val LocalCourseColors = compositionLocalOf { emptyMap<Long, Int>() }
@@ -197,18 +190,4 @@ internal fun CourseBadge(courseId: Long, name: String, size: Dp = 40.dp, modifie
             fontSize = (size.value * 0.44f).sp
         )
     }
-}
-
-/** "第 8 节 · 函数的极限", falling back to the record's own name when it has no number yet. */
-internal fun classTitle(courseName: String?, classNumber: Int, topic: String?, fallback: String): String {
-    val number = classNumber.takeIf { it > 0 }?.let { "第 $it 节" }
-    return listOfNotNull(courseName, number).joinToString(" · ").ifEmpty { fallback } +
-        (topic?.takeIf { it.isNotBlank() }?.let { " · $it" } ?: "")
-}
-
-/** "大学物理" → "物", "大学英语" → "英": skip prefixes many course names share so badges differ. */
-internal fun courseInitial(name: String): String {
-    val trimmed = name.trim()
-    val prefix = listOf("大学", "中国", "基础", "现代", "高级").firstOrNull { trimmed.startsWith(it) && trimmed.length > it.length }
-    return (if (prefix != null) trimmed.removePrefix(prefix) else trimmed).take(1).ifEmpty { "课" }
 }
