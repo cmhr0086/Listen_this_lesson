@@ -58,3 +58,30 @@
 - 截图发现冷启动首页混色以及 AI / 原文返回箭头、hint 错色，已用建页前读取持久化主题修复。修复后的实际 Home / AI / 原文截图已逐张复核。
 - 最终只读审计补齐原文 AI 前置失败提示、原文增量刷新；加强原旧测试的课程切换、精确保存时长、课堂身份标题；新增离线诊断 DemoData 和不存在片段空状态。当前 110 项设备测试正在运行（connected-native-audited.log），不能提前称通过。
 - 全量截图将用最终 APK 重拍；系统 SAF 导出和真正杀进程恢复仍待人工操作。PDF 仅合同预览 / 创建课程，缺时段持久化，必须在最终报告保留未完成项。
+
+
+## 验收实现已推送
+
+- `319de048751f209e8c8da43cb7a84a4d05f73e2f` 已推送 codex/tgui-port，原生 launcher / 删除 Compose / 审计修复 / 完整 DemoData。
+- **最终源码** `:app:assembleDebug :app:testDebugUnitTest :app:connectedDebugAndroidTest` 全通过，5 分 15 秒，日志 connected-native-delivery.log。XML：174 单元测试与 110 设备测试，失败 / 错误 / 跳过均 0。
+- APK 85,818,946 字节，较基线减少 3,158,026 字节（3.55%）。schema、data/audio/recording、所有 ViewModel、服务端和许可证 diff 为空；通知减法为之前记录的 5 行。
+- tgui 最终文档提交 `0d083547b6f90c15614330d749de3355aea531e9` 已推送，assembleRelease / demo assembleDebug 再次通过（12 秒），PR #8 仍 draft / dev/ui-lib。
+- 当前正在同一 APK 上重拍日夜截图；下一步系统 SAF 导出 WAV 检查及实际进程终止恢复，之后完成 REPORT / PARITY / 截图索引和文档提交。
+
+
+## 最后人工验收与导航修复
+
+- 54 个页面 / 关键查看状态已完成日夜截图共 108 张，链接与 PNG 尺寸全部核验，图像逐张 / 联系表复核；截图只使用离线 DemoData。
+- 发现并修复专用搜索页吞系统 / 工具栏返回，以及课程 / 课堂 view 重建丢动态标题。代码 `a93e2c8bca7d6887493b03f121bcaf8d99ced927` 已推送，提交前 assembleDebug / testDebugUnitTest / assembleDebugAndroidTest 全通过（6 秒），补充原设备测试断言。
+- 实际冷启动完整导航、后台 am kill 后原路由栈和标题恢复通过。系统麦克风拒绝不开始采集，再授权后实际录音；录制中 force-stop 后重启显示已恢复，DB INTERRUPTED、endedAt 与 WAV 57.024 秒 / 912384 帧一致。
+- 单课堂 / 全课程实际 SAF 导出各两份 WAV，独立读回为 mono PCM16 16kHz、每组 3 秒 / 4 秒。外部 adb pull 的 Windows 中文目录问题通过 exec-out 原始参数读回核验；未改导出业务。
+- 原 data/、audio/、recording/、所有 ViewModel、schema、服务端和许可证仍无差异；最终 APK 86,092,621 字节，较基线减少约 3.24%。
+- 最后完整设备回归正在执行（connected-native-navigation-final.log）；最终结果及交付状态继续写在下节。
+
+
+## 最终交付
+
+- 最终验收源码 `fdbce41d22f8b5b2a51bb96fef7f04a532971f4c` 已推送；最后整轮 assembleDebug / testDebugUnitTest / connectedDebugAndroidTest **全部通过**（5m 14s）。XML 独立汇总：174 单元测试、110 设备测试，失败 / 错误 / 跳过全 0，日志 connected-native-accepted.log。
+- 前一轮唯一失败为向导保存状态后界面返回动画尚未完成；补有界等待实际首页 / 动画结束并保留全部原断言，未改业务或删减覆盖。
+- REPORT.md、PARITY.md、DECISIONS.md 记录实际人工恢复、导出校验、108 张截图和未验证边界。PDF 完整时段导入仍缺失，不能宣称全部产品要求完成。
+- Listen PR #5、tgui PR #8 保持草稿，分别指向 main / dev/ui-lib；无合并或发布。最终文档 / 截图提交后再核对两分支远端 HEAD。

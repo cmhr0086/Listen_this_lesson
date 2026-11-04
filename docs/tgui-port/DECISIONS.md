@@ -21,3 +21,9 @@
 17. 原文选段 AI 的前置错误只响应本页发起的操作，忙时明确提示；不在重新进入原文时重放旧错误。普通 Room 原文追加不再重绑所有旧气泡，只有选中态真正改变时更新关联行。
 18. Debug DemoData 增加一条明确标为离线演示的已完成 ASR 耗时记录，用于详情截图；无 jobId、待处理状态、WAV 或重试时间，不启动网络工作。不存在的诊断片段显示“未找到片段”，不永久显示正在读取。
 19. 图片全部使用 debug DemoData；空资料 / 未绑定 / 模型未配置截图代表这些真实状态，不把它们当成功联网证据。真实服务和真机验证保留为所有者的合并前清单。
+20. 专用搜索页保持搜索框展开，但系统 Back 与工具栏返回都先进入 tgui 的搜索收起回调，不能仅返回 false 吞掉操作。当前片段位于栈顶且未开始结束时，收起请求调用 finishFragment 后返回 false；保留课堂返回搜索时的查询状态，避免非栈顶或销毁阶段误退。原搜索设备测试补充两条真实返回首页路径，不直接调用 finishFragment 替代点击。
+21. CourseFragment / ClassroomFragment 的数据可能早于 view 重建到达；ListenListFragment 缓存最新 displayTitle，setPageTitle 同时更新缓存与现有 ActionBar，createView 使用缓存值。避免已载入课程 / 课堂名称在返回栈恢复后被默认“课堂”覆盖；Host 重建测试增加实际标题断言。修复代码 a93e2c8bca7d6887493b03f121bcaf8d99ced927 已推送并通过 assemble / JVM 单测，最终全量 110 项已在 connected-native-accepted.log 通过，新增断言已取得独立通过证据。人工冷启动导航与后台 am kill 后重启已验证原返回栈和真实标题恢复。
+22. WAV 导出验收增加真实 SAF UI 与独立文件读回：单课堂、整课程各导出两段 debug 演示音频，共 4 个 WAV，每组分别 3 秒和 4 秒，单声道 PCM16、16 kHz，验证日志为 manual_export_verified.log。该证据覆盖选择目录和实际文件产出，不能扩展为取消 / 大批量导出已验证。
+23. 人工权限与恢复验证独立于 Activity recreate 和合成夹具：麦克风拒绝 / 通知允许后必须显示权限错误且不采集，再经系统 UI 授予麦克风后实际仅录音。实际采集时 force-stop，重启检查已恢复提示、DB INTERRUPTED 与 endedAt、WAV 帧数 / 采样率 / 文件长度 / 时长一致；本次为 912384 帧、16 kHz、1824812 字节、57.024 秒，原文 0 段且无 ASR。依据 manual_permission_final.log、manual-current.png、manual_recovery_final.log；不扩展为识别质量、全部进程回收场景或整夜稳定性验收。旧恢复脚本使用未刷新的 UiAutomator XML 所致失败，以刷新后的页面、DB 和 WAV 独立证据修正，保留历史而不误报产品缺陷。
+
+24. 配置向导先保存 SetupState.DONE，再执行原生返回动画；测试必须有界等待真实首页且动画结束，才检查旧页消失。保留旧页不可见与网络请求数不变两个断言，并增加实际首页断言，避免把数据写入完成当作视图过渡完成；不改生产代码。
