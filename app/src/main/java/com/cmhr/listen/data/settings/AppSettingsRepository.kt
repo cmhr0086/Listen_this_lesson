@@ -53,7 +53,10 @@ data class CloudSyncSettings(
 )
 /** Public publishing is separate from personal sync: its own address, uploader token and course labels. */
 data class PublishSettings(
+    /** Can try to publish: a bound device, or an uploader token typed in by hand. */
     val hasToken: Boolean = false,
+    /** Publishing goes through the WeChat-bound account, so there is no token to manage. */
+    val viaDevice: Boolean = false,
     /** Set once; every published course is filed under it. */
     val schoolName: String = "",
     /** Local course id → its publishing state. */
@@ -234,7 +237,8 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
                 lastSyncAt = preferences[CLOUD_SYNC_LAST_SYNC_AT] ?: 0
             ),
             publish = PublishSettings(
-                hasToken = preferences[PUBLISH_TOKEN] != null,
+                hasToken = preferences[PUBLISH_TOKEN] != null || preferences[DEVICE_TOKEN] != null,
+                viaDevice = preferences[DEVICE_TOKEN] != null,
                 schoolName = preferences[PUBLISH_SCHOOL].orEmpty(),
                 courses = decodePublishCourses(preferences[PUBLISH_COURSES])
             ),
@@ -457,6 +461,9 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
 
     suspend fun clearPublishToken() = context.appSettingsDataStore.edit { it.remove(PUBLISH_TOKEN); it.markDirty(SECTION_PUBLISH) }
 
+    /** What publish requests sign in with: the device when bound, else the older uploader token. */
+    suspend fun readPublishCredential(): String? = readDeviceToken() ?: readPublishToken()
+
     suspend fun readPublishToken(): String? =
         context.appSettingsDataStore.data.first()[PUBLISH_TOKEN]?.let(publishTokenStore::decrypt)
 
@@ -520,7 +527,7 @@ class AppSettingsRepository(private val context: Context) : SyncStateStore {
             if (settings.server.hasApiKey) add(SECTION_STT)
             if (settings.ai.hasApiKey) add(SECTION_AI)
             if (settings.cloudSync.hasApiToken) add(SECTION_SYNC)
-            if (settings.publish.hasToken) add(SECTION_PUBLISH)
+            if (readPublishToken() != null) add(SECTION_PUBLISH)
         }
     }
 

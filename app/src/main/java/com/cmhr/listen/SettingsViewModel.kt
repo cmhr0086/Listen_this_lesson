@@ -464,7 +464,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             _uiState.update { it.copy(publishCheck = ServiceCheck.Testing) }
             val started = SystemClock.elapsedRealtime()
             val result = runCatching {
-                publishClient.me(PUBLISH_BASE_URL, repository.readPublishToken().orEmpty())
+                publishClient.me(PUBLISH_BASE_URL, repository.readPublishCredential().orEmpty())
             }
             val now = System.currentTimeMillis()
             result.fold(

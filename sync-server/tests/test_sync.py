@@ -383,3 +383,16 @@ def test_database_from_an_older_server_gains_the_new_columns(tmp_path, monkeypat
     with TestClient(create_app(f"sqlite:///{path}")) as migrated:
         downloaded = sync(migrated, device_id=str(uuid4()))
     assert downloaded["sessions"][0]["topic"] is None
+
+
+def test_stats_report_totals_and_need_the_token(client):
+    assert client.get("/api/v1/stats").status_code == 401
+    keep, gone = session_payload(), session_payload(deleted=True)
+    segment = segment_payload(session_id=keep["sessionId"])
+    sync(client, device_id=str(uuid4()), sessions=[keep, gone], segments=[segment])
+    stats = client.get("/api/v1/stats", headers={"Authorization": f"Bearer {API_TOKEN}"}).json()
+    assert (stats["sessions"], stats["segments"], stats["deletedRecords"]) == (1, 1, 1)
+    assert stats["courses"][0]["courseName"] == "高等数学" and stats["courses"][0]["segments"] == 1
+    assert stats["dbBytes"] > 0
+    # Totals only: no class text leaves the private database.
+    assert segment["text"] not in str(stats)

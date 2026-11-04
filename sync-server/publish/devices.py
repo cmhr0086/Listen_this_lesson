@@ -13,18 +13,18 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from .models import AccountConfig, Device, DevicePairing, Reader, Uploader
+from .readers import reader_uploader
 from .schemas import ConfigSync
-from .service import ServiceError, audit, create_uploader, hash_token, now_ms
+from .service import ServiceError, audit, hash_token, now_ms
 
 # A phone binds to an account without typing anything: it shows a short code, an admin reader
 # (identified by WeChat) approves the code in the mini program, and the phone then collects a
-# device token and the account's service settings. Binding is limited to admin readers because
-# the settings hold the private sync token.
+# device token and the account's service settings. Binding needs an admin or an account allowed
+# to upload; only admins are handed the private sync token.
 
 PAIRING_TTL_MS = 5 * 60 * 1000
 CLAIM_PREFIX = "lc_"
 DEVICE_PREFIX = "ld_"
-PROVISIONED_UPLOADER_NAME = "听这节课"
 SEALED_VERSION = "v1"
 
 
@@ -119,13 +119,41 @@ def claim_pairing(db: Session, claim: str) -> dict:
 # ---- devices ---------------------------------------------------------------------------
 
 
+def can_bind(reader: Reader) -> bool:
+    uploader = reader_uploader(reader)
+    return reader.isAdmin or (uploader is not None and uploader.status == "active")
+
+
+def find(db: Session, token: str) -> Device | None:
+    return db.scalar(select(Device).where(Device.tokenHash == hash_token(token)))
+
+
 def authenticate(db: Session, token: str) -> Device | None:
-    """A device stops working as soon as it is removed or its account stops being an admin."""
-    device = db.scalar(select(Device).where(Device.tokenHash == hash_token(token)))
+    """A device stops working as soon as it is removed or its account loses the right to bind."""
+    device = find(db, token)
     if device is None:
         return None
     reader = db.get(Reader, device.readerId)
-    return device if reader is not None and reader.isAdmin else None
+    return device if reader is not None and can_bind(reader) else None
+
+
+def authenticate_uploader(db: Session, token: str) -> Uploader | None:
+    """The uploader a bound phone publishes as; None when the token is no device of an uploader."""
+    device = find(db, token)
+    reader = db.get(Reader, device.readerId) if device else None
+    uploader = reader_uploader(reader) if reader else None
+    return uploader if uploader is not None and uploader.status == "active" else None
+
+
+def admin_reader(db: Session, token: str) -> Reader | None:
+    """The admin behind a device token: how the web console signs in."""
+    device = find(db, token)
+    reader = db.get(Reader, device.readerId) if device else None
+    if reader is None or not reader.isAdmin:
+        return None
+    device.lastSeenAt = now_ms()
+    db.commit()
+    return reader
 
 
 def list_devices(db: Session, reader: Reader) -> list[dict]:
@@ -155,7 +183,7 @@ def sync_config(db: Session, device: Device, cipher: ConfigCipher, body: ConfigS
     stored.update(changed)
     for section, value in body.offered.model_dump(exclude_none=True).items():
         stored.setdefault(section, value)
-    _provision_uploader(db, stored)
+    _link_uploader(db, device.readerId, stored)
 
     at = now_ms()
     device.lastSeenAt = at
@@ -171,15 +199,31 @@ def sync_config(db: Session, device: Device, cipher: ConfigCipher, body: ConfigS
     db.commit()
 
     config = dict(stored)
-    if "sync" not in config and sync_defaults:
+    if "sync" not in config and sync_defaults and db.get(Reader, device.readerId).isAdmin:
         config["sync"] = sync_defaults
     return {"config": config, "version": row.version if row else 0, "updatedAt": row.updatedAt if row else None}
 
 
-def _provision_uploader(db: Session, stored: dict) -> None:
-    # Only when the server has no uploader at all. Otherwise a phone already holds that uploader's
-    # token, and a new one would cut that phone off from the lessons it published once it synced.
-    if "publish" in stored or db.scalar(select(Uploader.id).limit(1)) is not None:
+def replace_publish_token(db: Session, cipher: ConfigCipher, old_hash: str, token: str) -> None:
+    """After a token is rotated, accounts holding the old one get the new one, or their phones would stop publishing."""
+    for row in db.scalars(select(AccountConfig)):
+        stored = cipher.open(row.readerId, row.sealed)
+        held = (stored.get("publish") or {}).get("token")
+        if held and hash_token(held) == old_hash:
+            stored["publish"]["token"] = token
+            row.sealed, row.version, row.updatedAt = cipher.seal(row.readerId, stored), row.version + 1, now_ms()
+    db.commit()
+
+
+def _link_uploader(db: Session, reader_id: int, stored: dict) -> None:
+    # A phone from before accounts could publish holds an uploader's token. Proving it once ties
+    # that uploader, and every lesson it published, to the account.
+    token = (stored.get("publish") or {}).get("token")
+    reader = db.get(Reader, reader_id)
+    if not token or reader.uploaderId:
         return
-    _uploader, token = create_uploader(db, PROVISIONED_UPLOADER_NAME)
-    stored["publish"] = {"token": token, "schoolName": ""}
+    uploader = db.scalar(select(Uploader).where(Uploader.tokenHash == hash_token(token)))
+    taken = uploader and db.scalar(select(Reader.id).where(Reader.uploaderId == uploader.id))
+    if uploader is not None and not taken:
+        reader.uploaderId = uploader.id
+        audit(db, f"reader:{reader.id}", "uploader.linked", f"uploader:{uploader.id}")

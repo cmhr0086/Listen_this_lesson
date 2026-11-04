@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterable
+from pathlib import Path
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from .models import SegmentRecord, SessionRecord, SyncClock
@@ -130,3 +131,34 @@ def synchronize(db: Session, request: SyncRequest) -> SyncResponse:
             segmentAcks=segment_acks,
         )
     return response
+
+
+def sync_stats(db: Session, database_path: str | None) -> dict:
+    """Totals only: no titles beyond course names and no text leave the sync database."""
+    sessions = db.execute(
+        select(SessionRecord.courseName, func.count(), func.max(SessionRecord.serverChangedAt))
+        .where(SessionRecord.deleted.is_(False)).group_by(SessionRecord.courseName)
+    ).all()
+    segments = dict(db.execute(
+        select(SessionRecord.courseName, func.count())
+        .join(SegmentRecord, SegmentRecord.sessionId == SessionRecord.sessionId)
+        .where(SessionRecord.deleted.is_(False), SegmentRecord.deleted.is_(False))
+        .group_by(SessionRecord.courseName)
+    ).all())
+    deleted = sum(
+        db.scalar(select(func.count()).select_from(model).where(model.deleted.is_(True))) or 0
+        for model in (SessionRecord, SegmentRecord)
+    )
+    path = Path(database_path) if database_path else None
+    size = sum(p.stat().st_size for p in (path, path.with_name(path.name + "-wal")) if p.exists()) if path else 0
+    return {
+        "dbBytes": size,
+        "sessions": sum(row[1] for row in sessions),
+        "segments": sum(segments.values()),
+        "deletedRecords": deleted,
+        "lastChangedAt": max((row[2] for row in sessions), default=None),
+        "courses": [
+            {"courseName": name, "sessions": count, "segments": segments.get(name, 0), "lastChangedAt": changed}
+            for name, count, changed in sorted(sessions, key=lambda row: row[2], reverse=True)
+        ],
+    }

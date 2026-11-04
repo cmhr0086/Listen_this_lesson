@@ -52,7 +52,7 @@ internal fun publishHeadline(state: CoursePublishUiState): PublishHeadline {
     val waiting = state.toSync.size
     val pendingSync = if (waiting > 0) "，还有 $waiting 节待同步" else ""
     return when {
-        !state.hasToken -> PublishHeadline(CardTone.NEUTRAL, "还不能发布", "需要管理员开通的上传 Token。", HeadlineAction.SETTINGS)
+        !state.hasToken -> PublishHeadline(CardTone.NEUTRAL, "还不能发布", "先在设置里用微信绑定这台设备，再请管理员开通上传。", HeadlineAction.SETTINGS)
         latest == null -> PublishHeadline(
             CardTone.NEUTRAL, "还没公开",
             "完善下面的课程信息，点「申请公开」。管理员批准后，同学们就能在阅读端看到这门课。"
@@ -62,7 +62,7 @@ internal fun publishHeadline(state: CoursePublishUiState): PublishHeadline {
         )
         latest.status == "approved" -> PublishHeadline(CardTone.OK, "已公开", "$uploaded 节课公开中$pendingSync。")
         latest.status == "rejected" -> PublishHeadline(
-            CardTone.PROBLEM, "未通过审核",
+            CardTone.PROBLEM, "已打回",
             (latest.reviewNote?.let { "管理员：$it。" } ?: "") + "修改后可以重新申请。", HeadlineAction.REQUEST_REVIEW
         )
         else -> PublishHeadline(CardTone.PROBLEM, "已被管理员下架", "读者现在看不到这门课。如有疑问请联系管理员。")
@@ -238,7 +238,7 @@ fun CoursePublishScreen(courseId: Long, model: PublishViewModel, openSettings: (
 internal fun courseStatusLabel(status: String) = when (status) {
     "pending" -> "等待审核"
     "approved" -> "已公开"
-    "rejected" -> "未通过审核"
+    "rejected" -> "已打回"
     "taken_down" -> "已下架"
     else -> status
 }
@@ -252,7 +252,7 @@ internal fun coursePublishSummary(hasToken: Boolean, status: Map<String, String>
             "pending" -> StatusTone.READY
             else -> StatusTone.PROBLEM
         })
-        !hasToken -> "需要管理员开通的上传 Token" to null
+        !hasToken -> "绑定设备后，请管理员开通上传" to null
         teacher.isBlank() -> "完善课程信息后，公开给同学们阅读" to null
         else -> "已完善，可以申请公开" to null
     }

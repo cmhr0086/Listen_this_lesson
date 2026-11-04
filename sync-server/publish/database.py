@@ -17,6 +17,7 @@ ADDED_COLUMNS = {
         "nickname": "TEXT",
         "avatar": "TEXT",
         "remark": "TEXT",
+        "uploaderId": "INTEGER",
     },
 }
 
@@ -36,4 +37,6 @@ def initialize_database(engine: Engine) -> None:
                     "UPDATE courses SET status = 'approved' WHERE id IN "
                     "(SELECT courseId FROM lessons WHERE publishedRevisionId IS NOT NULL)"
                 )
+        # 0.6.0 and earlier told rejected and taken-down courses apart; both are now just sent back.
+        connection.exec_driver_sql("UPDATE courses SET status = 'returned' WHERE status IN ('rejected', 'taken_down')")
         connection.commit()

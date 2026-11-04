@@ -7,9 +7,9 @@ import urllib.parse
 import urllib.request
 
 from sqlalchemy import delete, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
-from .models import Reader, ReaderSession, ReaderTimetable
+from .models import Reader, ReaderSession, ReaderTimetable, Uploader
 from .service import ServiceError, audit, hash_token, now_ms
 
 # Readers sign in with wx.login. Notes stay public; transcripts are shown only to readers on the
@@ -103,8 +103,14 @@ def save_profile(db: Session, reader: Reader, nickname: str | None, avatar: str 
     return reader
 
 
+def reader_uploader(reader: Reader) -> Uploader | None:
+    return object_session(reader).get(Uploader, reader.uploaderId) if reader.uploaderId else None
+
+
 def reader_dict(reader: Reader) -> dict:
+    uploader = reader_uploader(reader)
     return {
+        "canUpload": uploader is not None and uploader.status == "active",
         "readerId": reader.id,
         "nickname": reader.nickname,
         "avatar": reader.avatar,
@@ -125,6 +131,7 @@ def admin_reader_dict(reader: Reader) -> dict:
     return {
         **reader_dict(reader),
         "remark": reader.remark,
+        "uploaderName": uploader.displayName if (uploader := reader_uploader(reader)) else None,
         # None until the admin names them; the pages say so rather than inventing a number.
         "displayName": reader.remark or reader.nickname,
         # Enough to tell people apart in the admin list without showing the whole openid.
