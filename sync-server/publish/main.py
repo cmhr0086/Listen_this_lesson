@@ -25,10 +25,10 @@ from app.database import create_sync_engine
 
 from starlette.concurrency import run_in_threadpool
 
-from . import devices, materials, queries, readers, service
+from . import devices, materials, queries, readers, service, storage
 from .timetable_pdf import TimetableError, parse_timetable
 from .database import initialize_database
-from .models import AuditLog, Course, Device, Lesson, Reader, Revision, RevisionNote, RevisionSegment, Uploader
+from .models import AuditLog, Course, CourseMaterial, Device, Lesson, Reader, Revision, RevisionNote, RevisionSegment, Uploader
 from .schemas import (
     ConfigSync,
     CourseStatus,
@@ -39,6 +39,7 @@ from .schemas import (
     ReaderAccessRequest,
     ReaderProfile,
     ReaderRemark,
+    ReaderUpload,
     TimetableUpload,
     WechatLogin,
     LessonSubmissions,
@@ -61,6 +62,7 @@ ADMIN_PAGE = Path(__file__).with_name("admin.html")
 
 def create_app(database_url: str | None = None) -> FastAPI:
     engine = create_sync_engine(database_url or os.getenv("PUBLISH_DATABASE_URL", "sqlite:////data/listen-publish.db"))
+    database_path = engine.url.database
     admin_token = os.getenv("PUBLISH_ADMIN_TOKEN")
     wechat_appid = os.getenv("WECHAT_APPID")
     wechat_secret = os.getenv("WECHAT_SECRET")
@@ -102,10 +104,13 @@ def create_app(database_url: str | None = None) -> FastAPI:
         authorization: Annotated[str | None, Header()] = None, db: Session = Depends(get_db)
     ) -> Uploader:
         token = bearer(authorization)
-        uploader = service.authenticate_uploader(db, token) if token else None
-        if uploader is None:
-            raise unauthorized()
-        return uploader
+        uploader = (service.authenticate_uploader(db, token) or devices.authenticate_uploader(db, token)) if token else None
+        if uploader is not None:
+            return uploader
+        if token and devices.authenticate(db, token):
+            # A real bound phone, on an account nobody has allowed to publish.
+            raise HTTPException(403, "这个账号还没有上传权限，请联系管理员开通")
+        raise unauthorized()
 
     def optional_reader(
         authorization: Annotated[str | None, Header()] = None, db: Session = Depends(get_db)
@@ -131,7 +136,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
         token = bearer(authorization)
         if admin_token and token and secrets.compare_digest(token, admin_token):
             return
-        reader = readers.authenticate(db, token) if token else None
+        reader = (readers.authenticate(db, token) or devices.admin_reader(db, token)) if token else None
         if reader is None or not reader.isAdmin:
             raise unauthorized()
         db.info["actor"] = f"reader:{reader.id}"
@@ -362,7 +367,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     def require_binding_admin(reader: Reader = Depends(require_reader)) -> Reader:
         require_config_cipher()
-        if not reader.isAdmin:
+        if not devices.can_bind(reader):
             raise HTTPException(403, "这个账号不能绑定设备")
         limit_pairing(f"reader:{reader.id}", PAIRING_LOOKUPS_PER_HOUR)
         return reader
@@ -460,7 +465,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
         lessons = select(func.count()).where(Lesson.courseId == course.id, Lesson.publishedRevisionId.is_not(None))
         if uploader_id is not None:
             lessons = lessons.where(Lesson.uploaderId == uploader_id)
-        return CourseStatus(**queries.course_dict(course), status=course.status, reviewNote=course.reviewNote, lessonCount=db.scalar(lessons))
+        return CourseStatus(**queries.course_dict(course), status=service.uploader_course_status(course.status), reviewNote=course.reviewNote, lessonCount=db.scalar(lessons))
 
     @publish.get("/courses/{course_id}", response_model=CourseStatus)
     def uploader_course(course_id: str, uploader: Uploader = Depends(require_uploader), db: Session = Depends(get_db)):
@@ -528,6 +533,9 @@ def create_app(database_url: str | None = None) -> FastAPI:
         )
         return {
             **course_status(db, course).model_dump(),
+            "status": course.status,
+            "materialCount": db.scalar(select(func.count()).where(CourseMaterial.courseId == course.id)),
+            "materialBytes": db.scalar(select(func.coalesce(func.sum(CourseMaterial.size), 0)).where(CourseMaterial.courseId == course.id)),
             "requestedBy": requester.displayName if requester else None,
             "requestedAt": course.requestedAt,
             "reviewedAt": course.reviewedAt,
@@ -544,7 +552,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
         # The review queue is first come, first served; other lists show the newest first.
         order = (Course.requestedAt.asc(), Course.createdAt.asc()) if status == "pending" else (
             Course.requestedAt.desc().nulls_last(), Course.createdAt.desc())
-        rows = db.scalars(stmt.order_by(*order).limit(200))
+        rows = db.scalars(stmt.order_by(*order).limit(500))
         return {"courses": [course_row(db, course) for course in rows]}
 
     @admin.get("/summary")
@@ -552,6 +560,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
         """Counts behind the badges on the admin tabs."""
         return {
             "pendingCourses": db.scalar(select(func.count()).select_from(Course).where(Course.status == "pending")),
+            "courses": dict(db.execute(select(Course.status, func.count()).group_by(Course.status)).all()),
+            "lessons": db.scalar(select(func.count()).select_from(Lesson)),
+            "readers": db.scalar(select(func.count()).select_from(Reader)),
+            "devices": db.scalar(select(func.count()).select_from(Device)),
             "pendingReaders": db.scalar(select(func.count()).select_from(Reader).where(Reader.transcriptAccess == "pending")),
             "withdrawRequests": db.scalar(
                 select(func.count()).select_from(Lesson)
@@ -575,13 +587,14 @@ def create_app(database_url: str | None = None) -> FastAPI:
     def admin_course_approve(course_id: str, body: ReviewDecision | None = None, db: Session = Depends(get_db)):
         return decide(course_id, "approved", body, db)
 
+    @admin.post("/courses/{course_id}/return")
     @admin.post("/courses/{course_id}/reject")
     def admin_course_reject(course_id: str, body: ReviewDecision | None = None, db: Session = Depends(get_db)):
-        return decide(course_id, "rejected", body, db)
+        return decide(course_id, "returned", body, db)
 
     @admin.post("/courses/{course_id}/takedown")
     def admin_course_takedown(course_id: str, body: ReviewDecision | None = None, db: Session = Depends(get_db)):
-        return decide(course_id, "taken_down", body, db)
+        return decide(course_id, "returned", body, db)
 
     @admin.delete("/courses/{course_id}")
     def admin_course_delete(course_id: str, db: Session = Depends(get_db)):
@@ -708,6 +721,34 @@ def create_app(database_url: str | None = None) -> FastAPI:
             raise HTTPException(409, "不能取消自己的管理员身份")
         return readers.admin_reader_dict(readers.set_admin(db, reader, False))
 
+    @admin.post("/readers/{reader_id}/upload-enable")
+    def admin_reader_upload_enable(reader_id: int, body: ReaderUpload | None = None, db: Session = Depends(get_db)):
+        reader = service.require(db.get(Reader, reader_id), "读者不存在")
+        return readers.admin_reader_dict(service.set_reader_upload(db, reader, True, body.displayName if body else None))
+
+    @admin.post("/readers/{reader_id}/upload-disable")
+    def admin_reader_upload_disable(reader_id: int, db: Session = Depends(get_db)):
+        reader = service.require(db.get(Reader, reader_id), "读者不存在")
+        return readers.admin_reader_dict(service.set_reader_upload(db, reader, False, None))
+
+    @admin.get("/devices")
+    def admin_devices(db: Session = Depends(get_db)):
+        rows = db.scalars(select(Device).order_by(Device.lastSeenAt.desc()))
+        def owner(device: Device) -> str:
+            reader = db.get(Reader, device.readerId)
+            return (reader.remark or reader.nickname or "未命名") if reader else "—"
+        return {"devices": [{**devices.device_dict(d), "owner": owner(d)} for d in rows]}
+
+    @admin.delete("/devices/{device_id}")
+    def admin_remove_device(device_id: str, db: Session = Depends(get_db)):
+        device = service.require(db.get(Device, device_id), "设备不存在")
+        devices.remove(db, device, "admin")
+        return {"removed": True}
+
+    @admin.get("/storage")
+    async def admin_storage():
+        return await run_in_threadpool(storage.report, database_path, sync_url, sync_token)
+
     @admin.post("/readers/{reader_id}/revoke")
     def admin_reader_revoke(reader_id: int, db: Session = Depends(get_db)):
         reader = service.require(db.get(Reader, reader_id), "读者不存在")
@@ -717,11 +758,17 @@ def create_app(database_url: str | None = None) -> FastAPI:
     def admin_audit(
         before: Annotated[int | None, Query(ge=1)] = None,
         limit: Annotated[int, Query(ge=1, le=100)] = 100,
+        action: Annotated[str | None, Query(max_length=40)] = None,
+        q: Annotated[str | None, Query(max_length=100)] = None,
         db: Session = Depends(get_db),
     ):
         stmt = select(AuditLog).order_by(AuditLog.id.desc()).limit(limit)
         if before is not None:
             stmt = stmt.where(AuditLog.id < before)
+        if action:
+            stmt = stmt.where(AuditLog.action == action)
+        if q and q.strip():
+            stmt = stmt.where(AuditLog.detail.contains(q.strip()))
         rows = list(db.scalars(stmt))
 
         def actor_name(actor: str) -> str:
@@ -780,9 +827,16 @@ def create_app(database_url: str | None = None) -> FastAPI:
         return material_file(service.require(db.get(materials.CourseMaterial, material_id), "资料不存在"))
 
     @app.get("/admin", response_class=HTMLResponse, include_in_schema=False)
-    def admin_page() -> HTMLResponse:
+    def admin_page(request: Request) -> Response:
         # Static shell only; every action it takes goes through the token-checked API above.
-        return HTMLResponse(ADMIN_PAGE.read_text(encoding="utf-8"), headers={"Cache-Control": "no-store"})
+        # One self-contained file. Revalidated every time, so a deploy shows up at once and a slow
+        # link only pays for the page when it really changed.
+        body = ADMIN_PAGE.read_bytes()
+        etag = 'W/"' + hashlib.sha256(body).hexdigest()[:32] + '"'
+        headers = {"ETag": etag, "Cache-Control": "no-cache"}
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers=headers)
+        return HTMLResponse(body, headers=headers)
 
     app.include_router(public)
     app.include_router(publish)

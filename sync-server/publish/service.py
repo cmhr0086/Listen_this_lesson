@@ -11,7 +11,7 @@ from uuid import uuid4
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from .models import AuditLog, Course, Lesson, Revision, RevisionNote, RevisionSegment, Uploader
+from .models import AuditLog, Course, Lesson, Reader, Revision, RevisionNote, RevisionSegment, Uploader
 from .schemas import SubmissionRequest, SubmissionResult
 
 SUBMISSIONS_PER_HOUR = 30
@@ -107,6 +107,29 @@ def set_uploader_status(db: Session, uploader_id: int, status: str) -> Uploader:
     audit(db, "admin", f"uploader.{status}", f"uploader:{uploader.id}")
     db.commit()
     return uploader
+
+
+def set_reader_upload(db: Session, reader: Reader, allowed: bool, display_name: str | None) -> Reader:
+    """Publishing follows the account: its bound phones upload as this uploader, with no token to type."""
+    uploader = db.get(Uploader, reader.uploaderId) if reader.uploaderId else None
+    if not allowed:
+        if uploader is None:
+            raise ServiceError(409, "这个账号没有上传权限")
+        uploader.status = "disabled"
+        audit(db, "admin", "uploader.disabled", f"uploader:{uploader.id}")
+    elif uploader is not None:
+        uploader.status = "active"
+        if display_name:
+            uploader.displayName = display_name
+        audit(db, "admin", "uploader.active", f"uploader:{uploader.id}")
+    else:
+        if not display_name:
+            raise ServiceError(422, "请填写公开显示的名称")
+        # The random token nobody ever sees only fills the column; phones sign in with their device token.
+        uploader, _token = create_uploader(db, display_name)
+        reader.uploaderId = uploader.id
+    db.commit()
+    return reader
 
 
 def require(value, message: str):
@@ -222,9 +245,14 @@ def result(db: Session, lesson: Lesson, revision: Revision, status: str) -> Subm
         revision=revision.number,
         status=status,
         courseId=course.id,
-        courseStatus=course.status,
+        courseStatus=uploader_course_status(course.status),
         courseReviewNote=course.reviewNote,
     )
+
+
+def uploader_course_status(status: str) -> str:
+    """Apps up to 1.7 know a sent-back course as rejected, which is also the state they can re-request from."""
+    return "rejected" if status == "returned" else status
 
 
 def get_or_create_course(db: Session, uploader: Uploader, request: SubmissionRequest) -> Course:
@@ -252,12 +280,12 @@ def get_or_create_course(db: Session, uploader: Uploader, request: SubmissionReq
 
 
 def request_course_review(db: Session, uploader: Uploader, course_id: str) -> Course:
-    """A rejected course goes back to the queue once the uploader has fixed what was asked."""
+    """A sent-back course goes back to the queue once the uploader has fixed what was asked."""
     course = require(db.get(Course, course_id), "课程不存在")
     owns = db.scalar(select(func.count()).where(Lesson.courseId == course.id, Lesson.uploaderId == uploader.id))
     if not owns and course.requestedBy != uploader.id:
         raise ServiceError(404, "课程不存在")
-    if course.status != "rejected":
+    if course.status != "returned":
         raise ServiceError(409, f"课程当前状态为 {course.status}，无需重新申请")
     course.status = "pending"
     course.requestedAt = now_ms()
@@ -282,14 +310,13 @@ def request_withdraw(db: Session, uploader: Uploader, lesson_id: str, reason: st
 
 def review_course(db: Session, course_id: str, status: str, note: str | None = None) -> Course:
     allowed = {
-        "approved": {"pending", "rejected", "taken_down"},
-        "rejected": {"pending"},
-        "taken_down": {"approved"},
+        "approved": {"pending", "returned"},
+        "returned": {"pending", "approved"},
     }
     course = require(db.get(Course, course_id), "课程不存在")
     if course.status not in allowed[status]:
         raise ServiceError(409, f"课程当前状态为 {course.status}，不能改为 {status}")
-    if status in ("rejected", "taken_down") and not note:
+    if status == "returned" and not note:
         # Shown to the uploader in the App, and the only record of why.
         raise ServiceError(422, "请填写原因")
     course.status = status
@@ -303,8 +330,8 @@ def review_course(db: Session, course_id: str, status: str, note: str | None = N
 def delete_course(db: Session, course_id: str) -> None:
     """Removes a course that is no longer public, with every lesson and version in it."""
     course = require(db.get(Course, course_id), "课程不存在")
-    if course.status not in ("taken_down", "rejected"):
-        raise ServiceError(409, "只能删除已下架或已驳回的课程，请先下架")
+    if course.status != "returned":
+        raise ServiceError(409, "只能删除已打回的课程，请先打回")
     lesson_ids = select(Lesson.id).where(Lesson.courseId == course.id)
     revision_ids = select(Revision.id).where(Revision.lessonId.in_(lesson_ids))
     lesson_count = db.scalar(select(func.count()).select_from(Lesson).where(Lesson.courseId == course.id))

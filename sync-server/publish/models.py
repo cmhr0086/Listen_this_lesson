@@ -33,7 +33,7 @@ class Course(Base):
     normKey: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     createdAt: Mapped[int] = mapped_column(Integer, nullable=False)
     # Review happens per course: once approved, its lessons go live as they are uploaded.
-    # pending | approved | rejected | taken_down
+    # pending | approved | returned (sent back by the admin, before or after going public)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="pending", server_default="pending")
     requestedBy: Mapped[int | None] = mapped_column(Integer)
     requestedAt: Mapped[int | None] = mapped_column(Integer)
@@ -131,6 +131,8 @@ class Reader(Base):
     avatar: Mapped[str | None] = mapped_column(Text)
     # The admin's own name for this person; WeChat gives the server no name to go by.
     remark: Mapped[str | None] = mapped_column(Text)
+    # The uploader identity this account publishes as, once the admin has allowed it.
+    uploaderId: Mapped[int | None] = mapped_column(ForeignKey("uploaders.id"))
     requestNote: Mapped[str | None] = mapped_column(Text)
     requestedAt: Mapped[int | None] = mapped_column(Integer)
     reviewedAt: Mapped[int | None] = mapped_column(Integer)

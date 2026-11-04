@@ -195,10 +195,12 @@ def test_admin_queue_is_first_come_first_served_with_tab_counts(client):
     first = submit(client, token, submission(course={"schoolName": "某某大学", "term": "T", "courseName": "甲课", "teacherName": "张"}))
     submit(client, token, submission(course={"schoolName": "某某大学", "term": "T", "courseName": "乙课", "teacherName": "张"}))
     assert [c["courseName"] for c in admin(client, "GET", "/courses")["courses"]] == ["甲课", "乙课"]
-    assert admin(client, "GET", "/summary") == {"pendingCourses": 2, "pendingReaders": 0, "withdrawRequests": 0}
+    summary = admin(client, "GET", "/summary")
+    assert {k: summary[k] for k in ("pendingCourses", "pendingReaders", "withdrawRequests")} == {"pendingCourses": 2, "pendingReaders": 0, "withdrawRequests": 0}
     approve(client, first["courseId"])
     client.post(f"/api/publish/v1/lessons/{first['lessonId']}/withdraw-request", headers=auth(token), json={"reason": "录错了"})
-    assert admin(client, "GET", "/summary") == {"pendingCourses": 1, "pendingReaders": 0, "withdrawRequests": 1}
+    summary = admin(client, "GET", "/summary")
+    assert {k: summary[k] for k in ("pendingCourses", "pendingReaders", "withdrawRequests")} == {"pendingCourses": 1, "pendingReaders": 0, "withdrawRequests": 1}
     row = admin(client, "GET", "/uploaders")["uploaders"][0]
     assert sorted(row["courseNames"]) == sorted(["甲课", "乙课"])
     assert row["lastUploadAt"] is not None
@@ -866,16 +868,6 @@ def test_sync_settings_come_from_the_server_until_edited(device_client):
     assert sync_config(device_client, device, changed={"sync": own})["config"]["sync"] == own
 
 
-def test_uploader_is_created_only_when_the_server_has_none(device_client):
-    headers = admin_reader(device_client)
-    device = bind(device_client, headers)
-    token = sync_config(device_client, device)["config"]["publish"]["token"]
-    assert device_client.get("/api/publish/v1/me", headers=auth(token)).status_code == 200
-    # Stable from then on: the second sync hands back the same token, no second uploader.
-    assert sync_config(device_client, device)["config"]["publish"]["token"] == token
-    assert len(admin(device_client, "GET", "/uploaders")["uploaders"]) == 1
-
-
 def test_existing_uploader_is_not_replaced_before_its_phone_syncs(device_client):
     real_token = new_uploader(device_client)
     headers = admin_reader(device_client)
@@ -1023,3 +1015,132 @@ def test_rotating_another_token_leaves_the_cloud_copy_alone(device_client):
     sync_config(device_client, device, offered={"publish": {"token": token, "schoolName": ""}})
     admin(device_client, "POST", f"/uploaders/{other_id}/rotate-token")
     assert sync_config(device_client, device)["config"]["publish"]["token"] == token
+
+
+# ---- courses have one sent-back state ---------------------------------------------------------
+
+
+def test_status_migration_merges_rejected_and_taken_down(tmp_path, monkeypatch):
+    import sqlite3
+    from publish.database import initialize_database
+    from sqlalchemy import create_engine
+
+    path = tmp_path / "old.db"
+    engine = create_engine(f"sqlite:///{path}")
+    initialize_database(engine)
+    now = 1
+    with sqlite3.connect(path) as db:
+        for key, status in (("a", "rejected"), ("b", "taken_down"), ("c", "approved"), ("d", "pending")):
+            db.execute("insert into courses(id,schoolName,term,courseName,teacherName,normKey,createdAt,status) values(?,?,?,?,?,?,?,?)", (key, "s", "t", key, "x", key, now, status))
+    initialize_database(engine)
+    with sqlite3.connect(path) as db:
+        assert dict(db.execute("select id,status from courses")) == {"a": "returned", "b": "returned", "c": "approved", "d": "pending"}
+
+
+def test_sent_back_course_reads_as_returned_for_admins_and_rejected_for_old_apps(client):
+    token, result = published_course(client)
+    course = result["courseId"]
+    assert admin(client, "POST", f"/courses/{course}/return", json={"note": "请写全称"})["status"] == "returned"
+    assert [c["courseId"] for c in admin(client, "GET", "/courses?status=returned")["courses"]] == [course]
+    seen = client.get(f"/api/publish/v1/courses/{course}", headers=auth(token)).json()
+    assert (seen["status"], seen["reviewNote"]) == ("rejected", "请写全称")
+    # Sent back after going public: the uploader can ask for review again all the same.
+    assert client.post(f"/api/publish/v1/courses/{course}/request-review", headers=auth(token)).json()["status"] == "pending"
+    approve(client, course)
+    admin(client, "POST", f"/courses/{course}/return", json={"note": "下架"})
+    assert client.post(f"/api/publish/v1/courses/{course}/request-review", headers=auth(token)).json()["status"] == "pending"
+
+
+def test_only_returned_courses_can_be_deleted(client):
+    _token, result = published_course(client)
+    course = result["courseId"]
+    url = f"/api/admin/v1/courses/{course}"
+    assert client.delete(url, headers=auth(ADMIN_TOKEN)).status_code == 409
+    admin(client, "POST", f"/courses/{course}/return", json={"note": "x"})
+    assert client.delete(url, headers=auth(ADMIN_TOKEN)).status_code == 200
+
+
+# ---- publishing through the account -----------------------------------------------------------
+
+
+def uploader_account(client, code="classmate", name="小林"):
+    login = sign_in(client, code)
+    reader_id = login["reader"]["readerId"]
+    row = admin(client, "POST", f"/readers/{reader_id}/upload-enable", json={"displayName": name})
+    assert row["canUpload"] is True and row["uploaderName"] == name
+    return auth(login["token"]), reader_id
+
+
+def test_a_bound_phone_uploads_without_any_uploader_token(device_client):
+    headers, _reader = uploader_account(device_client)
+    device = bind(device_client, headers)
+    assert device_client.get("/api/publish/v1/me", headers=device).json() == {"displayName": "小林", "status": "active"}
+    response = device_client.post("/api/publish/v1/submissions", headers=device, json=submission())
+    assert response.status_code == 200, response.text
+    assert response.json()["courseStatus"] == "pending"
+
+
+def test_enabling_upload_needs_a_public_name_the_first_time(client):
+    reader_id = sign_in(client)["reader"]["readerId"]
+    url = f"/api/admin/v1/readers/{reader_id}/upload-enable"
+    assert client.post(url, headers=auth(ADMIN_TOKEN), json={}).status_code == 422
+    assert client.post(url, headers=auth(ADMIN_TOKEN), json={"displayName": "小林"}).status_code == 200
+    admin(client, "POST", f"/readers/{reader_id}/upload-disable")
+    # Back on with the same identity, so its lessons stay its own.
+    assert client.post(url, headers=auth(ADMIN_TOKEN), json={}).json()["uploaderName"] == "小林"
+    assert len(admin(client, "GET", "/uploaders")["uploaders"]) == 1
+
+
+def test_disabling_upload_stops_the_phone_at_once(device_client):
+    headers, reader_id = uploader_account(device_client)
+    device = bind(device_client, headers)
+    admin(device_client, "POST", f"/readers/{reader_id}/upload-disable")
+    assert device_client.get("/api/publish/v1/me", headers=device).status_code == 401
+    assert device_client.post("/api/public/v1/devices/config/sync", headers=device, json={}).status_code == 401
+
+
+def test_admin_without_upload_rights_hears_why_not_a_bad_token(device_client):
+    device = bind(device_client, admin_reader(device_client))
+    response = device_client.get("/api/publish/v1/me", headers=device)
+    assert response.status_code == 403 and "上传权限" in response.json()["detail"]
+
+
+def test_uploader_can_bind_but_never_gets_the_sync_token(device_client):
+    headers, _reader = uploader_account(device_client)
+    device = bind(device_client, headers)
+    assert "sync" not in sync_config(device_client, device)["config"]
+
+
+def test_an_old_uploader_token_ties_itself_to_the_account(device_client):
+    token = new_uploader(device_client)
+    published_course(device_client, token)
+    headers = admin_reader(device_client)
+    device = bind(device_client, headers)
+    sync_config(device_client, device, offered={"publish": {"token": token, "schoolName": ""}})
+    row = next(r for r in admin(device_client, "GET", "/readers")["readers"] if r["isAdmin"])
+    assert row["canUpload"] is True and row["uploaderName"] == "小林"
+    # The device token now publishes as the same uploader that owns the earlier lessons.
+    assert device_client.get("/api/publish/v1/me", headers=device).json()["displayName"] == "小林"
+
+
+def test_web_console_signs_in_with_a_device_token(device_client):
+    headers = admin_reader(device_client)
+    console = bind(device_client, headers, "网页后台 · Chrome")
+    assert device_client.get("/api/admin/v1/summary", headers=console).status_code == 200
+    uploader_headers, _reader = uploader_account(device_client)
+    phone = bind(device_client, uploader_headers)
+    assert device_client.get("/api/admin/v1/summary", headers=phone).status_code == 401
+    listed = admin(device_client, "GET", "/devices")["devices"]
+    assert {d["name"] for d in listed} == {"网页后台 · Chrome", "Mate 9"}
+
+
+def test_storage_report_adds_up_without_a_sync_service(client):
+    report = admin(client, "GET", "/storage")
+    assert report["sync"] is None and report["disk"]["totalBytes"] > 0
+    assert report["totalBytes"] == sum(part["bytes"] for part in report["parts"]) > 0
+
+
+def test_admin_page_revalidates_with_an_etag(client):
+    first = client.get("/admin")
+    assert first.status_code == 200 and first.headers["cache-control"] == "no-cache"
+    assert client.get("/admin", headers={"If-None-Match": first.headers["etag"]}).status_code == 304

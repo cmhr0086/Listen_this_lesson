@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from .compression import CAPABILITIES_HEADER, GzipRequestMiddleware
 from .database import create_sync_engine, initialize_database, session_provider
 from .schemas import SyncRequest, SyncResponse
-from .sync_service import synchronize
+from .sync_service import sync_stats, synchronize
 
 
 def create_app(database_url: str | None = None) -> FastAPI:
@@ -55,6 +55,11 @@ def create_app(database_url: str | None = None) -> FastAPI:
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/api/v1/stats")
+    def stats(_authorized: None = Depends(require_sync_token), db: Session = Depends(get_session)) -> dict:
+        """Read-only totals for the admin console; it never sees the classes themselves."""
+        return sync_stats(db, engine.url.database)
 
     @app.post("/api/v1/sync", response_model=SyncResponse)
     def sync(
