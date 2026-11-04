@@ -1,80 +1,14 @@
 package com.cmhr.listen
 
-import kotlinx.coroutines.launch
-import androidx.lifecycle.lifecycleScope
-import android.content.Intent
-import android.os.Bundle
-import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
-import androidx.activity.SystemBarStyle
-import androidx.activity.enableEdgeToEdge
-import android.graphics.Color
-import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.runtime.DisposableEffect
-import com.cmhr.listen.ui.theme.DarkModePreference
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.ui.Modifier
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.viewmodel.compose.viewModel
-import com.cmhr.listen.ui.ListenApp
-import com.cmhr.listen.ui.SetupFlow
-import com.cmhr.listen.ui.theme.ListenTheme
-import com.cmhr.listen.data.settings.AppSettingsRepository
-import com.cmhr.listen.data.settings.AppearanceSettings
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import kotlinx.coroutines.flow.map
+import com.cmhr.listen.tgui.ListenHostActivity
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.receiveAsFlow
+
+/** Stable entry point shared by the launcher and foreground-service notifications. */
+class MainActivity : ListenHostActivity()
 
 object AppNavigationRequests {
     private val requests = Channel<Long>(Channel.BUFFERED)
     val recordRequests = requests.receiveAsFlow()
     fun openRecord(id: Long) { if (id > 0L) requests.trySend(id) }
-}
-
-class MainActivity : ComponentActivity() {
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
-        lifecycleScope.launch { DemoData.seedIfEmpty(applicationContext) }
-        val appearance = AppSettingsRepository(applicationContext).settings.map { it.appearance }
-        setContent {
-            // Initial null keeps the default theme for the first frame instead of flashing another one.
-            val current by appearance.collectAsState(initial = null)
-            val settings = current ?: AppearanceSettings()
-            val dark = when (settings.darkMode) {
-                DarkModePreference.SYSTEM -> isSystemInDarkTheme()
-                DarkModePreference.LIGHT -> false
-                DarkModePreference.DARK -> true
-            }
-            // System bar icons follow the app's own dark-mode choice, not only the system's.
-            DisposableEffect(dark) {
-                val style = if (dark) SystemBarStyle.dark(Color.TRANSPARENT)
-                else SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
-                enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
-                onDispose {}
-            }
-            ListenTheme(palette = settings.palette, darkMode = settings.darkMode) {
-                // The same SettingsViewModel ListenApp gets; a blank frame until it knows, rather than a flash of home.
-                val settingsModel: SettingsViewModel = viewModel()
-                val showSetup by settingsModel.showSetup.collectAsStateWithLifecycle()
-                when (showSetup) {
-                    null -> Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background))
-                    true -> SetupFlow(settingsModel)
-                    false -> ListenApp()
-                }
-            }
-        }
-        intent.getLongExtra(ListeningForegroundService.EXTRA_RECORD_ID, -1L).let(AppNavigationRequests::openRecord)
-    }
-
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        setIntent(intent)
-        intent.getLongExtra(ListeningForegroundService.EXTRA_RECORD_ID, -1L).let(AppNavigationRequests::openRecord)
-    }
 }

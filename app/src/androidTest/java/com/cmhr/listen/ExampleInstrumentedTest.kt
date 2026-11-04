@@ -19,6 +19,9 @@ class ExampleInstrumentedTest {
     fun useAppContext() {
         // Context of the app under test.
         val appContext = InstrumentationRegistry.getInstrumentation().targetContext
-        assertEquals("com.cmhr.listen", appContext.packageName)
+        assertEquals(BuildConfig.APPLICATION_ID, appContext.packageName)
+        assertTrue("设备验证只允许调试构建", BuildConfig.DEBUG)
+        assertEquals("com.cmhr.listen.debug", appContext.packageName)
+        assertNotEquals("不得对用户正式应用运行设备测试", "com.cmhr.listen", appContext.packageName)
     }
 }

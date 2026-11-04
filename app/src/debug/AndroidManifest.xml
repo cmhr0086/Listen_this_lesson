@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:name="com.cmhr.listen.tgui.ListenApplication">
+        <activity android:name="com.cmhr.listen.tgui.ListenHostActivity"
+            android:exported="true" android:launchMode="singleTop"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|uiMode|density"
+            android:windowSoftInputMode="adjustResize" android:theme="@style/Theme.TMessages" />
+    </application>
+</manifest>
