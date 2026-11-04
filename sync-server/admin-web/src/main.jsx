@@ -550,7 +550,7 @@ function Console() {
 }
 
 createRoot(document.getElementById('root')).render(
-  <ConfigProvider locale={zhCN} theme={{ token: { colorPrimary: '#00696b', borderRadius: 6, fontSize: 13 } }}>
+  <ConfigProvider locale={zhCN} button={{ autoInsertSpace: false }} theme={{ token: { colorPrimary: '#00696b', borderRadius: 6, fontSize: 13 } }}>
     <AntApp style={{ height: '100%' }}><Console /></AntApp>
   </ConfigProvider>
 )
