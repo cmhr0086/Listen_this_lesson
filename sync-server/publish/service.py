@@ -109,9 +109,21 @@ def set_uploader_status(db: Session, uploader_id: int, status: str) -> Uploader:
     return uploader
 
 
-def set_reader_upload(db: Session, reader: Reader, allowed: bool, display_name: str | None) -> Reader:
+def set_reader_upload(db: Session, reader: Reader, allowed: bool, display_name: str | None, uploader_id: int | None = None) -> Reader:
     """Publishing follows the account: its bound phones upload as this uploader, with no token to type."""
     uploader = db.get(Uploader, reader.uploaderId) if reader.uploaderId else None
+    if allowed and uploader_id is not None:
+        if uploader is not None and uploader.id != uploader_id:
+            raise ServiceError(409, "这个账号已经关联了别的上传者")
+        target = require(db.get(Uploader, uploader_id), "上传者不存在")
+        owner = db.scalar(select(Reader.id).where(Reader.uploaderId == target.id))
+        if owner is not None and owner != reader.id:
+            raise ServiceError(409, "这个上传者已经关联了别的账号")
+        reader.uploaderId = target.id
+        target.status = "active"
+        audit(db, "admin", "uploader.linked", f"uploader:{target.id}", str(reader.id))
+        db.commit()
+        return reader
     if not allowed:
         if uploader is None:
             raise ServiceError(409, "这个账号没有上传权限")

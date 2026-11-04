@@ -667,7 +667,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
             select(func.max(Revision.submittedAt)).join(Lesson, Lesson.id == Revision.lessonId)
             .where(Lesson.uploaderId == uploader.id)
         )
-        return {**uploader_dict(uploader), "courseNames": list(courses), "lastUploadAt": last}
+        return {
+            **uploader_dict(uploader), "courseNames": list(courses), "lastUploadAt": last,
+            "linked": db.scalar(select(Reader.id).where(Reader.uploaderId == uploader.id)) is not None,
+        }
 
     @admin.get("/uploaders")
     def admin_uploaders(db: Session = Depends(get_db)):
@@ -729,7 +732,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
     @admin.post("/readers/{reader_id}/upload-enable")
     def admin_reader_upload_enable(reader_id: int, body: ReaderUpload | None = None, db: Session = Depends(get_db)):
         reader = service.require(db.get(Reader, reader_id), "读者不存在")
-        return readers.admin_reader_dict(service.set_reader_upload(db, reader, True, body.displayName if body else None))
+        return readers.admin_reader_dict(service.set_reader_upload(db, reader, True, body.displayName if body else None, body.uploaderId if body else None))
 
     @admin.post("/readers/{reader_id}/upload-disable")
     def admin_reader_upload_disable(reader_id: int, db: Session = Depends(get_db)):

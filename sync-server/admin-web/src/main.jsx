@@ -62,11 +62,13 @@ function useLoad(loader, deps) {
 function ActionDialog({ action, close }) {
   const { message } = AntApp.useApp()
   const [text, setText] = useState(action.initial || '')
+  const [choice, setChoice] = useState(action.choices?.[0]?.value)
   const [busy, setBusy] = useState(false)
-  const blocked = (action.field && action.required && !text.trim()) || (action.typed && text !== '删除')
+  const showField = action.field && (!action.choices || choice === 'new')
+  const blocked = (showField && action.required && !text.trim()) || (action.typed && text !== '删除')
   const ok = () => {
     setBusy(true)
-    action.run(text.trim())
+    action.run(text.trim(), choice)
       .then(() => { message.success(action.done || `${action.title}完成`); close(true) })
       .catch((error) => { message.error(error.message); setBusy(false) })
   }
@@ -76,7 +78,8 @@ function ActionDialog({ action, close }) {
       <Space direction="vertical" size={12} style={{ width: '100%' }}>
         {action.target && <div><span style={muted}>对象</span> {action.target}</div>}
         {action.effect && <div style={muted}>{action.effect}</div>}
-        {action.field && <div><label htmlFor="action-field">{action.field}{action.required ? '（必填）' : ''}</label>
+        {action.choices && <div><label htmlFor="action-choice">{action.choiceLabel}</label><Select id="action-choice" style={{ width: '100%' }} value={choice} onChange={setChoice} options={action.choices} /></div>}
+        {showField && <div><label htmlFor="action-field">{action.field}{action.required ? '（必填）' : ''}</label>
           <Input.TextArea id="action-field" rows={action.rows || 3} maxLength={action.max || 1000} value={text} onChange={(e) => setText(e.target.value)} /></div>}
         {action.typed && <div><label htmlFor="action-typed">输入“删除”确认</label><Input id="action-typed" value={text} onChange={(e) => setText(e.target.value)} /></div>}
       </Space>
@@ -333,8 +336,14 @@ function Users({ refresh }) {
   const setUpload = (r, on) => {
     if (!on) return setAction({ title: '停用上传', ok: '停用', danger: true, target: name(r), effect: '这个账号的手机不能再上传，已公开的课堂不受影响。', done: '已停用', run: () => api('POST', `/readers/${r.readerId}/upload-disable`, {}) })
     if (r.uploaderName) return flip(`/readers/${r.readerId}/upload-enable`, '已开通上传')
-    setAction({ title: '开通上传', ok: '开通', target: name(r), field: '公开显示的名称', required: true, max: 50, rows: 1, effect: '这个名字会显示在课堂页上。对方用微信绑定手机后就能上传，不需要任何 Token。', done: '已开通',
-      run: (displayName) => api('POST', `/readers/${r.readerId}/upload-enable`, { displayName }) })
+    // An uploader that already published is offered first: a new one could not touch those lessons.
+    api('GET', '/uploaders').then(({ uploaders }) => {
+      const free = uploaders.filter((u) => !u.linked)
+      setAction({ title: '开通上传', ok: '开通', target: name(r), choiceLabel: '上传身份', field: '公开显示的名称', required: true, max: 50, rows: 1, done: '已开通',
+        effect: '对方用微信绑定手机后就能上传，不需要任何 Token。关联已有的上传者，它发布过的课堂都归这个账号。',
+        choices: [...free.map((u) => ({ value: u.id, label: `关联已有：${u.displayName}（${u.courseNames.length} 门课）` })), { value: 'new', label: '新建上传者' }],
+        run: (displayName, choice) => api('POST', `/readers/${r.readerId}/upload-enable`, choice === 'new' ? { displayName } : { uploaderId: choice }) })
+    }).catch((e) => message.error(e.message))
   }
   return (
     <Space direction="vertical" size={10} style={{ width: '100%' }}>

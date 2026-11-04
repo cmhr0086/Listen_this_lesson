@@ -1144,3 +1144,23 @@ def test_admin_page_revalidates_with_an_etag(client):
     first = client.get("/admin")
     assert first.status_code == 200 and first.headers["cache-control"] == "no-cache"
     assert client.get("/admin", headers={"If-None-Match": first.headers["etag"]}).status_code == 304
+
+
+def test_existing_uploader_can_be_tied_to_an_account_with_its_lessons(device_client):
+    token = new_uploader(device_client)
+    _token, result = published_course(device_client, token)
+    uploader = admin(device_client, "GET", "/uploaders")["uploaders"][0]
+    assert uploader["linked"] is False
+    login = sign_in(device_client, "owner")
+    reader_id = login["reader"]["readerId"]
+    row = admin(device_client, "POST", f"/readers/{reader_id}/upload-enable", json={"uploaderId": uploader["id"]})
+    assert row["canUpload"] is True and row["uploaderName"] == "小林"
+    assert admin(device_client, "GET", "/uploaders")["uploaders"][0]["linked"] is True
+    device = bind(device_client, auth(login["token"]))
+    # The same identity: its earlier lesson comes back as its own.
+    seen = device_client.get(f"/api/publish/v1/courses/{result['courseId']}/lessons", headers=device).json()
+    assert [l["lessonId"] for l in seen["lessons"]] == [result["lessonId"]]
+    # An uploader belongs to one account.
+    other = sign_in(device_client, "someone")["reader"]["readerId"]
+    response = device_client.post(f"/api/admin/v1/readers/{other}/upload-enable", headers=auth(ADMIN_TOKEN), json={"uploaderId": uploader["id"]})
+    assert response.status_code == 409

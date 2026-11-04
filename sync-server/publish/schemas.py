@@ -200,6 +200,8 @@ class ReaderRemark(StrictModel):
 
 class ReaderUpload(StrictModel):
     displayName: str | None = Field(default=None, max_length=50)
+    # Ties an uploader that already exists to this account, keeping the lessons it published.
+    uploaderId: int | None = None
 
     _name = field_validator("displayName")(_optional_text)
 
