@@ -1,11 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
-  Alert, App as AntApp, Avatar, Badge, Breadcrumb, Button, Card, Col, ConfigProvider, Descriptions, Drawer, Empty, Input, Layout, List,
+  Alert, App as AntApp, Avatar, Badge, Breadcrumb, Button, Card, Col, ConfigProvider, Descriptions, Drawer, Empty, Grid, Input, Layout, List,
   Menu, Modal, Popconfirm, Progress, Result, Row, Segmented, Select, Space, Spin, Statistic, Switch, Table, Tabs, Tag, Timeline, Upload
 } from 'antd'
 import {
-  AudioOutlined, BellOutlined, CloudSyncOutlined, DashboardOutlined, FileSearchOutlined, HddOutlined, MobileOutlined,
+  AudioOutlined, BellOutlined, CloudSyncOutlined, DashboardOutlined, FileSearchOutlined, HddOutlined, MenuOutlined, MobileOutlined,
   ReadOutlined, TeamOutlined, UploadOutlined, UserOutlined
 } from '@ant-design/icons'
 import zhCN from 'antd/locale/zh_CN'
@@ -202,6 +202,7 @@ function Queue({ refresh }) {
 }
 
 function Courses({ kind, refresh }) {
+  const wide = Grid.useBreakpoint().lg
   const { loading, data, reload } = useLoad(() => api('GET', `/courses?status=${kind}`), [kind])
   const [q, setQ] = useState('')
   const [term, setTerm] = useState('all')
@@ -215,7 +216,7 @@ function Courses({ kind, refresh }) {
   return (
     <Space direction="vertical" size={10} style={{ width: '100%' }}>
       <Space wrap>
-        <Input.Search id="course-search" allowClear placeholder="搜索课程或教师" style={{ width: 220 }} value={q} onChange={(e) => setQ(e.target.value)} />
+        <Input.Search id="course-search" allowClear placeholder="搜索课程或教师" style={{ width: 220, maxWidth: '100%' }} value={q} onChange={(e) => setQ(e.target.value)} />
         <Select id="course-term" style={{ width: 170 }} value={term} onChange={setTerm} options={[{ value: 'all', label: '全部学期' }, ...terms.map((t) => ({ value: t, label: t }))]} />
       </Space>
       {picked.length > 0 && <Alert type="info" message={<Space wrap>已选 {picked.length} 门
@@ -233,7 +234,7 @@ function Courses({ kind, refresh }) {
             { title: '上传者', dataIndex: 'requestedBy', width: 100 },
             { title: '最近上传', dataIndex: 'lastUploadAt', width: 110, sorter: (a, b) => (a.lastUploadAt || 0) - (b.lastUploadAt || 0), defaultSortOrder: 'descend', render: when },
             ...(kind === 'returned' ? [{ title: '打回原因', dataIndex: 'reviewNote', render: (v) => <span style={muted}>{v || '—'}</span> }] : []),
-            { title: '操作', width: 150, fixed: 'right', render: (_, c) => <Space size={6}>{ROW_OPS[kind].map(([label, key, danger, primary]) => <Button key={key} size="small" danger={danger} type={primary ? 'primary' : 'default'} onClick={() => askCourse(setAction, key, [c])}>{label}</Button>)}</Space> }
+            { title: '操作', width: 150, fixed: wide ? 'right' : undefined, render: (_, c) => <Space size={6}>{ROW_OPS[kind].map(([label, key, danger, primary]) => <Button key={key} size="small" danger={danger} type={primary ? 'primary' : 'default'} onClick={() => askCourse(setAction, key, [c])}>{label}</Button>)}</Space> }
           ]} />
       </Card>
       {action && <ActionDialog action={action} close={(changed) => { setAction(null); if (changed) { setPicked([]); reload(); refresh() } }} />}
@@ -311,7 +312,7 @@ function LessonDrawer({ lessonId, close }) {
   useEffect(() => { setLesson(null); if (lessonId) api('GET', `/lessons/${lessonId}`).then(setLesson).catch(() => close()) }, [lessonId]) // eslint-disable-line react-hooks/exhaustive-deps
   const clock = (ms) => { const d = new Date(ms); return `${pad(d.getHours())}:${pad(d.getMinutes())}` }
   return (
-    <Drawer open={!!lessonId} width={640} onClose={close} title={lesson ? lesson.title : '课堂'}>
+    <Drawer open={!!lessonId} width="min(640px, 100vw)" onClose={close} title={lesson ? lesson.title : '课堂'}>
       {!lesson ? <Spin /> : <Tabs items={[
         { key: 'text', label: `原文 ${lesson.segments.length}`, children: lesson.segments.map((s) => <p key={s.seq} style={{ margin: '0 0 8px' }}><span style={muted}>{clock(s.startTime)} </span>{s.displayText}</p>) },
         { key: 'notes', label: `笔记 ${lesson.notes.length}`, children: lesson.notes.length ? lesson.notes.map((n) => <div key={n.noteId} style={{ whiteSpace: 'pre-wrap', marginBottom: 16 }}><strong>{n.title}</strong>{'\n'}{n.content}</div>) : <Empty description="没有笔记" /> }
@@ -337,7 +338,7 @@ function Users({ refresh }) {
   }
   return (
     <Space direction="vertical" size={10} style={{ width: '100%' }}>
-      <Input.Search id="user-search" allowClear placeholder="搜索备注、公开名称或留言" style={{ width: 280 }} onChange={(e) => setQ(e.target.value)} />
+      <Input.Search id="user-search" allowClear placeholder="搜索备注、公开名称或留言" style={{ width: 280, maxWidth: '100%' }} onChange={(e) => setQ(e.target.value)} />
       <Card size="small" styles={{ body: { padding: 0 } }}>
         <Table size="small" rowKey="readerId" loading={loading} dataSource={rows} scroll={{ x: 980 }} pagination={{ pageSize: 30, hideOnSinglePage: true }} columns={[
           { title: '备注', render: (_, r) => <Space><a onClick={() => setAction({ title: '修改备注', ok: '保存', target: name(r), field: '备注', max: 20, rows: 1, initial: r.remark || '', effect: '只有管理员看得到。', done: '已保存', run: (remark) => api('POST', `/readers/${r.readerId}/remark`, { remark }) })}>{name(r)}</a>{r.readerId === me.data?.readerId && <Tag color="blue">你</Tag>}</Space> },
@@ -434,7 +435,7 @@ function Audit() {
     <Space direction="vertical" size={10} style={{ width: '100%' }}>
       <Space wrap>
         <Select id="audit-action" style={{ width: 170 }} value={action} onChange={setActionFilter} options={[{ value: '', label: '全部操作' }, ...Object.entries(AUDIT_ACTIONS).map(([value, label]) => ({ value, label }))]} />
-        <Input.Search id="audit-search" allowClear placeholder="搜索原因或说明" style={{ width: 240 }} onSearch={setQ} />
+        <Input.Search id="audit-search" allowClear placeholder="搜索原因或说明" style={{ width: 240, maxWidth: '100%' }} onSearch={setQ} />
       </Space>
       <Card size="small" styles={{ body: { padding: 0 } }}>
         <Table size="small" rowKey="id" loading={loading} dataSource={rows} pagination={false} scroll={{ x: 700 }} columns={[
@@ -496,6 +497,8 @@ const useHash = () => {
 }
 
 function Console() {
+  const wide = Grid.useBreakpoint().lg
+  const [menuOpen, setMenuOpen] = useState(false)
   const [signedIn, setSignedIn] = useState(!!deviceToken())
   const hash = useHash()
   const [summary, setSummary] = useState(null)
@@ -513,28 +516,33 @@ function Console() {
   const titles = { overview: '概览', queue: '待处理', users: '用户与权限', devices: '设备', storage: '同步与存储', audit: '操作日志' }
   const kindName = Object.fromEntries(COURSE_KINDS)[arg]
   const title = page === 'courses' ? `课程 / ${kindName}` : page === 'course' ? '课程详情' : titles[page] || '概览'
+  const brand = <div style={{ height: 56, display: 'flex', alignItems: 'center', padding: '0 20px', color: '#fff', fontSize: 16, fontWeight: 600 }}>听这节课后台</div>
+  const menu = (
+    <Menu theme="dark" mode="inline" selectedKeys={[selected]} defaultOpenKeys={['courses']} onClick={({ key }) => { go(key); setMenuOpen(false) }} items={[
+      { key: 'overview', icon: <DashboardOutlined />, label: '概览' },
+      { key: 'queue', icon: <BellOutlined />, label: <Space>待处理{pending > 0 && <Badge count={pending} size="small" />}</Space> },
+      { key: 'courses', icon: <ReadOutlined />, label: '课程', children: COURSE_KINDS.map(([kind, name]) => ({ key: `courses/${kind}`, label: `${name} ${counts[kind] || 0}` })) },
+      { key: 'users', icon: <TeamOutlined />, label: '用户与权限' },
+      { key: 'devices', icon: <MobileOutlined />, label: '设备' },
+      { key: 'storage', icon: <CloudSyncOutlined />, label: '同步与存储' },
+      { key: 'audit', icon: <FileSearchOutlined />, label: '操作日志' }
+    ]} />
+  )
   return (
     <Layout style={{ minHeight: '100%' }}>
-      <Sider breakpoint="lg" collapsedWidth={0} width={208}>
-        <div style={{ height: 56, display: 'flex', alignItems: 'center', padding: '0 20px', color: '#fff', fontSize: 16, fontWeight: 600 }}>听这节课后台</div>
-        <Menu theme="dark" mode="inline" selectedKeys={[selected]} defaultOpenKeys={['courses']} onClick={({ key }) => go(key)} items={[
-          { key: 'overview', icon: <DashboardOutlined />, label: '概览' },
-          { key: 'queue', icon: <BellOutlined />, label: <Space>待处理{pending > 0 && <Badge count={pending} size="small" />}</Space> },
-          { key: 'courses', icon: <ReadOutlined />, label: '课程', children: COURSE_KINDS.map(([kind, name]) => ({ key: `courses/${kind}`, label: `${name} ${counts[kind] || 0}` })) },
-          { key: 'users', icon: <TeamOutlined />, label: '用户与权限' },
-          { key: 'devices', icon: <MobileOutlined />, label: '设备' },
-          { key: 'storage', icon: <CloudSyncOutlined />, label: '同步与存储' },
-          { key: 'audit', icon: <FileSearchOutlined />, label: '操作日志' }
-        ]} />
-      </Sider>
+      {wide && <Sider width={208}>{brand}{menu}</Sider>}
+      {!wide && <Drawer placement="left" width={240} open={menuOpen} onClose={() => setMenuOpen(false)} closable={false} styles={{ body: { padding: 0, background: '#001529' } }}>{brand}{menu}</Drawer>}
       <Layout style={{ minWidth: 0 }}>
-        <Header style={{ background: '#fff', padding: '0 20px', height: 52, lineHeight: '52px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #dfe4e2' }}>
-          <strong style={{ fontSize: 16 }}>{title}</strong>
+        <Header style={{ background: '#fff', padding: wide ? '0 20px' : '0 8px 0 4px', height: 52, lineHeight: '52px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, borderBottom: '1px solid #dfe4e2' }}>
+          <Space size={4} style={{ minWidth: 0 }}>
+            {!wide && <Button type="text" aria-label="打开菜单" icon={<MenuOutlined />} style={{ width: 44, height: 44 }} onClick={() => setMenuOpen(true)} />}
+            <strong style={{ fontSize: 16, whiteSpace: 'nowrap' }}>{title}</strong>
+          </Space>
           <Popconfirm title="退出后台？" description="这个浏览器要重新用绑定码登录。" okText="退出" cancelText="取消" onConfirm={signOut}>
-            <Button type="text" size="small" icon={<Avatar size="small" icon={<UserOutlined />} />}>退出</Button>
+            <Button type="text" size="small" style={{ flex: 'none' }} icon={<Avatar size="small" icon={<UserOutlined />} />}>退出</Button>
           </Popconfirm>
         </Header>
-        <Content style={{ padding: '16px 20px', minWidth: 0 }}>
+        <Content style={{ padding: wide ? '16px 20px' : 12, minWidth: 0 }}>
           {page === 'queue' ? <Queue refresh={refresh} />
             : page === 'courses' && kindName ? <Courses key={arg} kind={arg} refresh={refresh} />
             : page === 'course' ? <CourseDetail key={arg} id={arg} refresh={refresh} />
