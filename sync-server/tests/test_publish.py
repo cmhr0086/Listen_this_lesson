@@ -509,7 +509,7 @@ def test_signed_in_reader_sees_transcripts_only_after_approval(client):
     assert len(client.get(lesson, headers=headers).json()["segments"]) == 2
     # Signing in again from another phone finds the same reader, still approved.
     again = sign_in(client)
-    assert again["reader"] == {**login["reader"], "transcriptAccess": "approved", "requestedAt": pending["requestedAt"]}
+    assert again["reader"] == {**login["reader"], "role": "transcript", "transcriptAccess": "approved", "requestedAt": pending["requestedAt"]}
     assert again["reader"]["isAdmin"] is False and again["reader"]["nickname"] is None
     assert len(client.get(lesson, headers=auth(again["token"])).json()["segments"]) == 2
 
