@@ -170,6 +170,9 @@ class CourseMaterial(Base):
     id: Mapped[str] = mapped_column(Text, primary_key=True)
     courseId: Mapped[str] = mapped_column(ForeignKey("courses.id"), nullable=False, index=True)
     title: Mapped[str] = mapped_column(Text, nullable=False)
+    # note | material; lessonId set when it belongs to one lesson rather than the whole course.
+    category: Mapped[str] = mapped_column(Text, nullable=False, default="material", server_default="material")
+    lessonId: Mapped[str | None] = mapped_column(Text)
     # Lower-case extension without the dot; decides how the mini program opens it.
     ext: Mapped[str] = mapped_column(Text, nullable=False)
     size: Mapped[int] = mapped_column(Integer, nullable=False)

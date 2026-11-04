@@ -13,6 +13,10 @@ ADDED_COLUMNS = {
         "reviewedAt": "INTEGER",
         "reviewNote": "TEXT",
     },
+    "course_materials": {
+        "category": "TEXT NOT NULL DEFAULT 'material'",
+        "lessonId": "TEXT",
+    },
     "readers": {
         "nickname": "TEXT",
         "avatar": "TEXT",
@@ -39,4 +43,9 @@ def initialize_database(engine: Engine) -> None:
                 )
         # 0.6.0 and earlier told rejected and taken-down courses apart; both are now just sent back.
         connection.exec_driver_sql("UPDATE courses SET status = 'returned' WHERE status IN ('rejected', 'taken_down')")
+        # One name per person: an uploader's public name is that account's name.
+        connection.exec_driver_sql(
+            "UPDATE readers SET remark = (SELECT displayName FROM uploaders WHERE uploaders.id = readers.uploaderId) "
+            "WHERE uploaderId IS NOT NULL AND (remark IS NULL OR remark = '')"
+        )
         connection.commit()

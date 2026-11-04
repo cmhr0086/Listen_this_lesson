@@ -198,6 +198,13 @@ class ReaderRemark(StrictModel):
         return value.strip()
 
 
+class ReaderRole(StrictModel):
+    role: Literal["reader", "transcript", "uploader", "admin"]
+    name: str | None = Field(default=None, max_length=20)
+
+    _name = field_validator("name")(_optional_text)
+
+
 class ReaderUpload(StrictModel):
     displayName: str | None = Field(default=None, max_length=50)
     # Ties an uploader that already exists to this account, keeping the lessons it published.

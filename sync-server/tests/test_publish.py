@@ -1164,3 +1164,76 @@ def test_existing_uploader_can_be_tied_to_an_account_with_its_lessons(device_cli
     other = sign_in(device_client, "someone")["reader"]["readerId"]
     response = device_client.post(f"/api/admin/v1/readers/{other}/upload-enable", headers=auth(ADMIN_TOKEN), json={"uploaderId": uploader["id"]})
     assert response.status_code == 409
+
+
+# ---- one name, one role -----------------------------------------------------------------------
+
+
+def set_role(client, reader_id, role, name=None):
+    return client.post(f"/api/admin/v1/readers/{reader_id}/role", headers=auth(ADMIN_TOKEN), json={"role": role, "name": name})
+
+
+@pytest.mark.parametrize("role,transcripts,upload,is_admin", [
+    ("reader", False, False, False),
+    ("transcript", True, False, False),
+    ("uploader", True, True, False),
+    ("admin", True, True, True),
+])
+def test_a_role_grants_everything_below_it(client, role, transcripts, upload, is_admin):
+    login = sign_in(client)
+    row = set_role(client, login["reader"]["readerId"], role, "小林").json()
+    assert row["role"] == role and row["displayName"] == "小林"
+    assert (row["transcriptAccess"] == "approved", row["canUpload"], row["isAdmin"]) == (transcripts, upload, is_admin)
+
+
+def test_uploader_and_admin_need_a_name_because_it_is_public(client):
+    reader_id = sign_in(client)["reader"]["readerId"]
+    for role in ("uploader", "admin"):
+        response = set_role(client, reader_id, role)
+        assert response.status_code == 422 and "名称" in response.json()["detail"]
+    assert set_role(client, reader_id, "transcript").status_code == 200
+
+
+def test_going_down_a_role_takes_the_rights_away(device_client):
+    login = sign_in(device_client)
+    reader_id = login["reader"]["readerId"]
+    set_role(device_client, reader_id, "uploader", "小林")
+    device = bind(device_client, auth(login["token"]))
+    assert device_client.get("/api/publish/v1/me", headers=device).status_code == 200
+    row = set_role(device_client, reader_id, "reader").json()
+    assert row["role"] == "reader" and row["transcriptAccess"] == "revoked"
+    assert device_client.get("/api/publish/v1/me", headers=device).status_code == 401
+    # Back up: the same uploader, so its lessons are still its own.
+    set_role(device_client, reader_id, "uploader")
+    assert len(admin(device_client, "GET", "/uploaders")["uploaders"]) == 1
+
+
+def test_one_name_is_also_the_public_uploader_name(client):
+    reader_id = sign_in(client)["reader"]["readerId"]
+    set_role(client, reader_id, "uploader", "小林")
+    set_role(client, reader_id, "uploader", "林同学")
+    assert admin(client, "GET", "/uploaders")["uploaders"][0]["displayName"] == "林同学"
+    admin(client, "POST", f"/readers/{reader_id}/remark", json={"remark": "老林"})
+    assert admin(client, "GET", "/uploaders")["uploaders"][0]["displayName"] == "老林"
+
+
+def test_admin_cannot_change_their_own_role(client):
+    login = sign_in(client)
+    reader_id = login["reader"]["readerId"]
+    set_role(client, reader_id, "admin", "我")
+    url = f"/api/admin/v1/readers/{reader_id}/role"
+    assert client.post(url, headers=auth(login["token"]), json={"role": "reader"}).status_code == 409
+    assert client.post(url, headers=auth(login["token"]), json={"role": "admin", "name": "新名字"}).json()["displayName"] == "新名字"
+
+
+def test_notes_and_materials_can_belong_to_one_lesson(client):
+    _token, result = published_course(client)
+    course, lesson = result["courseId"], result["lessonId"]
+    url = f"/api/admin/v1/courses/{course}/materials"
+    whole = client.post(url, params={"fileName": "复习.pdf", "category": "note"}, headers=auth(ADMIN_TOKEN), content=b"x").json()
+    assert (whole["category"], whole["lessonId"]) == ("note", None)
+    one = client.post(url, params={"fileName": "补充.pdf", "lessonId": lesson}, headers=auth(ADMIN_TOKEN), content=b"x").json()
+    assert (one["category"], one["lessonId"]) == ("material", lesson)
+    assert one["lessonTitle"] == "第一课 极限"
+    assert client.post(url, params={"fileName": "a.pdf", "lessonId": "nope"}, headers=auth(ADMIN_TOKEN), content=b"x").status_code == 404
+    assert client.post(url, params={"fileName": "a.pdf", "category": "x"}, headers=auth(ADMIN_TOKEN), content=b"x").status_code == 422

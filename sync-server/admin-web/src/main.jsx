@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
   Alert, App as AntApp, Avatar, Badge, Breadcrumb, Button, Card, Col, ConfigProvider, Descriptions, Drawer, Empty, Grid, Input, Layout, List,
-  Menu, Modal, Popconfirm, Progress, Result, Row, Segmented, Select, Space, Spin, Statistic, Switch, Table, Tabs, Tag, Timeline, Upload
+  Menu, Modal, Popconfirm, Progress, Radio, Result, Row, Segmented, Select, Space, Spin, Statistic, Switch, Table, Tabs, Tag, Timeline, Upload
 } from 'antd'
 import {
   AudioOutlined, BellOutlined, CloudSyncOutlined, DashboardOutlined, FileSearchOutlined, HddOutlined, MenuOutlined, MobileOutlined,
@@ -24,7 +24,7 @@ const AUDIT_ACTIONS = {
   'material.uploaded': '上传资料', 'material.moved': '移动资料', 'material.deleted': '删除资料',
   'uploader.create': '开通上传', 'uploader.linked': '关联上传者', 'uploader.rotate': '更换 Token', 'uploader.disabled': '停用上传', 'uploader.active': '启用上传',
   'reader.request_transcripts': '申请查看原文', 'reader.approve': '允许查看原文', 'reader.revoke': '收回原文权限',
-  'reader.make_admin': '设为管理员', 'reader.remove_admin': '取消管理员', 'reader.remark': '修改备注',
+  'reader.role': '修改角色', 'reader.make_admin': '设为管理员', 'reader.remove_admin': '取消管理员', 'reader.remark': '修改备注',
   'device.approve': '绑定设备', 'device.remove': '移除设备', 'config.update': '更新云端配置'
 }
 
@@ -63,13 +63,11 @@ function useLoad(loader, deps) {
 function ActionDialog({ action, close }) {
   const { message } = AntApp.useApp()
   const [text, setText] = useState(action.initial || '')
-  const [choice, setChoice] = useState(action.choices?.[0]?.value)
   const [busy, setBusy] = useState(false)
-  const showField = action.field && (!action.choices || choice === 'new')
-  const blocked = (showField && action.required && !text.trim()) || (action.typed && text !== '删除')
+  const blocked = (action.field && action.required && !text.trim()) || (action.typed && text !== '删除')
   const ok = () => {
     setBusy(true)
-    action.run(text.trim(), choice)
+    action.run(text.trim())
       .then(() => { message.success(action.done || `${action.title}完成`); close(true) })
       .catch((error) => { message.error(error.message); setBusy(false) })
   }
@@ -79,8 +77,7 @@ function ActionDialog({ action, close }) {
       <Space direction="vertical" size={12} style={{ width: '100%' }}>
         {action.target && <div><span style={muted}>对象</span> {action.target}</div>}
         {action.effect && <div style={muted}>{action.effect}</div>}
-        {action.choices && <div><label htmlFor="action-choice">{action.choiceLabel}</label><Select id="action-choice" style={{ width: '100%' }} value={choice} onChange={setChoice} options={action.choices} /></div>}
-        {showField && <div><label htmlFor="action-field">{action.field}{action.required ? '（必填）' : ''}</label>
+        {action.field && <div><label htmlFor="action-field">{action.field}{action.required ? '（必填）' : ''}</label>
           <Input.TextArea id="action-field" rows={action.rows || 3} maxLength={action.max || 1000} value={text} onChange={(e) => setText(e.target.value)} /></div>}
         {action.typed && <div><label htmlFor="action-typed">输入“删除”确认</label><Input id="action-typed" value={text} onChange={(e) => setText(e.target.value)} /></div>}
       </Space>
@@ -254,6 +251,8 @@ function CourseDetail({ id, refresh }) {
   const [action, setAction] = useState(null)
   const [preview, setPreview] = useState(null)
   const [uploading, setUploading] = useState(false)
+  const [category, setCategory] = useState('note')
+  const [scope, setScope] = useState('course')
   if (error) return <Result status="info" title="这门课不存在或已删除" extra={<Button href="#/courses/approved">回到课程列表</Button>} />
   if (!data) return <Spin spinning={loading} />
   const { course: c, lessons } = data
@@ -262,7 +261,9 @@ function CourseDetail({ id, refresh }) {
   const upload = async ({ file, onSuccess, onError }) => {
     setUploading(true)
     try {
-      await api('POST', `/courses/${id}/materials?fileName=${encodeURIComponent(file.name)}`, file, 'application/octet-stream')
+      const query = new URLSearchParams({ fileName: file.name, category })
+      if (scope !== 'course') query.set('lessonId', scope)
+      await api('POST', `/courses/${id}/materials?${query}`, file, 'application/octet-stream')
       message.success('已上传'); materials.reload(); onSuccess()
     } catch (e) { message.error(e.message); onError(e) } finally { setUploading(false) }
   }
@@ -292,11 +293,16 @@ function CourseDetail({ id, refresh }) {
               : <Button size="small" onClick={() => setAction({ title: '恢复课堂', ok: '恢复', target: l.title, effect: '课程公开时，读者会重新看到这一节。', done: '已恢复', run: () => api('POST', `/lessons/${l.lessonId}/restore`, {}) })}>恢复</Button> }
           ]} />
         ) },
-        { key: 'materials', label: `资料 ${materials.data?.materials?.length ?? 0}`, children: (
+        { key: 'materials', label: `笔记与资料 ${materials.data?.materials?.length ?? 0}`, children: (
           <Space direction="vertical" style={{ width: '100%' }}>
-            <Upload customRequest={upload} showUploadList={false} multiple><Button size="small" loading={uploading} icon={<UploadOutlined />}>上传资料</Button></Upload>
-            <Table size="small" rowKey="materialId" pagination={false} dataSource={materials.data?.materials || []} locale={{ emptyText: '还没有资料' }} columns={[
-              { title: '文件', dataIndex: 'fileName' }, { title: '大小', dataIndex: 'size', width: 100, align: 'right', render: bytes }, { title: '上传时间', dataIndex: 'createdAt', width: 110, render: when },
+            <Space wrap>
+              <Select id="material-scope" size="small" style={{ width: 200 }} value={scope} onChange={setScope} options={[{ value: 'course', label: '整门课' }, ...lessons.map((l) => ({ value: l.lessonId, label: l.title }))]} />
+              <Select id="material-category" size="small" style={{ width: 80 }} value={category} onChange={setCategory} options={[{ value: 'note', label: '笔记' }, { value: 'material', label: '资料' }]} />
+              <Upload customRequest={upload} showUploadList={false} multiple><Button size="small" type="primary" loading={uploading} icon={<UploadOutlined />}>选择文件上传</Button></Upload>
+            </Space>
+            <Table size="small" rowKey="materialId" pagination={false} dataSource={materials.data?.materials || []} scroll={{ x: 640 }} locale={{ emptyText: '还没有笔记或资料' }} columns={[
+              { title: '类型', dataIndex: 'category', width: 70, render: (v) => <Tag color={v === 'note' ? 'green' : 'blue'}>{v === 'note' ? '笔记' : '资料'}</Tag> },
+              { title: '文件', dataIndex: 'fileName' }, { title: '范围', dataIndex: 'lessonTitle', render: (v) => v || '整门课' }, { title: '大小', dataIndex: 'size', width: 100, align: 'right', render: bytes }, { title: '上传时间', dataIndex: 'createdAt', width: 110, render: when },
               { title: '操作', width: 70, render: (_, m) => <Popconfirm title="删除这份资料？" okText="删除" cancelText="取消" okButtonProps={{ danger: true }} onConfirm={() => api('DELETE', `/materials/${m.materialId}`).then(() => materials.reload()).catch((e) => message.error(e.message))}><Button size="small" danger>删除</Button></Popconfirm> }
             ]} />
           </Space>
@@ -325,46 +331,70 @@ function LessonDrawer({ lessonId, close }) {
   )
 }
 
+const ROLES = [
+  ['reader', '读者', 'default', '看公开的笔记和资料'],
+  ['transcript', '原文读者', 'blue', '读者的权限，再加上看课堂原文'],
+  ['uploader', '上传者', 'green', '原文读者的权限，再加上绑定手机、上传课堂和资料'],
+  ['admin', '管理员', 'cyan', '全部权限，包括审核课程、管理用户和进入后台']
+]
+
+function RoleDialog({ user, mine, close }) {
+  const { message } = AntApp.useApp()
+  const [name, setName] = useState(user.displayName || '')
+  const [role, setRole] = useState(user.role)
+  const [busy, setBusy] = useState(false)
+  const publishes = role === 'uploader' || role === 'admin'
+  const save = () => {
+    setBusy(true)
+    api('POST', `/readers/${user.readerId}/role`, { role, name: name.trim() || null })
+      .then(() => { message.success('已保存'); close(true) })
+      .catch((e) => { message.error(e.message); setBusy(false) })
+  }
+  return (
+    <Modal open title="修改用户" okText="保存" cancelText="取消" confirmLoading={busy} onCancel={() => close(false)} onOk={save} okButtonProps={{ disabled: publishes && !name.trim() }}>
+      <Space direction="vertical" size={14} style={{ width: '100%' }}>
+        <div><label htmlFor="user-name">名称</label>
+          <Input id="user-name" maxLength={20} value={name} onChange={(e) => setName(e.target.value)} />
+          <div style={{ ...muted, fontSize: 12, marginTop: 4 }}>{publishes ? '会公开显示在 Ta 上传的课堂上。' : '只有管理员看得到。'}</div></div>
+        {user.requestNote && <div><span style={muted}>申请留言</span> {user.requestNote}</div>}
+        <div><div style={{ marginBottom: 6 }}>角色</div>
+          <Radio.Group value={role} onChange={(e) => setRole(e.target.value)} style={{ width: '100%' }} disabled={mine}>
+            <Space direction="vertical" style={{ width: '100%' }}>
+              {ROLES.map(([id, label, , can]) => <Radio key={id} value={id}><strong style={{ fontWeight: 500 }}>{label}</strong><div style={muted}>{can}</div></Radio>)}
+            </Space>
+          </Radio.Group>
+          {mine && <div style={{ ...muted, fontSize: 12, marginTop: 6 }}>不能修改自己的角色。</div>}</div>
+      </Space>
+    </Modal>
+  )
+}
+
 function Users({ refresh }) {
   const { loading, data, reload } = useLoad(() => api('GET', '/readers'), [])
   const me = useLoad(() => api('GET', '/whoami'), [])
   const [q, setQ] = useState('')
-  const [action, setAction] = useState(null)
-  const { message } = AntApp.useApp()
-  const rows = (data?.readers || []).filter((r) => !q || `${r.displayName || ''}${r.requestNote || ''}${r.uploaderName || ''}`.includes(q))
-  const name = (r) => r.displayName || '未命名'
-  const flip = (path, text) => api('POST', path, {}).then(() => { message.success(text); reload(); refresh() }).catch((e) => message.error(e.message))
-  const setUpload = (r, on) => {
-    if (!on) return setAction({ title: '停用上传', ok: '停用', danger: true, target: name(r), effect: '这个账号的手机不能再上传，已公开的课堂不受影响。', done: '已停用', run: () => api('POST', `/readers/${r.readerId}/upload-disable`, {}) })
-    if (r.uploaderName) return flip(`/readers/${r.readerId}/upload-enable`, '已开通上传')
-    // An uploader that already published is offered first: a new one could not touch those lessons.
-    api('GET', '/uploaders').then(({ uploaders }) => {
-      const free = uploaders.filter((u) => !u.linked)
-      setAction({ title: '开通上传', ok: '开通', target: name(r), choiceLabel: '上传身份', field: '公开显示的名称', required: true, max: 50, rows: 1, done: '已开通',
-        effect: '对方用微信绑定手机后就能上传，不需要任何 Token。关联已有的上传者，它发布过的课堂都归这个账号。',
-        choices: [...free.map((u) => ({ value: u.id, label: `关联已有：${u.displayName}（${u.courseNames.length} 门课）` })), { value: 'new', label: '新建上传者' }],
-        run: (displayName, choice) => api('POST', `/readers/${r.readerId}/upload-enable`, choice === 'new' ? { displayName } : { uploaderId: choice }) })
-    }).catch((e) => message.error(e.message))
-  }
+  const [filter, setFilter] = useState('all')
+  const [editing, setEditing] = useState(null)
+  const all = data?.readers || []
+  const rows = all.filter((r) => (filter === 'all' || r.role === filter) && (!q || `${r.displayName || ''}${r.requestNote || ''}`.includes(q)))
+  const count = (id) => all.filter((r) => r.role === id).length
   return (
     <Space direction="vertical" size={10} style={{ width: '100%' }}>
-      <Input.Search id="user-search" allowClear placeholder="搜索备注、公开名称或留言" style={{ width: 280, maxWidth: '100%' }} onChange={(e) => setQ(e.target.value)} />
+      <Space wrap>
+        <Segmented value={filter} onChange={setFilter} options={[{ value: 'all', label: `全部 ${all.length}` }, ...ROLES.map(([id, label]) => ({ value: id, label: `${label} ${count(id)}` }))]} />
+        <Input.Search id="user-search" allowClear placeholder="搜索名称或留言" style={{ width: 220, maxWidth: '100%' }} onChange={(e) => setQ(e.target.value)} />
+      </Space>
       <Card size="small" styles={{ body: { padding: 0 } }}>
-        <Table size="small" rowKey="readerId" loading={loading} dataSource={rows} scroll={{ x: 980 }} pagination={{ pageSize: 30, hideOnSinglePage: true }} columns={[
-          { title: '备注', render: (_, r) => <Space><a onClick={() => setAction({ title: '修改备注', ok: '保存', target: name(r), field: '备注', max: 20, rows: 1, initial: r.remark || '', effect: '只有管理员看得到。', done: '已保存', run: (remark) => api('POST', `/readers/${r.readerId}/remark`, { remark }) })}>{name(r)}</a>{r.readerId === me.data?.readerId && <Tag color="blue">你</Tag>}</Space> },
+        <Table size="small" rowKey="readerId" loading={loading} dataSource={rows} scroll={{ x: 760 }} pagination={{ pageSize: 30, hideOnSinglePage: true }} columns={[
+          { title: '名称', render: (_, r) => <Space>{r.displayName || '未命名'}{r.readerId === me.data?.readerId && <Tag color="blue">你</Tag>}</Space> },
+          { title: '角色', width: 170, render: (_, r) => { const x = ROLES.find((o) => o[0] === r.role); return <Space size={4}><Tag color={x[2]}>{x[1]}</Tag>{r.transcriptAccess === 'pending' && <Tag color="gold">申请原文</Tag>}</Space> } },
           { title: '微信账号', dataIndex: 'openidHint', width: 110, render: (v) => <span style={muted}>{v}</span> },
           { title: '申请留言', dataIndex: 'requestNote', render: (v) => <span style={muted}>{v || '—'}</span> },
-          { title: '原文', dataIndex: 'transcriptAccess', width: 90, render: (v) => <Tag color={ACCESS[v][1]}>{ACCESS[v][0]}</Tag> },
-          { title: '查看原文', width: 80, render: (_, r) => <Switch size="small" aria-label="查看原文" checked={r.transcriptAccess === 'approved'} onChange={(on) => flip(`/readers/${r.readerId}/${on ? 'approve' : 'revoke'}`, on ? '已允许' : '已收回')} /> },
-          { title: '可上传', width: 70, render: (_, r) => <Switch size="small" aria-label="可上传" checked={r.canUpload} onChange={(on) => setUpload(r, on)} /> },
-          { title: '公开名称', dataIndex: 'uploaderName', width: 110, render: (v) => v || <span style={muted}>—</span> },
-          { title: '管理员', width: 70, render: (_, r) => <Switch size="small" aria-label="管理员" checked={r.isAdmin} disabled={r.readerId === me.data?.readerId}
-            onChange={(on) => on ? setAction({ title: '设为管理员', ok: '设为管理员', target: name(r), effect: '这个账号可以管理全部内容，绑定设备后还能拿到云同步 Token。', done: '已设置', run: () => api('POST', `/readers/${r.readerId}/make-admin`, {}) })
-              : setAction({ title: '取消管理员', ok: '取消', danger: true, target: name(r), done: '已取消', run: () => api('POST', `/readers/${r.readerId}/remove-admin`, {}) })} /> },
-          { title: '最近登录', dataIndex: 'lastSeenAt', width: 110, render: when }
+          { title: '最近登录', dataIndex: 'lastSeenAt', width: 110, render: when },
+          { title: '操作', width: 70, render: (_, r) => <Button size="small" onClick={() => setEditing(r)}>修改</Button> }
         ]} />
       </Card>
-      {action && <ActionDialog action={action} close={(changed) => { setAction(null); if (changed) { reload(); refresh() } }} />}
+      {editing && <RoleDialog user={editing} mine={editing.readerId === me.data?.readerId} close={(changed) => { setEditing(null); if (changed) { reload(); refresh() } }} />}
     </Space>
   )
 }
@@ -523,7 +553,7 @@ function Console() {
   const counts = summary?.courses || {}
   const pending = (summary?.pendingCourses || 0) + (summary?.pendingReaders || 0) + (summary?.withdrawRequests || 0)
   const selected = page === 'course' ? 'courses/approved' : hash
-  const titles = { overview: '概览', queue: '待处理', users: '用户与权限', devices: '设备', storage: '同步与存储', audit: '操作日志' }
+  const titles = { overview: '概览', queue: '待处理', users: '用户与角色', devices: '设备', storage: '同步与存储', audit: '操作日志' }
   const kindName = Object.fromEntries(COURSE_KINDS)[arg]
   const title = page === 'courses' ? `课程 / ${kindName}` : page === 'course' ? '课程详情' : titles[page] || '概览'
   const brand = <div style={{ height: 56, display: 'flex', alignItems: 'center', padding: '0 20px', color: '#fff', fontSize: 16, fontWeight: 600 }}>听这节课后台</div>
@@ -532,7 +562,7 @@ function Console() {
       { key: 'overview', icon: <DashboardOutlined />, label: '概览' },
       { key: 'queue', icon: <BellOutlined />, label: <Space>待处理{pending > 0 && <Badge count={pending} size="small" />}</Space> },
       { key: 'courses', icon: <ReadOutlined />, label: '课程', children: COURSE_KINDS.map(([kind, name]) => ({ key: `courses/${kind}`, label: `${name} ${counts[kind] || 0}` })) },
-      { key: 'users', icon: <TeamOutlined />, label: '用户与权限' },
+      { key: 'users', icon: <TeamOutlined />, label: '用户与角色' },
       { key: 'devices', icon: <MobileOutlined />, label: '设备' },
       { key: 'storage', icon: <CloudSyncOutlined />, label: '同步与存储' },
       { key: 'audit', icon: <FileSearchOutlined />, label: '操作日志' }

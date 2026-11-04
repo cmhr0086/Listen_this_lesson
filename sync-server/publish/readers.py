@@ -107,9 +107,20 @@ def reader_uploader(reader: Reader) -> Uploader | None:
     return object_session(reader).get(Uploader, reader.uploaderId) if reader.uploaderId else None
 
 
+def role_of(reader: Reader) -> str:
+    """Each role includes the one before it, so permissions can never contradict each other."""
+    uploader = reader_uploader(reader)
+    if reader.isAdmin:
+        return "admin"
+    if uploader is not None and uploader.status == "active":
+        return "uploader"
+    return "transcript" if reader.transcriptAccess == "approved" else "reader"
+
+
 def reader_dict(reader: Reader) -> dict:
     uploader = reader_uploader(reader)
     return {
+        "role": role_of(reader),
         "canUpload": uploader is not None and uploader.status == "active",
         "readerId": reader.id,
         "nickname": reader.nickname,
@@ -122,18 +133,22 @@ def reader_dict(reader: Reader) -> dict:
 
 def set_remark(db: Session, reader: Reader, remark: str) -> Reader:
     reader.remark = remark or None
+    uploader = reader_uploader(reader)
+    if uploader is not None and remark:
+        uploader.displayName = remark
     audit(db, "admin", "reader.remark", str(reader.id), remark or None)
     db.commit()
     return reader
 
 
 def admin_reader_dict(reader: Reader) -> dict:
+    uploader = reader_uploader(reader)
     return {
         **reader_dict(reader),
         "remark": reader.remark,
-        "uploaderName": uploader.displayName if (uploader := reader_uploader(reader)) else None,
+        "uploaderName": uploader.displayName if uploader else None,
         # None until the admin names them; the pages say so rather than inventing a number.
-        "displayName": reader.remark or reader.nickname,
+        "displayName": reader.remark or (uploader.displayName if uploader else None) or reader.nickname,
         # Enough to tell people apart in the admin list without showing the whole openid.
         "openidHint": reader.openid[:4] + "…" + reader.openid[-4:],
         "requestNote": reader.requestNote,

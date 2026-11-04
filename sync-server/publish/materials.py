@@ -6,9 +6,9 @@ from pathlib import Path
 from uuid import uuid4
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
-from .models import Course, CourseMaterial
+from .models import Course, CourseMaterial, Lesson, Revision
 from .service import ServiceError, audit, now_ms, require
 
 # Course materials are uploaded by the admin only. Readers get the list and the file of an
@@ -74,8 +74,18 @@ def clean_title(title: str) -> str:
     return title[:MAX_TITLE_CHARS]
 
 
+def _lesson_title(material: CourseMaterial) -> str | None:
+    db = object_session(material)
+    lesson = db.get(Lesson, material.lessonId) if material.lessonId and db else None
+    revision = db.get(Revision, lesson.publishedRevisionId) if lesson and lesson.publishedRevisionId else None
+    return revision.title if revision else None
+
+
 def material_dict(material: CourseMaterial) -> dict:
     return {
+        "category": material.category,
+        "lessonId": material.lessonId,
+        "lessonTitle": _lesson_title(material),
         "materialId": material.id,
         "courseId": material.courseId,
         "title": material.title,
@@ -112,8 +122,15 @@ def next_position(db: Session, course_id: str) -> int:
     return (db.scalar(select(func.max(CourseMaterial.position)).where(CourseMaterial.courseId == course_id)) or 0) + 1
 
 
-def upload(db: Session, course_id: str, file_name: str, body: bytes, title: str | None = None) -> CourseMaterial:
+def upload(
+    db: Session, course_id: str, file_name: str, body: bytes, title: str | None = None,
+    category: str = "material", lesson_id: str | None = None,
+) -> CourseMaterial:
     course = require(db.get(Course, course_id), "课程不存在")
+    if lesson_id:
+        lesson = db.get(Lesson, lesson_id)
+        if lesson is None or lesson.courseId != course.id:
+            raise ServiceError(404, "这门课没有这节课堂")
     stem, ext = split_name(file_name)
     if not body:
         raise ServiceError(400, "文件是空的")
@@ -123,6 +140,8 @@ def upload(db: Session, course_id: str, file_name: str, body: bytes, title: str 
     material = CourseMaterial(
         id=uuid4().hex,
         courseId=course.id,
+        category=category,
+        lessonId=lesson_id or None,
         title=clean_title(title) if title else stem,
         ext=ext,
         size=len(body),
@@ -154,6 +173,8 @@ def update(db: Session, material_id: str, title: str | None, course_id: str | No
         course = require(db.get(Course, course_id), "课程不存在")
         audit(db, "admin", "material.moved", f"material:{material.id}", f"course:{material.courseId} → course:{course.id}")
         material.courseId = course.id
+        # A lesson belongs to one course, so the file now belongs to the new course as a whole.
+        material.lessonId = None
         material.position = next_position(db, course.id)
     material.updatedAt = now_ms()
     db.commit()
