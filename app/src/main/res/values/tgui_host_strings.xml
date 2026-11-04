@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="AccDescrGoBack">返回</string>
+    <string name="Back">返回</string>
+    <string name="Cancel">取消</string>
+    <string name="OK">确定</string>
+    <string name="Delete">删除</string>
+    <string name="Done">完成</string>
+    <string name="Search">搜索</string>
+    <string name="Stop">停止</string>
+    <string name="ClearButton">清空</string>
+    <string name="Copy">复制</string>
+    <string name="SelectAll">全选</string>
+</resources>

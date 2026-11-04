@@ -131,10 +131,6 @@ class ListeningForegroundService : Service() {
             putExtra(EXTRA_RECORD_ID, recordId)
         }
         val stopIntent = Intent(this, ListeningForegroundService::class.java).apply { action = ACTION_STOP }
-        val markIntent = Intent(this, ListeningForegroundService::class.java).apply {
-            action = ACTION_MARK
-            putExtra(EXTRA_RECORD_ID, recordId)
-        }
         val whenWallClock = System.currentTimeMillis() - (SystemClock.elapsedRealtime() - startedElapsed).coerceAtLeast(0L)
         val status = if (recordOnly) "仅录音 · 意外退出也会保留" else if (recognizing) "正在识别" else if (queueCount > 0) "等待识别（$queueCount）" else "等待语音"
         return NotificationCompat.Builder(this, CHANNEL_ID)
@@ -142,7 +138,6 @@ class ListeningForegroundService : Service() {
             .setContentTitle(courseName.ifBlank { "课堂录制中" })
             .setContentText("${recordName.ifBlank { "课堂记录" }} · $status")
             .setContentIntent(PendingIntent.getActivity(this, 10, openIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
-            .addAction(0, "标记重点", PendingIntent.getService(this, 12, markIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
             .addAction(0, "结束", PendingIntent.getService(this, 11, stopIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
             .setWhen(whenWallClock)
             .setUsesChronometer(true)

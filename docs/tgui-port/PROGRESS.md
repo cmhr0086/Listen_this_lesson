@@ -19,7 +19,7 @@
 
 1. 完成功能/路由清点，见 PARITY.md。
 2. 接入 ui5、本地 Maven、debug 宿主；并行实现设置、AI、搜索/发布与核心课堂页面。
-3. 尚未切换 launcher、尚未删除旧 UI 或旧测试、尚未完成设备验收。
+3. 尚未切换 launcher、尚未删除旧 UI；旧测试正逐项迁移、尚未完成设备验收。
 
 ## 第一个可构建检查点
 
@@ -36,3 +36,17 @@
 ## 继续位置
 
 先检查正在运行的 Gradle 会话与日志，不重复启动同一构建。整合新页面后依次执行 assembleDebug/testDebugUnitTest，提交、推送、开 draft PR。截图和 connected 测试仍需实际运行。
+
+## 第二轮原生覆盖与设备回归（进行中）
+
+- Listen 首个检查点 ca2fac9 已推送，草稿 PR：https://github.com/cmhr0086/Listen_this_lesson/pull/5。
+- `:app:assembleDebug :app:testDebugUnitTest :app:assembleDebugAndroidTest` 全部通过（13 秒，日志 listen-native-stage2b.log）；设备测试 APK 已成功安装到 MuMu。
+- 补齐建议课程、课程颜色、录音安全保存时长/全局队列、原文分组选择/计数/AI操作/TXT导出、删除倒计时、AI时间线拖动多选。
+- 第一批设备回归：笔记成功/失败/重试、相机 URI/取消清理、AI时间线拖动多选、附件菜单不唤起键盘通过。设置 12 项因测试替身用了 HTTP AI 地址被原有 HTTPS 校验拒绝；已修测试地址，未放宽生产校验，待重跑。
+- 流式聊天测试在发送后的 Espresso 全局 idle 等待超时，测试清理也未返回；已主动终止 debug 测试进程，不能算通过。改为有界的实际 UI 手势和针对渲染状态的等待后重跑。其余发布/搜索测试另批执行。
+- FollowLatestTest 已迁移为真实 Room + 原生列表的三项完整回归；正在验证。原 UI 测试逐项映射见 UI_TEST_PARITY.md。
+- 当前 launcher 仍是旧界面；全量测试、截图和切换未完成。
+
+- 第二批核心设备回归 47 项中 36 通过、11 失败。原文跟随 3 项、录音/暂停继续/队列/ASR 诊断已有真实通过记录。失败集中于设置 enabled diff、向导滚动、对话框根/点击时序及 Markwon 表格 ReplacementSpan 断言；均已定位并修正，待重跑，尚不称全通过。
+- 第二批 AI/发布 11 项中 7 通过、4 失败。流式完整输出、仅气泡刷新和阅读锚点断言通过，复制后的第二次菜单定位仍失败；发布编辑和删除确认定位待修。两个 PDF 本地契约测试、搜索和资料课堂范围测试通过。
+- 纯展示 helper 提取后 assembleDebug/testDebugUnitTest/assembleDebugAndroidTest 通过（19 秒）；核心检查点再跑 assembleDebug/testDebugUnitTest 通过（5 秒）。

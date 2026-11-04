@@ -433,7 +433,7 @@ class SetupFragment : SettingsFragment("setup") {
     }
     override fun onBindingChanged(binding: BindingState) {
         if (binding is BindingState.Done) {
-            if (binding.hasStt) finishSetup() else { step = 1; renderSettings() }
+            if (binding.hasStt) finishSetup() else moveToStep(1)
         }
     }
     override fun renderSettings() {
@@ -443,18 +443,18 @@ class SetupFragment : SettingsFragment("setup") {
             when (step) {
                 0 -> {
                     addAll(deviceRows(s))
-                    add(ListenRow.action("手动配置") { model.cancelBinding(); initialized = true; step = 1; renderSettings() })
+                    add(ListenRow.action("手动配置") { model.cancelBinding(); initialized = true; moveToStep(1) })
                 }
                 1, 2 -> {
                     addAll(if (step == 1) sttRows(s) else aiRows(s))
                     add(ListenRow.shadow())
-                    add(ListenRow.action("跳过") { step++; renderSettings() })
+                    add(ListenRow.action("跳过") { moveToStep(step + 1) })
                     val configured = if (step == 1) s.server.hasApiKey else s.ai.hasApiKey
                     val check = if (step == 1) s.sttCheck else s.aiCheck
                     add(ListenRow.action(if (check is ServiceCheck.Testing) "正在测试…" else "下一步") {
                         if (!configured) message("请先完成配置，或选择跳过")
-                        else if (check is ServiceCheck.Failed) confirm("连接测试没通过", check.message) { step++; renderSettings() }
-                        else if (check !is ServiceCheck.Testing) { step++; renderSettings() }
+                        else if (check is ServiceCheck.Failed) confirm("连接测试没通过", check.message) { moveToStep(step + 1) }
+                        else if (check !is ServiceCheck.Testing) moveToStep(step + 1)
                     })
                 }
                 else -> {
@@ -465,14 +465,19 @@ class SetupFragment : SettingsFragment("setup") {
                     add(ListenRow.action("开始使用") { finishSetup() })
                 }
             }
-            if (step > 0) add(ListenRow.action("上一步") { step--; renderSettings() })
+            if (step > 0) add(ListenRow.action("上一步") { moveToStep(step - 1) })
         })
     }
     override fun onBackPressed(): Boolean {
-        if (step > 0) { step--; renderSettings(); return false }
+        if (step > 0) { moveToStep(step - 1); return false }
         return super.onBackPressed()
     }
     private fun finishSetup() { scope.launch { model.finishSetup().join(); finishFragment() } }
+    private fun moveToStep(next: Int) {
+        step = next.coerceIn(0, 3)
+        renderSettings()
+        if (fragmentView != null) list.scrollToPosition(0)
+    }
 }
 
 private fun settingsTitle(route: String): String = when {

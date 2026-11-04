@@ -38,7 +38,8 @@ data class ListenRow(
     val kind: Int, val title: String = "", val value: String = "", val id: Long = 0,
     val time: String = "", val checked: Boolean = false,
     val onClick: (() -> Unit)? = null, val onLongClick: (() -> Unit)? = null,
-    val highlightedWords: List<String> = emptyList()
+    val highlightedWords: List<String> = emptyList(),
+    val avatarColorIndex: Int? = null
 ) {
     companion object {
         fun header(title: String) = ListenRow(0, title)
@@ -48,7 +49,7 @@ data class ListenRow(
         fun dialog(id: Long, title: String, value: String, time: String = "", onClick: () -> Unit, onLongClick: (() -> Unit)? = null, highlightedWords: List<String> = emptyList()) =
             ListenRow(5, title, value, id, time, onClick = onClick, onLongClick = onLongClick, highlightedWords = highlightedWords)
     }
-    internal fun sameContents(other: ListenRow) = kind == other.kind && title == other.title && value == other.value && time == other.time && checked == other.checked && highlightedWords == other.highlightedWords
+    internal fun sameContents(other: ListenRow) = kind == other.kind && title == other.title && value == other.value && time == other.time && checked == other.checked && highlightedWords == other.highlightedWords && avatarColorIndex == other.avatarColorIndex && (onClick != null) == (other.onClick != null)
 }
 
 /** Collect once per fragment; view reconstruction never duplicates observers. */
@@ -169,10 +170,15 @@ open class ListenListFragment(private val pageTitle: String) : BaseFragment() {
                     view.textView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText))
                     view.valueTextView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText2))
                 }
-                is TextCheckCell -> { view.setTextAndCheck(row.title, row.checked, position < rows.lastIndex) }
+                is TextCheckCell -> {
+                    view.setTextAndCheck(row.title, row.checked, position < rows.lastIndex)
+                    view.setColors(Theme.key_windowBackgroundWhiteBlackText, Theme.key_switchTrack, Theme.key_switchTrackChecked,
+                        Theme.key_windowBackgroundWhite, Theme.key_windowBackgroundWhite)
+                }
                 is DialogCell -> {
                     view.setDialog(DialogItem(row.id, row.title, row.value, row.time).apply {
                         highlightedWords = ArrayList(row.highlightedWords)
+                        row.avatarColorIndex?.let { avatar = nativeCourseAvatar(row.id, row.title, it) }
                     }, false)
                     view.setChecked(row.checked, false)
                 }

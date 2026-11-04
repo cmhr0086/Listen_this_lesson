@@ -8,6 +8,7 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import android.view.View
 import android.view.ViewGroup
+import android.view.MotionEvent
 import android.widget.ImageView
 import android.widget.ScrollView
 import android.widget.TextView
@@ -63,6 +64,8 @@ open class AiListFragment(private val recordId: Long? = null) : ListenListFragme
     private var filter = 0
     private var selected = emptySet<AiContentKey>()
     private var selecting = false
+    private var draggingSelection = false
+    private var deferredItems: List<AiContentItem>? = null
 
     override fun createView(context: Context): View = super.createView(context).also {
         actionBar.setActionBarMenuOnItemClick(object : ActionBar.ActionBarMenuOnItemClick() {
@@ -71,6 +74,20 @@ open class AiListFragment(private val recordId: Long? = null) : ListenListFragme
                 else menuClick(id)
             }
         })
+        list.setOnItemLongClickListener(RecyclerListView.OnItemLongClickListener { _, position ->
+            val key = contentKeyAt(position)
+            if (key == null) false else { startDragSelection(position, key); true }
+        })
+        list.setOnTouchListener { _, event ->
+            if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) {
+                // The list must receive UP first so its own drag/autoscroll cleanup runs.
+                list.post {
+                    draggingSelection = false
+                    deferredItems?.let { items = it; deferredItems = null; render() }
+                }
+            }
+            false
+        }
         updateSelectionBar()
     }
 
@@ -79,6 +96,7 @@ open class AiListFragment(private val recordId: Long? = null) : ListenListFragme
         actionBar.createMenu().addItem(11, TR.drawable.msg_select).contentDescription = "选择 AI 内容"
         val mode = actionBar.createActionMode()
         mode.clearItems()
+        mode.addItem(16, "0").contentDescription = "已选择 0 项"
         mode.addItem(12, "全选")
         mode.addItem(13, "导出")
         mode.addItem(14, TR.drawable.msg_delete).contentDescription = "删除所选"
@@ -99,12 +117,45 @@ open class AiListFragment(private val recordId: Long? = null) : ListenListFragme
     private fun visibleItems() = items.filter { filter == 0 || (filter == 1 && it.recordId != null) || (filter == 2 && it.recordId == null) }
     private fun updateSelectionBar() {
         if (fragmentView == null) return
+        actionBar.createActionMode().getItem(16)?.let { count ->
+            count.textView?.text = selected.size.toString()
+            count.contentDescription = "已选择 ${selected.size} 项"
+        }
         if (selecting) actionBar.showActionMode() else actionBar.hideActionMode()
+    }
+
+    private fun contentKeyAt(position: Int): AiContentKey? = rows.getOrNull(position)?.takeIf { it.kind == 5 }?.let { row ->
+        AiContentKey(if (row.id % 2L == 1L) AiContentKind.RESULT else AiContentKind.CONVERSATION, row.id / 2)
+    }
+
+    /** Uses the library's long-press range selection and edge autoscroll, including reverse drag. */
+    private fun startDragSelection(position: Int, first: AiContentKey) {
+        val initial = host.ai.uiState.value.selectedContentKeys.takeIf {
+            host.ai.uiState.value.contentSelectionScope == AiContentSelectionScope(recordId)
+        }.orEmpty()
+        val adding = first !in initial
+        // Freeze the content order for the gesture; streamed history may otherwise reorder rows.
+        draggingSelection = true
+        host.ai.toggleContentSelection(recordId, first)
+        list.startMultiselect(position, false, object : RecyclerListView.onMultiSelectionChanged {
+            override fun onSelectionChanged(position: Int, selected: Boolean, x: Float, y: Float) {
+                val key = contentKeyAt(position) ?: return
+                val desired = if (adding) selected else !selected
+                if ((key in host.ai.uiState.value.selectedContentKeys) != desired) host.ai.toggleContentSelection(recordId, key)
+            }
+            override fun canSelect(position: Int): Boolean = contentKeyAt(position)?.let { if (adding) it !in initial else it in initial } ?: false
+            override fun checkPosition(position: Int, selectionFromTop: Boolean) = position
+            override fun limitReached() = false
+            override fun getPaddings(paddings: IntArray) { paddings[0] = list.paddingTop; paddings[1] = list.paddingBottom }
+            override fun scrollBy(dy: Int) { list.scrollBy(0, dy) }
+        })
     }
 
     override fun onReady() {
         scope.launch {
-            (recordId?.let(host.ai::contents) ?: host.ai.globalContents()).collect { items = it; render() }
+            (recordId?.let(host.ai::contents) ?: host.ai.globalContents()).collect {
+                if (draggingSelection) deferredItems = it else { items = it; render() }
+            }
         }
         scope.launch {
             host.ai.uiState.collect {
@@ -126,9 +177,6 @@ open class AiListFragment(private val recordId: Long? = null) : ListenListFragme
             if (recordId == null) add(ListenRow.action("筛选", listOf("全部", "课堂", "自由提问")[filter]) {
                 choices("筛选", listOf("全部", "课堂", "自由提问")) { filter = it; render() }
             })
-            if (selecting) {
-                add(ListenRow.header("已选择 ${selected.size} 项"))
-            }
             if (visible.isEmpty()) add(ListenRow.header("暂无 AI 记录"))
             var previousDay = ""
             visible.forEach { item ->

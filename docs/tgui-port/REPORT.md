@@ -9,7 +9,7 @@
 | 未改动基线 assembleDebug + testDebugUnitTest | 完整 Temurin 21：通过；首次缺 jlink 的 JBR 构建失败是环境问题 |
 | tgui ui5 发布/库 release AAR/demo debug 构建 | LF 主题资源下通过；未构建 Listen 正式签名包 |
 | 新界面 assembleDebug + testDebugUnitTest | 通过，174 tests / 0 failures / 0 errors / 0 skipped |
-| assembleDebugAndroidTest | 旧 UiInteractionTest 缺 exportRecordings 参数，正在迁移 |
+| assembleDebugAndroidTest | 原生测试 APK 编译通过；设备回归仍在修复，不等于全通过 |
 | connectedDebugAndroidTest | 尚未运行通过 |
 | MuMu debug 安装、原生入口冷启动 | 成功，首屏实测；此阶段 crash buffer 为空 |
 | 无 Compose / launcher 切换 | 未完成，按要求保留旧界面 |
@@ -31,7 +31,7 @@
 - 基线 debug APK：88,976,972 字节。
 - 首个原生并存 APK：101,991,639 字节，增加 13,014,667 字节；Compose 尚未移除。
 - 使用 tgui ui5 源提交 e40ffdf75f18953c27b0e591e57f02ac9c35f394，无源码修复。
-- tgui 文档提交 a33231f4a098a47b135d57ab5fdac28c12575104；[草稿 PR #8](https://github.com/cmhr0086/telegram-11-ui/pull/8)。Listen PR 创建后补充。
+- tgui 文档提交 a33231f4a098a47b135d57ab5fdac28c12575104；[草稿 PR #8](https://github.com/cmhr0086/telegram-11-ui/pull/8)。Listen 首个检查点 ca2fac9c33d82700b80d10cc62a64c35c8e90b87；[草稿 PR #5](https://github.com/cmhr0086/Listen_this_lesson/pull/5)。
 
 ## 未验证
 

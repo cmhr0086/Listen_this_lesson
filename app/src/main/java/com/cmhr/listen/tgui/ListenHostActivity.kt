@@ -83,15 +83,32 @@ open class ListenHostActivity : TelegramActivity(), LifecycleOwner, ViewModelSto
         lifecycleScope.launch { stt.asrMessages.collect { Toast.makeText(this@ListenHostActivity, it, Toast.LENGTH_SHORT).show() } }
         lifecycleScope.launch { AppNavigationRequests.recordRequests.collect { open("record/$it") } }
         lifecycleScope.launch {
+            // Observe the actual capture lifecycle so the notification's End action also files
+            // notes. A pause/resume keeps the same class open and must not generate early.
+            var capturedRecordId: Long? = null
+            stt.uiState.collect { state ->
+                if (state.isListening) {
+                    capturedRecordId = state.activeRecordId
+                } else {
+                    val completed = capturedRecordId
+                    if (completed != null && state.pausedClass?.recordId != completed && state.resumingRecordId != completed) {
+                        capturedRecordId = null
+                        ai.autoOrganizeNotes(completed)
+                    }
+                }
+            }
+        }
+        lifecycleScope.launch {
             var lastBatch: Long? = null
             recordings.uiState.map { it.recognizingAllRecordId }.distinctUntilChanged().collect { current ->
                 if (current == null) lastBatch?.let(ai::autoOrganizeNotes)
                 lastBatch = current
             }
         }
-        val route = intent.getStringExtra("listen.route") ?: restoredRoute
+        val route = restoredRoute ?: intent.getStringExtra("listen.route")
         val recordId = intent.getLongExtra(ListeningForegroundService.EXTRA_RECORD_ID, -1L)
         when {
+            restoredRoute != null -> if (restoredRoute != "home") open(restoredRoute!!)
             recordId > 0 -> open("record/$recordId")
             route != null && route != "home" -> open(route)
         }
