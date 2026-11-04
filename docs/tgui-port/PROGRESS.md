@@ -1,6 +1,6 @@
 # Listen tgui 移植进度
 
-任务日期：2026-11-05（Asia/Shanghai）。目标为完整替换；未满足验收前保留 Compose launcher。
+任务日期：2026-11-05（Asia/Shanghai）。目标为完整替换；下方前几节是过程记录，最新状态见文末。
 
 ## 环境与基线
 
@@ -50,3 +50,11 @@
 - 第二批核心设备回归 47 项中 36 通过、11 失败。原文跟随 3 项、录音/暂停继续/队列/ASR 诊断已有真实通过记录。失败集中于设置 enabled diff、向导滚动、对话框根/点击时序及 Markwon 表格 ReplacementSpan 断言；均已定位并修正，待重跑，尚不称全通过。
 - 第二批 AI/发布 11 项中 7 通过、4 失败。流式完整输出、仅气泡刷新和阅读锚点断言通过，复制后的第二次菜单定位仍失败；发布编辑和删除确认定位待修。两个 PDF 本地契约测试、搜索和资料课堂范围测试通过。
 - 纯展示 helper 提取后 assembleDebug/testDebugUnitTest/assembleDebugAndroidTest 通过（19 秒）；核心检查点再跑 assembleDebug/testDebugUnitTest 通过（5 秒）。
+
+## 原生切换与最终审计
+
+- 纯展示 helper 提取后检查点 `5d2d27d` 已推送。随后切换 MainActivity、删除 19 个 Compose 页面 / 主题文件和全部 Compose 插件依赖。
+- 最终切换首次 `assembleDebug + testDebugUnitTest + connectedDebugAndroidTest` 通过：174 单元测试、107 设备测试，0 失败 / 跳过，4 分 59 秒（connected-native-final.log）。包含新 Activity 首帧日夜色、完整返回栈、真实 20 秒以上录音、前后台、旋转与左边缘返回。
+- 截图发现冷启动首页混色以及 AI / 原文返回箭头、hint 错色，已用建页前读取持久化主题修复。修复后的实际 Home / AI / 原文截图已逐张复核。
+- 最终只读审计补齐原文 AI 前置失败提示、原文增量刷新；加强原旧测试的课程切换、精确保存时长、课堂身份标题；新增离线诊断 DemoData 和不存在片段空状态。当前 110 项设备测试正在运行（connected-native-audited.log），不能提前称通过。
+- 全量截图将用最终 APK 重拍；系统 SAF 导出和真正杀进程恢复仍待人工操作。PDF 仅合同预览 / 创建课程，缺时段持久化，必须在最终报告保留未完成项。

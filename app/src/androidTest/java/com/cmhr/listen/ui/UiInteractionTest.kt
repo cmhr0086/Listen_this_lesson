@@ -146,6 +146,9 @@ class UiInteractionTest : NativeSettingsFixture() {
         }
         assertTrue(device.hasObject(By.textContains("仅录音中")))
         assertTrue(device.hasObject(By.textContains("已安全保存")))
+        assertEquals("仅录音中 · 00:12 · 已安全保存 00:12", captureStatus(ListeningUiState(
+            isListening = true, activeRecordId = recordId, captureMode = CaptureMode.RECORD_ONLY,
+            recordOnlySavedMs = 12_000, listeningStartedAtElapsedRealtimeMs = null)))
         assertFalse(device.hasObject(By.textContains("检测到语音")))
         endFromUi()
         val files = runBlocking { database.recordingDao().observeForSession(recordId).first() }
@@ -228,6 +231,20 @@ class UiInteractionTest : NativeSettingsFixture() {
         val startedId = currentListening().activeRecordId!!
         assertEquals(courseId, runBlocking { database.recordDao().recordNow(startedId)!!.courseId })
         assertNotEquals(recordId, startedId)
+        endFromUi()
+        device.pressBack() // Capture opens its classroom; return to Home before changing course.
+        text("更换课程")
+        val replacementName = "首页切换课程${SystemClock.uptimeMillis()}"
+        val replacementId = runBlocking { courses.createCourse(replacementName).also(createdCourses::add) }
+        await { var found = false; scenario!!.onActivity { found = it.courses.uiState.value.courses.any { course -> course.id == replacementId } }; found }
+        click("更换课程")
+        text("选择课程")
+        scrollTo(replacementName)
+        click(replacementName)
+        await { row("更换课程").contentDescription.contains(replacementName) }
+        click("仅录音")
+        awaitListening(true)
+        assertEquals(replacementId, runBlocking { database.recordDao().recordNow(currentListening().activeRecordId!!)!!.courseId })
     }
 
     @Test fun coursesTabShowsClassCountAndOpensTheCourse() {
@@ -340,6 +357,12 @@ class UiInteractionTest : NativeSettingsFixture() {
         assertRowValue("当前阶段", "服务端等待 —（估算中）")
         assertFalse(device.hasObject(By.textContains("81188.9")))
         assertRowValue("服务端等待（估算）", "—（估算中）")
+    }
+
+    @Test fun missingDiagnosticShowsEmptyStateAfterLoading() {
+        launch("settings/asr-segment/$recordId/missing-test-segment")
+        text("未找到片段")
+        assertFalse(device.hasObject(By.text("正在读取…")))
     }
 
     @Test fun diagnosticsPreviewShowsFifteenThenOpensCurrentRecordHistory() {
@@ -467,7 +490,10 @@ class UiInteractionTest : NativeSettingsFixture() {
 
     @Test fun transcriptMenuContainsAllRetainedActions() {
         addTranscript()
-        launch("transcript/$recordId")
+        launch("record/$recordId")
+        text(className)
+        scenario!!.onActivity { it.open("transcript/$recordId") }
+        text("原文")
         val more = device.findObject(By.desc("更多操作"))
         more?.click()
         text("导出 TXT")
@@ -495,7 +521,7 @@ class UiInteractionTest : NativeSettingsFixture() {
                 assertTrue(text.text is android.text.Spanned)
                 assertTrue(text.layout.height > 0)
                 val spanned = text.text as android.text.Spanned
-                val tableRows = spanned.getSpans(0, spanned.length, TableRowSpan::class.java)
+                val tableRows = spanned.getSpans(0, spanned.length, TableRowSpan::class.java).sortedBy(spanned::getSpanStart)
                 assertEquals("表格必须实际渲染标题行和内容行", 2, tableRows.size)
                 tableCells = tableRows.flatMap { row ->
                     listOf(0, row.cellWidth()).map { x ->

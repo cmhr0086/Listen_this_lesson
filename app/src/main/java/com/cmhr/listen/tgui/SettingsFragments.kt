@@ -49,6 +49,7 @@ open class SettingsFragment(override val route: String = "settings") : ListenLis
     private var runtime: AsrRuntimeSummary? = null
     private var recentCounts = AsrDiagnosticStateCounts(0, 0, 0)
     private var diagnosticCount = 0
+    private var diagnosticsLoaded = false
     private var diagnosticRecordId: Long? = null
     private var diagnosticJobs = emptyList<Job>()
     private var healthError: String? = null
@@ -296,9 +297,9 @@ open class SettingsFragment(override val route: String = "settings") : ListenLis
         if (id == diagnosticRecordId) return
         diagnosticRecordId = id
         diagnosticJobs.forEach { it.cancel() }
-        diagnostics = emptyList(); diagnosticCount = 0; runtime = null
+        diagnostics = emptyList(); diagnosticCount = 0; runtime = null; diagnosticsLoaded = false
         diagnosticJobs = if (id == null) emptyList() else listOf(
-            scope.launch { host.stt.observeAsrDiagnostics(id).collect { diagnostics = it; renderSettings() } },
+            scope.launch { host.stt.observeAsrDiagnostics(id).collect { diagnostics = it; diagnosticsLoaded = true; renderSettings() } },
             scope.launch { host.stt.observeAsrDiagnosticCount(id).collect { diagnosticCount = it; renderSettings() } },
             scope.launch { host.stt.observeAsrRuntimeSummary(id).collect { runtime = it; renderSettings() } },
             scope.launch { host.stt.observeAsrStateCounts(id, System.currentTimeMillis() - 24L * 60 * 60_000).collect { recentCounts = it; renderSettings() } }
@@ -360,7 +361,7 @@ open class SettingsFragment(override val route: String = "settings") : ListenLis
 
     private fun segmentRows() = buildList {
         val d = diagnostics.firstOrNull { it.segmentId == route.substringAfterLast('/') }
-        if (d == null) { add(value("片段", "正在读取…")); return@buildList }
+        if (d == null) { add(value("片段", if (diagnosticsLoaded || diagnosticRecordId == null) "未找到片段" else "正在读取…")); return@buildList }
         add(value("片段", d.segmentId)); add(value("状态", stateName(d.lifecycleState)))
         add(value("总耗时", duration(d))); add(value("音频时长", millis(d.audioDurationMs)))
         if (d.state in ACTIVE_ASR_STATES) add(value("当前阶段", stageDuration(d)))

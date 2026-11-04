@@ -132,9 +132,26 @@ class HostNativeTest : NativeSettingsFixture() {
         assertRoute("record/$recordId")
         scenario!!.onActivity { it.open("courses") }
         assertRoute("courses")
+        scenario!!.onActivity { it.open("course/$courseId") }
+        assertRoute("course/$courseId")
         scenario!!.recreate()
+        assertRoute("course/$courseId")
+        // Temporary viewers are intentionally not serialized; no source text enters the Bundle.
+        scenario!!.onActivity { it.presentFragment(AiMarkdownFragment("临时正文", "只属于本地测试的临时内容")) }
+        await {
+            var ready = false
+            scenario!!.onActivity { ready = it.lastFragment is AiMarkdownFragment && !it.actionBarLayout.isTransitionAnimationInProgress }
+            ready
+        }
+        scenario!!.recreate()
+        assertRoute("course/$courseId")
+        device.pressBack()
         assertRoute("courses")
         text("新建课程")
+        device.pressBack()
+        assertRoute("record/$recordId")
+        device.pressBack()
+        assertRoute("home")
     }
 
     @Test fun rotationKeepsContentInsideSystemBarsAndLeftEdgeSwipeReturns() {

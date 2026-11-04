@@ -6,8 +6,13 @@ import android.graphics.drawable.ColorDrawable
 import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.widget.TextView
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.runner.lifecycle.ActivityLifecycleCallback
+import androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry
+import androidx.test.runner.lifecycle.Stage
 import com.cmhr.listen.data.settings.AppSettingsRepository
 import com.cmhr.listen.ui.NativeSettingsFixture
 import com.cmhr.listen.ui.theme.DarkModePreference
@@ -19,10 +24,114 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.telegram.ui.ActionBar.Theme
 import org.telegram.ui.Cells.TextCheckCell
+import org.telegram.ui.Cells.TextDetailSettingsCell
+import org.telegram.ui.TelegramUI
+import java.util.concurrent.atomic.AtomicReference
 
 /** Tests the colors installed on existing native views, not just the preference write. */
 @RunWith(AndroidJUnit4::class)
 class AppearanceNativeTest : NativeSettingsFixture() {
+    @Test fun coldStartHomeUsesSavedDayModeDespiteCachedDarkTheme() {
+        assertFreshHomeColors(DarkModePreference.LIGHT)
+    }
+
+    @Test fun coldStartHomeUsesSavedNightModeDespiteCachedLightTheme() {
+        assertFreshHomeColors(DarkModePreference.DARK)
+    }
+
+    /**
+     * A new Activity starts with a deliberately conflicting tgui theme cache. This recreates the
+     * cold-start ordering boundary without killing the instrumentation process. No settings page
+     * is opened, and the test never calls the host's applyAppearance to repair the page itself.
+     */
+    private fun assertFreshHomeColors(mode: DarkModePreference) {
+        val originalMode = runBlocking { repository.settings.first().appearance.darkMode }
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val firstDraw = AtomicReference<HomeColors?>(null)
+        val monitor = ActivityLifecycleMonitorRegistry.getInstance()
+        var originalTheme: Theme.ThemeInfo? = null
+        val callback = ActivityLifecycleCallback { activity, stage ->
+            if (activity is ListenHostActivity && stage == Stage.CREATED) {
+                val decor = activity.window.decorView
+                decor.viewTreeObserver.addOnPreDrawListener(object : ViewTreeObserver.OnPreDrawListener {
+                    override fun onPreDraw(): Boolean {
+                        readHomeColors(activity)?.let {
+                            firstDraw.compareAndSet(null, it)
+                            decor.viewTreeObserver.removeOnPreDrawListener(this)
+                        }
+                        return true
+                    }
+                })
+            }
+        }
+        try {
+            runBlocking { repository.setDarkMode(mode) }
+            instrumentation.runOnMainSync {
+                TelegramUI.init(context)
+                originalTheme = Theme.getCurrentTheme()
+                Theme.turnOffAutoNight(null, null)
+                Theme.applyTheme(Theme.getTheme(if (mode == DarkModePreference.LIGHT) "Dark Blue" else "Blue"), false, false)
+                assertEquals("Test must begin with the conflicting cached theme", mode != DarkModePreference.DARK, Theme.getCurrentTheme().isDark)
+                monitor.addLifecycleCallback(callback)
+            }
+            launch("home")
+            await { firstDraw.get() != null }
+            val first = requireNotNull(firstDraw.get())
+            assertHomeMatches(mode, first, "First drawable Home")
+            var final: HomeColors? = null
+            var previous: HomeColors? = null
+            var stableSince = 0L
+            await {
+                scenario!!.onActivity { final = readHomeColors(it) }
+                if (final != previous) {
+                    previous = final
+                    stableSince = SystemClock.uptimeMillis()
+                }
+                final?.let { it.dark == (mode == DarkModePreference.DARK) && it.matchesTheme() } == true &&
+                    SystemClock.uptimeMillis() - stableSince >= 200L
+            }
+            assertHomeMatches(mode, requireNotNull(final), "Settled Home")
+            assertEquals(0, server.requestCount)
+        } finally {
+            instrumentation.runOnMainSync { monitor.removeLifecycleCallback(callback) }
+            scenario?.close()
+            scenario = null
+            runBlocking { repository.setDarkMode(originalMode) }
+            instrumentation.runOnMainSync { originalTheme?.let { Theme.applyTheme(it, false, false) } }
+        }
+    }
+
+    private data class HomeColors(
+        val dark: Boolean, val actionBar: Int, val title: Int, val background: Int, val row: Int, val text: Int,
+        val expectedActionBar: Int, val expectedTitle: Int, val expectedBackground: Int, val expectedRow: Int, val expectedText: Int
+    ) {
+        fun matchesTheme() = actionBar == expectedActionBar && title == expectedTitle &&
+            background == expectedBackground && row == expectedRow && text == expectedText
+    }
+
+    private fun readHomeColors(activity: ListenHostActivity): HomeColors? {
+        val fragment = activity.lastFragment as? HomeFragment ?: return null
+        val page = fragment.fragmentView ?: return null
+        val cell = descendants(page).filterIsInstance<TextDetailSettingsCell>().firstOrNull {
+            it.isShown && it.height > 0 && it.textView.text.toString() == "更换课程"
+        } ?: return null
+        return HomeColors(Theme.getCurrentTheme().isDark,
+            (fragment.actionBar.background as ColorDrawable).color, fragment.actionBar.titleTextView.textColor,
+            (page.background as ColorDrawable).color, (cell.background as ColorDrawable).color, cell.textView.currentTextColor,
+            Theme.getColor(Theme.key_actionBarDefault), Theme.getColor(Theme.key_actionBarDefaultTitle),
+            Theme.getColor(Theme.key_windowBackgroundGray), Theme.getColor(Theme.key_windowBackgroundWhite),
+            Theme.getColor(Theme.key_windowBackgroundWhiteBlackText))
+    }
+
+    private fun assertHomeMatches(mode: DarkModePreference, colors: HomeColors, stage: String) {
+        assertEquals("$stage must use the saved preference", mode == DarkModePreference.DARK, colors.dark)
+        assertEquals("$stage ActionBar color", colors.expectedActionBar, colors.actionBar)
+        assertEquals("$stage title text color", colors.expectedTitle, colors.title)
+        assertEquals("$stage background color", colors.expectedBackground, colors.background)
+        assertEquals("$stage row background color", colors.expectedRow, colors.row)
+        assertEquals("$stage row text color", colors.expectedText, colors.text)
+    }
+
     @Test fun dayAndNightUpdateActualBackgroundAndTextOnTheOpenPage() {
         val original = runBlocking { repository.settings.first().appearance }
         try {

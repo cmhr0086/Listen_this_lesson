@@ -22,6 +22,7 @@ import org.telegram.tgui.recyclerview.LinearLayoutManager
 import org.telegram.tgui.recyclerview.RecyclerView
 import org.telegram.ui.ActionBar.ActionBar
 import org.telegram.ui.ActionBar.ActionBarMenuItem
+import org.telegram.ui.ActionBar.AlertDialog
 import org.telegram.ui.ActionBar.BaseFragment
 import org.telegram.ui.ActionBar.Theme
 import org.telegram.ui.ActionBar.ThemeDescription
@@ -46,6 +47,9 @@ class TranscriptFragment(private val recordId: Long) : BaseFragment() {
     private var segments = emptyList<TranscriptEntity>()
     private var selected = emptySet<Long>()
     private var selecting = false
+    private var displayedSelecting = false
+    private var displayedSelection = emptySet<Long>()
+    private var awaitingAiResult = false
     private var countItem: ActionBarMenuItem? = null
     private var followLatest = true
     private var draggingSelection = false
@@ -66,6 +70,16 @@ class TranscriptFragment(private val recordId: Long) : BaseFragment() {
                 if (followLatest && !selecting) scrollLatest()
                 updateSelection()
                 updateFollowButton()
+            }
+        }
+        scope.launch {
+            host.ai.uiState.collect { state ->
+                // Only the action started here owns this error. Opening a transcript must not
+                // replay a prior chat's error, and hidden transcript pages must not show dialogs.
+                if (awaitingAiResult && state.error != null) {
+                    awaitingAiResult = false
+                    if (host.lastFragment === this@TranscriptFragment) showAiError(state.error)
+                }
             }
         }
         return true
@@ -203,7 +217,11 @@ class TranscriptFragment(private val recordId: Long) : BaseFragment() {
             listOf(3, 4, 5).forEach { actionBar.actionMode?.getItem(it)?.isEnabled = selected.isNotEmpty() }
         }
         if (selecting) followLatest = false
-        adapter?.notifyItemRangeChanged(0, adapter?.itemCount ?: 0, "selection")
+        if (displayedSelecting != selecting || displayedSelection != selected) {
+            adapter?.refreshSelection(displayedSelection, displayedSelecting)
+            displayedSelection = selected
+            displayedSelecting = selecting
+        }
         updateFollowButton()
     }
     private fun showMenu(cell: TextBubbleCell, segment: TranscriptEntity) {
@@ -244,14 +262,28 @@ class TranscriptFragment(private val recordId: Long) : BaseFragment() {
     }
     private fun selectionAiMenu() {
         if (selected.isEmpty()) return
+        if (host.ai.uiState.value.isBusy) { showAiError("已有 AI 请求正在处理，请完成后再操作。"); return }
         choices("AI", listOf("问 AI", "整理笔记", "快速回答", "逐片段纠错")) { index ->
+            if (host.ai.uiState.value.isBusy) { showAiError("已有 AI 请求正在处理，请完成后再操作。"); return@choices }
             host.ai.replaceSelection(recordId, selected)
-            if (index == 0) host.ai.createConversationDraft(recordId, segments) { id -> host.open("ai-conversation/$id") }
+            awaitingAiResult = true
+            if (index == 0) host.ai.createConversationDraft(recordId, segments) { id ->
+                awaitingAiResult = false
+                host.open("ai-conversation/$id")
+            }
             else {
                 val action = when (index) { 1 -> AiActionType.ORGANIZE_NOTES; 2 -> AiActionType.QUICK_ANSWER; else -> AiActionType.CORRECT_ASR }
-                host.ai.runFixedAction(recordId, action, segments) { id -> host.open("record/$recordId/ai-result/$id") }
+                host.ai.runFixedAction(recordId, action, segments) { id ->
+                    awaitingAiResult = false
+                    host.open("record/$recordId/ai-result/$id")
+                }
             }
         }
+    }
+    private fun showAiError(error: String) {
+        val context = parentActivity ?: return
+        showDialog(AlertDialog.Builder(context).setTitle("AI 操作未完成").setMessage(error)
+            .setPositiveButton("确定", null).create())
     }
     private fun exportText() {
         val text = segments.joinToString("\n\n") { it.effectiveText }
@@ -270,6 +302,16 @@ class TranscriptFragment(private val recordId: Long) : BaseFragment() {
         private var lines = emptyList<Line>()
         fun lineAt(position: Int) = lines.getOrNull(position)
         fun segmentAt(position: Int) = lines.getOrNull(position)?.segment
+        fun refreshSelection(previous: Set<Long>, wasSelecting: Boolean) {
+            if (wasSelecting != selecting) {
+                notifyItemRangeChanged(0, itemCount, "selection")
+            } else {
+                val changed = (previous - selected) + (selected - previous)
+                lines.forEachIndexed { index, line ->
+                    if (line.segment?.id in changed || line.groupIds.any { it in changed }) notifyItemChanged(index, "selection")
+                }
+            }
+        }
         override fun getItemCount() = lines.size
         override fun getItemViewType(position: Int) = if (lines[position].segment == null) 0 else 1
         override fun isEnabled(holder: RecyclerView.ViewHolder) = selecting || lines.getOrNull(holder.adapterPosition)?.segment != null

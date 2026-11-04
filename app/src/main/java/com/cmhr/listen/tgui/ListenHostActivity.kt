@@ -31,6 +31,7 @@ import com.cmhr.listen.PublishViewModel
 import com.cmhr.listen.RecordingViewModel
 import com.cmhr.listen.SettingsViewModel
 import com.cmhr.listen.SttViewModel
+import com.cmhr.listen.data.settings.AppSettingsRepository
 import com.cmhr.listen.recording.CaptureMode
 import com.cmhr.listen.ui.theme.DarkModePreference
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -38,7 +39,10 @@ import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
 import org.telegram.ui.ActionBar.BaseFragment
+import org.telegram.ui.ActionBar.INavigationLayout
 import org.telegram.ui.ActionBar.Theme
 import org.telegram.ui.TelegramActivity
 import org.telegram.ui.TelegramUI
@@ -59,10 +63,22 @@ open class ListenHostActivity : TelegramActivity(), LifecycleOwner, ViewModelSto
     private var pendingCamera: ((Boolean) -> Unit)? = null
     private var pendingCapture: CaptureRequest? = null
     private var restoredRoute: String? = null
+    private val appearanceRepository by lazy { AppSettingsRepository(applicationContext) }
+    private var appearanceMode = DarkModePreference.SYSTEM
     private data class CaptureRequest(val id: Long, val newClass: Boolean, val mode: CaptureMode)
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        restoredRoute = savedInstanceState?.getString("listen.route")
+        savedInstanceState?.getBundle("listen.capture")?.let { capture ->
+            val mode = CaptureMode.entries.firstOrNull { it.name == capture.getString("mode") }
+            if (mode != null) pendingCapture = CaptureRequest(capture.getLong("id"), capture.getBoolean("newClass"), mode)
+        }
+        val restoredRoutes = savedInstanceState?.getStringArrayList("listen.routes")?.filter(String::isNotBlank)?.takeIf { it.isNotEmpty() }
+        restoredRoute = restoredRoutes?.lastOrNull() ?: savedInstanceState?.getString("listen.route")
+        // Resolve the persisted preference before TelegramActivity constructs its first views.
+        // A ViewModel's synthetic SYSTEM default can otherwise race the cached tgui theme.
+        appearanceMode = runBlocking(Dispatchers.IO) { appearanceRepository.settings.first().appearance.darkMode }
+        TelegramUI.init(applicationContext)
+        Theme.applyTheme(Theme.getTheme(if (isDarkAppearance()) "Dark Blue" else "Blue"), false, false)
         super.onCreate(savedInstanceState)
         registry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
         window.decorView.setViewTreeLifecycleOwner(this)
@@ -77,7 +93,10 @@ open class ListenHostActivity : TelegramActivity(), LifecycleOwner, ViewModelSto
         ViewCompat.requestApplyInsets(frameLayout)
         lifecycleScope.launch { DemoData.seedIfEmpty(applicationContext) }
         lifecycleScope.launch {
-            settings.uiState.map { it.appearance.darkMode }.distinctUntilChanged().collect { applyAppearance() }
+            appearanceRepository.settings.map { it.appearance.darkMode }.distinctUntilChanged().collect {
+                appearanceMode = it
+                applyAppearance()
+            }
         }
         lifecycleScope.launch { settings.messages.collect { Toast.makeText(this@ListenHostActivity, it.text, Toast.LENGTH_SHORT).show() } }
         lifecycleScope.launch { stt.asrMessages.collect { Toast.makeText(this@ListenHostActivity, it, Toast.LENGTH_SHORT).show() } }
@@ -108,6 +127,15 @@ open class ListenHostActivity : TelegramActivity(), LifecycleOwner, ViewModelSto
         val route = restoredRoute ?: intent.getStringExtra("listen.route")
         val recordId = intent.getLongExtra(ListeningForegroundService.EXTRA_RECORD_ID, -1L)
         when {
+            restoredRoutes != null -> {
+                // TelegramActivity has already added Home. Restore the remaining stack without
+                // animations: consecutive presentFragment calls can reject in-flight transitions.
+                val remaining = if (restoredRoutes.first() == "home") restoredRoutes.drop(1) else restoredRoutes
+                remaining.mapNotNull(::createFragment).forEach { fragment ->
+                    actionBarLayout.addFragmentToStack(fragment, INavigationLayout.FORCE_NOT_ATTACH_VIEW)
+                }
+                actionBarLayout.rebuildFragments(INavigationLayout.REBUILD_FLAG_REBUILD_ONLY_LAST)
+            }
             restoredRoute != null -> if (restoredRoute != "home") open(restoredRoute!!)
             recordId > 0 -> open("record/$recordId")
             route != null && route != "home" -> open(route)
@@ -119,8 +147,12 @@ open class ListenHostActivity : TelegramActivity(), LifecycleOwner, ViewModelSto
 
     override fun createRootFragment(): BaseFragment = HomeFragment()
     fun open(route: String) {
+        createFragment(route)?.let { presentFragment(it) }
+    }
+
+    private fun createFragment(route: String): BaseFragment? {
         val parts = route.split('/')
-        val fragment: BaseFragment = when {
+        return when {
             route == "home" -> HomeFragment()
             route == "courses" -> CoursesFragment()
             parts.first() == "course" && parts.size == 2 -> CourseFragment(parts[1].toLong())
@@ -143,17 +175,17 @@ open class ListenHostActivity : TelegramActivity(), LifecycleOwner, ViewModelSto
             parts.take(2) == listOf("ai", "result") -> AiResultFragment(parts[2].toLong(), parts[3].toLong())
             route == "setup" -> SetupFragment()
             parts.first() == "settings" -> SettingsFragment(route)
-            else -> return
+            else -> null
         }
-        presentFragment(fragment)
     }
 
-    fun applyAppearance() {
-        val dark = when (settings.uiState.value.appearance.darkMode) {
+    private fun isDarkAppearance(): Boolean = when (appearanceMode) {
             DarkModePreference.DARK -> true
             DarkModePreference.LIGHT -> false
             DarkModePreference.SYSTEM -> resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
         }
+    fun applyAppearance() {
+        val dark = isDarkAppearance()
         if (Theme.getCurrentTheme().isDark != dark) TelegramUI.applyTheme(Theme.getTheme(if (dark) "Dark Blue" else "Blue"), window.decorView)
     }
 
@@ -175,15 +207,25 @@ open class ListenHostActivity : TelegramActivity(), LifecycleOwner, ViewModelSto
         intent.getStringExtra("listen.route")?.let(::open)
     }
     override fun onSaveInstanceState(outState: Bundle) {
-        val route = when (val fragment = lastFragment) {
-            is AiChatFragment -> fragment.savedRoute
-            is ListenListFragment -> fragment.route
-            is TranscriptFragment -> fragment.route
-            else -> null
+        // Routes contain identifiers only. Temporary text/attachment viewers return to their
+        // nearest restorable parent; large or private bodies never enter the saved-state Bundle.
+        val routes = mainFragmentsStack.mapNotNull(::routeOf)
+        outState.putStringArrayList("listen.routes", ArrayList(routes))
+        routes.lastOrNull()?.let { outState.putString("listen.route", it) }
+        pendingCapture?.let { request ->
+            outState.putBundle("listen.capture", Bundle().apply {
+                putLong("id", request.id); putBoolean("newClass", request.newClass); putString("mode", request.mode.name)
+            })
         }
-        route?.takeIf { it.isNotBlank() }?.let { outState.putString("listen.route", it) }
         super.onSaveInstanceState(outState)
     }
+
+    private fun routeOf(fragment: BaseFragment): String? = when (fragment) {
+        is AiChatFragment -> fragment.savedRoute
+        is ListenListFragment -> fragment.route
+        is TranscriptFragment -> fragment.route
+        else -> null
+    }?.takeIf { it.isNotBlank() }
 
     fun startCapture(id: Long, mode: CaptureMode, newClass: Boolean = false) {
         val current = stt.uiState.value
@@ -239,12 +281,17 @@ open class ListenHostActivity : TelegramActivity(), LifecycleOwner, ViewModelSto
     }
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == 202) { val callback = pendingCamera; pendingCamera = null; callback?.invoke(resultCode == Activity.RESULT_OK) }
+        if (requestCode == 202) {
+            val callback = pendingCamera; pendingCamera = null
+            if (callback != null) callback(resultCode == Activity.RESULT_OK)
+            else if (resultCode == Activity.RESULT_OK) Toast.makeText(this, "页面已恢复，请重新拍照", Toast.LENGTH_LONG).show()
+        }
         if (requestCode == 201) {
             val callback = pendingFiles; pendingFiles = null
             val uris = if (resultCode == Activity.RESULT_OK) data?.clipData?.let { clips -> (0 until clips.itemCount).map { clips.getItemAt(it).uri } } ?: listOfNotNull(data?.data) else emptyList()
             uris.forEach { uri -> runCatching { contentResolver.takePersistableUriPermission(uri, (data?.flags ?: 0) and (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)) } }
-            callback?.invoke(uris)
+            if (callback != null) callback(uris)
+            else if (uris.isNotEmpty()) Toast.makeText(this, "页面已恢复，请重新选择文件", Toast.LENGTH_LONG).show()
         }
     }
 }

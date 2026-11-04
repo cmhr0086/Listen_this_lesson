@@ -13,6 +13,7 @@ import android.graphics.Rect
 import android.provider.MediaStore
 import android.text.Spanned
 import android.view.View
+import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
 import android.widget.TextView
 import androidx.test.espresso.Espresso.onView
@@ -296,6 +297,67 @@ class AiNativeTest {
             waitUntil { runCatching { context.contentResolver.openInputStream(output)?.close() }.isFailure }
             assertEquals(0, server.requestCount)
         } finally { instrumentation.removeMonitor(monitor) }
+    }
+
+    @Test fun transcriptAiMissingConfigurationShowsErrorWithoutReplayingItOnReopen() {
+        val recordId = seedRecord()
+        runBlocking { settings.clearAiApiKey() }
+        launch("transcript/$recordId")
+
+        fun selectAndAsk() {
+            found(By.descContains("示例课堂：矩形截面")).longClick()
+            found(By.text("多选")).click()
+            found(By.desc("问 AI")).click()
+            found(By.text("快速回答")).click()
+            found(By.text("AI 操作未完成"))
+            found(By.text("请先在设置中填写 AI API Key。"))
+            found(By.text("确定")).click()
+        }
+        selectAndAsk()
+        assertEquals(0, server.requestCount)
+        assertTrue(runBlocking { database.aiDao().results(recordId).first().isEmpty() })
+        // First Back exits selection; second leaves the transcript. The old VM error remains.
+        device.pressBack()
+        device.pressBack()
+        awaitNavigationIdle()
+        onActivity { it.open("transcript/$recordId") }
+        awaitNavigationIdle()
+        found(By.descContains("示例课堂：矩形截面"))
+        assertFalse("Opening the page must not replay the prior error", device.hasObject(By.text("AI 操作未完成")))
+        // Repeating the same action must still show the same validation error, not swallow it.
+        selectAndAsk()
+        assertEquals(0, server.requestCount)
+    }
+
+    @Test fun transcriptAppendDoesNotRebindUnchangedBubbles() {
+        val recordId = seedRecord()
+        launch("transcript/$recordId")
+        found(By.descContains("示例课堂：矩形截面"))
+        val changed = java.util.Collections.synchronizedSet(mutableSetOf<Int>())
+        val fullRefreshes = AtomicInteger()
+        val inserts = AtomicInteger()
+        onActivity { host ->
+            val list = (host.lastFragment.fragmentView as ViewGroup).getChildAt(0) as RecyclerListView
+            assertEquals(2, list.adapter!!.itemCount) // One group header and one original segment.
+            list.adapter!!.registerAdapterDataObserver(object : RecyclerView.AdapterDataObserver() {
+                override fun onChanged() { fullRefreshes.incrementAndGet() }
+                override fun onItemRangeChanged(positionStart: Int, itemCount: Int, payload: Any?) {
+                    repeat(itemCount) { changed += positionStart + it }
+                }
+                override fun onItemRangeInserted(positionStart: Int, itemCount: Int) { inserts.addAndGet(itemCount) }
+            })
+        }
+        runBlocking {
+            val first = database.transcriptDao().segments(recordId).first().single()
+            database.transcriptDao().insert(SegmentEntity(recordId = recordId, startTime = first.endTime + 1,
+                endTime = first.endTime + 1001, audioDurationMs = 1000, recognitionDurationMs = 10,
+                text = "示例追加原文，不应重新绑定前面的气泡。", sessionId = first.sessionId))
+        }
+        found(By.desc("示例追加原文，不应重新绑定前面的气泡。"))
+        assertTrue(inserts.get() > 0)
+        assertEquals(0, fullRefreshes.get())
+        assertFalse("An appended segment must not rebind the unchanged first bubble", 1 in changed)
+        assertEquals(0, server.requestCount)
     }
 
     @Test fun timelineLongPressDragSelectsAndUnselectsRange() {

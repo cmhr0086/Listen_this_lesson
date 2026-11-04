@@ -1,13 +1,19 @@
 package com.cmhr.listen
 
 import android.content.Context
+import androidx.room.withTransaction
 import com.cmhr.listen.data.ai.AiActionType
+import com.cmhr.listen.data.ai.AiAttachmentEntity
+import com.cmhr.listen.data.ai.AiAttachmentKind
 import com.cmhr.listen.data.ai.AiConversationEntity
 import com.cmhr.listen.data.ai.AiMessageEntity
 import com.cmhr.listen.data.ai.AiRequestStatus
 import com.cmhr.listen.data.ai.AiResultEntity
 import com.cmhr.listen.data.ai.AiResultSegmentEntity
 import com.cmhr.listen.data.ai.NoteStyle
+import com.cmhr.listen.data.ai.CorrectionPayload
+import com.cmhr.listen.data.ai.CorrectionPayloadCodec
+import com.cmhr.listen.data.ai.CorrectionSegment
 import com.cmhr.listen.data.course.CourseEntity
 import com.cmhr.listen.data.course.ListenDatabase
 import com.cmhr.listen.data.course.SegmentEntity
@@ -15,6 +21,9 @@ import com.cmhr.listen.data.course.SessionEntity
 import com.cmhr.listen.data.recording.RecordingEntity
 import com.cmhr.listen.data.recording.RecordingRepository
 import com.cmhr.listen.data.recording.RecordingState
+import com.cmhr.listen.data.stt.AsrClockBasis
+import com.cmhr.listen.data.stt.AsrLifecycleState
+import com.cmhr.listen.data.stt.AsrSegmentDiagnosticEntity
 import com.cmhr.listen.audio.PcmRecorder
 import com.cmhr.listen.audio.StreamingWavRecorder
 import java.io.File
@@ -22,6 +31,8 @@ import com.cmhr.listen.data.settings.AiPromptSettings
 import com.cmhr.listen.data.settings.LEGACY_QUICK_ANSWER_PROMPT
 import com.cmhr.listen.data.ai.LEGACY_CONVERSATION_PROMPT
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * Debug builds (package `com.cmhr.listen.debug`, installed beside the real app) start with two
@@ -33,7 +44,92 @@ object DemoData {
         val database = ListenDatabase.get(context)
         if (database.courseDao().courses().first().isEmpty()) seedClasses(database)
         seedConversationIfMissing(database)
+        seedAiDetailsIfMissing(context, database)
         seedRecordingsIfMissing(context, database)
+        seedDiagnosticIfMissing(database)
+    }
+
+    /** Offline examples for the existing attachment/correction viewers. Never applies a correction. */
+    private suspend fun seedAiDetailsIfMissing(context: Context, database: ListenDatabase) = withContext(Dispatchers.IO) {
+        val recordId = mechanicsRecordId(database) ?: return@withContext
+        database.withTransaction {
+            val dao = database.aiDao()
+            val conversationId = database.openHelper.writableDatabase.query(
+                "SELECT id FROM ai_conversations WHERE recordId = ? AND title = ? ORDER BY id LIMIT 1",
+                arrayOf<Any>(recordId, "静矩为什么可以是负的")
+            ).use { if (it.moveToFirst()) it.getLong(0) else null }
+            val message = conversationId?.let { id ->
+                dao.messagesOnce(id).firstOrNull { it.role == "assistant" && it.content == DEMO_CHAT[1].second }
+            }
+            if (message != null) {
+                val relativePath = "ai_attachments/record_$recordId/demo_mechanics_${message.id}.txt"
+                val file = File(context.filesDir, relativePath)
+                if (!file.isFile) {
+                    file.parentFile?.mkdirs()
+                    file.writeText("示例 · 材料力学课堂原文（离线演示）\n\n" + MECHANICS_LINES.joinToString("\n") { it.first }, Charsets.UTF_8)
+                }
+                val exists = dao.conversationAttachmentsOnce(message.conversationId).any { it.relativePath == relativePath }
+                if (!exists) dao.insertAttachments(listOf(AiAttachmentEntity(
+                    recordId = recordId, messageId = message.id, kind = AiAttachmentKind.TEXT.name,
+                    displayName = "示例 · 材料力学课堂原文.txt", relativePath = relativePath,
+                    mimeType = "text/plain", sizeBytes = file.length(), createdAt = message.createdAt
+                )))
+            }
+
+            val marker = "示例 · ASR 纠错（离线演示，未应用）"
+            val exists = database.openHelper.writableDatabase.query(
+                "SELECT 1 FROM ai_results WHERE recordId = ? AND actionType = ? AND requestPrompt = ? LIMIT 1",
+                arrayOf<Any>(recordId, AiActionType.CORRECT_ASR.name, marker)
+            ).use { it.moveToFirst() }
+            if (!exists) {
+                val sourceIds = database.openHelper.writableDatabase.query(
+                    "SELECT id FROM transcript_segments WHERE recordId = ? AND deleted = 0 AND text IN (?, ?) ORDER BY id",
+                    arrayOf<Any>(recordId, MECHANICS_LINES[0].first, MECHANICS_LINES[1].first)
+                ).use { cursor -> buildList { while (cursor.moveToNext()) add(cursor.getLong(0)) } }
+                val source = database.transcriptDao().segmentsByIds(sourceIds)
+                if (source.isNotEmpty()) {
+                    val payload = CorrectionPayload(source.map { segment ->
+                        CorrectionSegment(segment.id,
+                            if (segment.text == MECHANICS_LINES[0].first) "今天讲截面的几何性质，先讲静矩（面积矩）。"
+                            else "微面积 dA 乘以它的 x 坐标，称为该微面积对 y 轴的静矩：dSy = x·dA。",
+                            listOf("离线示例：整理标点与公式写法，保留原意；尚未应用到课堂原文。"))
+                    })
+                    val encoded = CorrectionPayloadCodec.encode(payload)
+                    CorrectionPayloadCodec.decode(encoded, source)
+                    val now = System.currentTimeMillis()
+                    val resultId = dao.insertResult(AiResultEntity(
+                        recordId = recordId, actionType = AiActionType.CORRECT_ASR.name, requestPrompt = marker,
+                        sourceTextSnapshot = source.joinToString("\n") { it.text },
+                        output = "# $marker\n\n" + CorrectionPayloadCodec.toMarkdown(payload, source),
+                        status = AiRequestStatus.SUCCESS.name, createdAt = now, finishedAt = now,
+                        correctionPayload = encoded
+                    ))
+                    dao.insertResultSegments(source.map { AiResultSegmentEntity(resultId, it.id) })
+                }
+            }
+        }
+    }
+
+    /** Completed synthetic timing data only: no WAV, pending job or network work is created. */
+    private suspend fun seedDiagnosticIfMissing(database: ListenDatabase) {
+        val recordId = mechanicsRecordId(database) ?: return
+        val id = "demo-asr-$recordId-completed"
+        val dao = database.asrDiagnosticsDao()
+        if (dao.segment(id) != null) return
+        val start = System.currentTimeMillis() - 180_000L
+        dao.insertSegment(AsrSegmentDiagnosticEntity(
+            segmentId = id, recordId = recordId, sequenceNumber = dao.nextSequenceNumber(recordId),
+            clockBasis = AsrClockBasis.LEGACY_WALL_FALLBACK.name,
+            state = AsrLifecycleState.COMPLETED.name,
+            audioStartTime = start, audioEndTime = start + 5_000, audioDurationMs = 5_000,
+            captureStartedAt = start, captureFinishedAt = start + 5_000, queuedLocalAt = start + 5_000,
+            submitStartedAt = start + 5_200, submitCompletedAt = start + 5_800,
+            firstServerQueuedAt = start + 5_800, firstServerProcessingAt = start + 6_100,
+            firstServerCompletedAt = start + 6_700, finishedAt = start + 6_800,
+            submitAttempts = 1, pollAttempts = 1, lastHttpStatus = 200,
+            serverModel = "示例模型（离线演示）", postDurationMs = 600,
+            uploadDurationMs = 200, submitResponseWaitDurationMs = 400, resultResponseDurationMs = 100
+        ))
     }
 
     /** Two short tones on the 材料力学 demo class, so recording export can be tried without a microphone. */
