@@ -132,6 +132,14 @@ class SettingsNativeTest : NativeSettingsFixture() {
         click("跳过")
         click("开始使用")
         await { runBlocking { repository.settings.first().setupState == SetupState.DONE } }
+        await {
+            var returnedHome = false
+            scenario!!.onActivity { host ->
+                returnedHome = (host.lastFragment as? com.cmhr.listen.tgui.ListenListFragment)?.route == "home" &&
+                    !host.actionBarLayout.isTransitionAnimationInProgress
+            }
+            returnedHome
+        }
         assertFalse(device.hasObject(By.text("准备好了")))
         assertEquals(requests, server.requestCount)
     }
