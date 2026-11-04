@@ -555,6 +555,11 @@ def create_app(database_url: str | None = None) -> FastAPI:
         rows = db.scalars(stmt.order_by(*order).limit(500))
         return {"courses": [course_row(db, course) for course in rows]}
 
+    @admin.get("/whoami")
+    def admin_whoami(db: Session = Depends(get_db)):
+        # None when signed in with the emergency admin token rather than an account.
+        return {"readerId": db.info.get("readerId")}
+
     @admin.get("/summary")
     def admin_summary(db: Session = Depends(get_db)):
         """Counts behind the badges on the admin tabs."""

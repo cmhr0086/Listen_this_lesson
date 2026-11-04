@@ -410,7 +410,7 @@ def test_public_api_is_read_only(client):
 
 def test_admin_page_is_served(client):
     page = client.get("/admin")
-    assert page.status_code == 200 and "公开后台" in page.text and "原文权限" in page.text
+    assert page.status_code == 200 and "听这节课后台" in page.text and "原文权限" in page.text
 
 
 def test_private_sync_data_never_reaches_the_public_api(tmp_path, monkeypatch, client):
