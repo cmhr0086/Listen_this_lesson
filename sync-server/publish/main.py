@@ -134,6 +134,8 @@ def create_app(database_url: str | None = None) -> FastAPI:
         reader = readers.authenticate(db, token) if token else None
         if reader is None or not reader.isAdmin:
             raise unauthorized()
+        db.info["actor"] = f"reader:{reader.id}"
+        db.info["readerId"] = reader.id
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -619,6 +621,11 @@ def create_app(database_url: str | None = None) -> FastAPI:
         lesson = service.set_lesson_status(db, lesson_id, "taken_down", body.note if body else None)
         return {"lessonId": lesson.id, "status": lesson.status}
 
+    @admin.post("/lessons/{lesson_id}/withdraw-dismiss")
+    def admin_withdraw_dismiss(lesson_id: str, body: ReviewDecision, db: Session = Depends(get_db)):
+        lesson = service.dismiss_withdraw(db, lesson_id, body.note)
+        return {"lessonId": lesson.id, "status": lesson.status}
+
     @admin.post("/lessons/{lesson_id}/restore")
     def admin_restore(lesson_id: str, db: Session = Depends(get_db)):
         lesson = service.set_lesson_status(db, lesson_id, "active")
@@ -656,7 +663,11 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     @admin.post("/uploaders/{uploader_id}/rotate-token")
     def admin_rotate(uploader_id: int, db: Session = Depends(get_db)):
+        old = db.get(Uploader, uploader_id)
+        old_hash = old.tokenHash if old else None
         uploader, token = service.rotate_uploader_token(db, uploader_id)
+        if config_cipher is not None:
+            devices.replace_publish_token(db, config_cipher, old_hash, token)
         return {**uploader_dict(uploader), "token": token}
 
     @admin.post("/uploaders/{uploader_id}/disable")
@@ -693,6 +704,8 @@ def create_app(database_url: str | None = None) -> FastAPI:
     @admin.post("/readers/{reader_id}/remove-admin")
     def admin_reader_remove_admin(reader_id: int, db: Session = Depends(get_db)):
         reader = service.require(db.get(Reader, reader_id), "读者不存在")
+        if db.info.get("readerId") == reader.id:
+            raise HTTPException(409, "不能取消自己的管理员身份")
         return readers.admin_reader_dict(readers.set_admin(db, reader, False))
 
     @admin.post("/readers/{reader_id}/revoke")
@@ -701,9 +714,32 @@ def create_app(database_url: str | None = None) -> FastAPI:
         return readers.admin_reader_dict(readers.decide(db, reader, approved=False))
 
     @admin.get("/audit")
-    def admin_audit(db: Session = Depends(get_db)):
-        rows = db.scalars(select(AuditLog).order_by(AuditLog.id.desc()).limit(100))
-        return {"entries": [{"at": r.at, "actor": r.actor, "action": r.action, "target": r.target, "detail": r.detail} for r in rows]}
+    def admin_audit(
+        before: Annotated[int | None, Query(ge=1)] = None,
+        limit: Annotated[int, Query(ge=1, le=100)] = 100,
+        db: Session = Depends(get_db),
+    ):
+        stmt = select(AuditLog).order_by(AuditLog.id.desc()).limit(limit)
+        if before is not None:
+            stmt = stmt.where(AuditLog.id < before)
+        rows = list(db.scalars(stmt))
+
+        def actor_name(actor: str) -> str:
+            kind, _, key = actor.partition(":")
+            row = db.get(Reader, int(key)) if kind == "reader" and key.isdigit() else None
+            if row is not None:
+                return row.remark or row.nickname or "未命名读者"
+            uploader = db.get(Uploader, int(key)) if kind == "uploader" and key.isdigit() else None
+            if uploader is not None:
+                return uploader.displayName
+            device = db.get(Device, key) if kind == "device" else None
+            if device is not None:
+                return device.name
+            return "管理员" if actor == "admin" else "已移除的设备" if kind == "device" else actor
+        return {"entries": [{
+            "id": r.id, "at": r.at, "actor": r.actor, "actorName": actor_name(r.actor), "action": r.action,
+            "target": r.target, "targetName": service.audit_target_name(db, r.target), "detail": r.detail,
+        } for r in rows]}
 
     @admin.get("/courses/{course_id}/materials")
     def admin_materials(course_id: str, db: Session = Depends(get_db)):

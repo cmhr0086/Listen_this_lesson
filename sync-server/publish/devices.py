@@ -176,6 +176,17 @@ def sync_config(db: Session, device: Device, cipher: ConfigCipher, body: ConfigS
     return {"config": config, "version": row.version if row else 0, "updatedAt": row.updatedAt if row else None}
 
 
+def replace_publish_token(db: Session, cipher: ConfigCipher, old_hash: str, token: str) -> None:
+    """After a token is rotated, accounts holding the old one get the new one, or their phones would stop publishing."""
+    for row in db.scalars(select(AccountConfig)):
+        stored = cipher.open(row.readerId, row.sealed)
+        held = (stored.get("publish") or {}).get("token")
+        if held and hash_token(held) == old_hash:
+            stored["publish"]["token"] = token
+            row.sealed, row.version, row.updatedAt = cipher.seal(row.readerId, stored), row.version + 1, now_ms()
+    db.commit()
+
+
 def _provision_uploader(db: Session, stored: dict) -> None:
     # Only when the server has no uploader at all. Otherwise a phone already holds that uploader's
     # token, and a new one would cut that phone off from the lessons it published once it synced.

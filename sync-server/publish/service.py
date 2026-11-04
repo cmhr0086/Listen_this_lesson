@@ -59,6 +59,9 @@ def ordered_segments(request: SubmissionRequest):
 
 
 def audit(db: Session, actor: str, action: str, target: str, detail: str | None = None) -> None:
+    # Admin actions name the signed-in admin reader; require_admin puts them on the session.
+    if actor == "admin":
+        actor = db.info.get("actor", actor)
     db.add(AuditLog(at=now_ms(), actor=actor, action=action, target=target, detail=detail))
 
 
@@ -286,6 +289,9 @@ def review_course(db: Session, course_id: str, status: str, note: str | None = N
     course = require(db.get(Course, course_id), "课程不存在")
     if course.status not in allowed[status]:
         raise ServiceError(409, f"课程当前状态为 {course.status}，不能改为 {status}")
+    if status in ("rejected", "taken_down") and not note:
+        # Shown to the uploader in the App, and the only record of why.
+        raise ServiceError(422, "请填写原因")
     course.status = status
     course.reviewedAt = now_ms()
     course.reviewNote = note
@@ -320,6 +326,8 @@ def delete_course(db: Session, course_id: str) -> None:
 
 def set_lesson_status(db: Session, lesson_id: str, status: str, reason: str | None = None) -> Lesson:
     lesson = require(db.get(Lesson, lesson_id), "课堂不存在")
+    if lesson.status == status:
+        raise ServiceError(409, "这一节已经下架" if status == "taken_down" else "这一节没有下架")
     lesson.status = status
     lesson.updatedAt = now_ms()
     if status == "taken_down":
@@ -329,3 +337,33 @@ def set_lesson_status(db: Session, lesson_id: str, status: str, reason: str | No
     audit(db, "admin", f"lesson.{status}", f"lesson:{lesson.id}", reason)
     db.commit()
     return lesson
+
+
+def dismiss_withdraw(db: Session, lesson_id: str, reason: str | None) -> Lesson:
+    """Closes a withdraw request and keeps the lesson public; the uploader can ask again."""
+    lesson = require(db.get(Lesson, lesson_id), "课堂不存在")
+    if lesson.withdrawRequestedAt is None:
+        raise ServiceError(409, "这一节没有待处理的撤回申请")
+    if not reason:
+        raise ServiceError(422, "请填写原因")
+    lesson.withdrawRequestedAt = None
+    lesson.withdrawReason = None
+    audit(db, "admin", "lesson.withdraw_dismissed", f"lesson:{lesson.id}", reason)
+    db.commit()
+    return lesson
+
+
+def audit_target_name(db: Session, target: str) -> str | None:
+    """What an audit row is about, in words; None once it has been deleted."""
+    kind, _, key = target.partition(":")
+    if kind == "course":
+        course = db.get(Course, key)
+        return f"{course.courseName} · {course.teacherName}" if course else None
+    if kind == "lesson":
+        lesson = db.get(Lesson, key)
+        revision = db.get(Revision, lesson.publishedRevisionId) if lesson and lesson.publishedRevisionId else None
+        return revision.title if revision else None
+    if kind == "uploader" and key.isdigit():
+        uploader = db.get(Uploader, int(key))
+        return uploader.displayName if uploader else None
+    return None

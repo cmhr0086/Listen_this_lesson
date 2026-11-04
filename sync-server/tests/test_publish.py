@@ -206,7 +206,7 @@ def test_admin_queue_is_first_come_first_served_with_tab_counts(client):
 
 def test_course_takedown_hides_all_its_lessons_and_approve_restores(client):
     _, result = publish_one(client)
-    admin(client, "POST", f"/courses/{result['courseId']}/takedown")
+    admin(client, "POST", f"/courses/{result['courseId']}/takedown", json={"note": "内容不符"})
     assert client.get(f"/api/public/v1/lessons/{result['lessonId']}").status_code == 404
     assert client.get("/api/public/v1/courses").json()["courses"] == []
     response = client.post(f"/api/admin/v1/courses/{result['courseId']}/reject", headers=auth(ADMIN_TOKEN))
@@ -706,7 +706,7 @@ def test_materials_follow_the_course_review_state(client, tmp_path):
     assert client.get(f"/api/admin/v1/materials/{material['materialId']}/file", headers=auth(ADMIN_TOKEN)).content == DOCX
     approve(client, course_id)
     assert client.get(f"/api/public/v1/materials/{material['materialId']}/file").status_code == 200
-    admin(client, "POST", f"/courses/{course_id}/takedown", json={"note": None})
+    admin(client, "POST", f"/courses/{course_id}/takedown", json={"note": "下架"})
     assert client.get(f"/api/public/v1/courses/{course_id}/materials").status_code == 404
     admin(client, "DELETE", f"/courses/{course_id}")
     assert not (tmp_path / "materials" / f"{material['materialId']}.docx").exists()
@@ -922,3 +922,104 @@ def test_admin_names_readers_with_a_remark(client):
     # Clearing it goes back to having no name, and readers never see the admin's remark.
     assert admin(client, "POST", f"/readers/{reader['readerId']}/remark", json={"remark": ""})["displayName"] is None
     assert "remark" not in client.get("/api/public/v1/me", headers=auth(sign_in(client)["token"])).json()
+
+
+# ---- admin rules ----------------------------------------------------------------------------
+
+
+def published_course(client, token=None):
+    token = token or new_uploader(client)
+    result = client.post("/api/publish/v1/submissions", headers=auth(token), json=submission()).json()
+    return token, result
+
+
+def test_reject_and_course_takedown_need_a_reason(client):
+    _token, result = published_course(client)
+    course = result["courseId"]
+    response = client.post(f"/api/admin/v1/courses/{course}/reject", headers=auth(ADMIN_TOKEN), json={"note": "  "})
+    assert response.status_code == 422 and response.json()["detail"] == "请填写原因"
+    assert admin(client, "GET", f"/courses/{course}")["course"]["status"] == "pending"
+    approve(client, course)
+    assert client.post(f"/api/admin/v1/courses/{course}/takedown", headers=auth(ADMIN_TOKEN), json={}).status_code == 422
+    assert admin(client, "GET", f"/courses/{course}")["course"]["status"] == "approved"
+
+
+def test_lesson_status_changes_must_change_something(client):
+    _token, result = published_course(client)
+    lesson = result["lessonId"]
+    headers = auth(ADMIN_TOKEN)
+    assert client.post(f"/api/admin/v1/lessons/{lesson}/restore", headers=headers).status_code == 409
+    assert client.post(f"/api/admin/v1/lessons/{lesson}/takedown", headers=headers, json={}).status_code == 200
+    assert client.post(f"/api/admin/v1/lessons/{lesson}/takedown", headers=headers, json={}).status_code == 409
+
+
+def test_withdraw_request_can_be_declined_and_asked_again(client):
+    token, result = published_course(client)
+    lesson = result["lessonId"]
+    url = f"/api/publish/v1/lessons/{lesson}/withdraw-request"
+    assert client.post(url, headers=auth(token), json={"reason": "讲错了"}).status_code == 200
+    headers = auth(ADMIN_TOKEN)
+    dismiss = f"/api/admin/v1/lessons/{lesson}/withdraw-dismiss"
+    assert client.post(dismiss, headers=headers, json={}).status_code == 422
+    assert client.post(dismiss, headers=headers, json={"note": "内容没问题"}).status_code == 200
+    assert admin(client, "GET", "/summary")["withdrawRequests"] == 0
+    # Declined, not taken down, and a closed request cannot be declined twice.
+    assert admin(client, "GET", f"/lessons/{lesson}")["status"] == "active"
+    assert client.post(dismiss, headers=headers, json={"note": "x"}).status_code == 409
+    assert client.post(url, headers=auth(token), json={"reason": "还是想撤"}).status_code == 200
+    assert admin(client, "GET", "/summary")["withdrawRequests"] == 1
+
+
+def test_audit_names_the_admin_reader_and_the_target(client):
+    _token, result = published_course(client)
+    login = sign_in(client)
+    reader_id = login["reader"]["readerId"]
+    admin(client, "POST", f"/readers/{reader_id}/make-admin")
+    admin(client, "POST", f"/readers/{reader_id}/remark", json={"remark": "我"})
+    response = client.post(f"/api/admin/v1/courses/{result['courseId']}/approve", headers=auth(login["token"]), json={})
+    assert response.status_code == 200
+    entry = admin(client, "GET", "/audit?limit=1")["entries"][0]
+    assert entry["action"] == "course.approved" and entry["actor"] == f"reader:{reader_id}"
+    assert entry["actorName"] == "我" and "·" in entry["targetName"]
+
+
+def test_audit_pages_backwards(client):
+    for name in ("甲", "乙", "丙"):
+        admin(client, "POST", "/uploaders", json={"displayName": name})
+    first = admin(client, "GET", "/audit?limit=2")["entries"]
+    rest = admin(client, "GET", f"/audit?limit=2&before={first[-1]['id']}")["entries"]
+    assert [e["detail"] for e in first + rest] == ["丙", "乙", "甲"]
+
+
+def test_admin_cannot_remove_their_own_admin_role(client):
+    login = sign_in(client)
+    reader_id = login["reader"]["readerId"]
+    admin(client, "POST", f"/readers/{reader_id}/make-admin")
+    response = client.post(f"/api/admin/v1/readers/{reader_id}/remove-admin", headers=auth(login["token"]))
+    assert response.status_code == 409
+    assert admin(client, "POST", f"/readers/{reader_id}/remove-admin")["isAdmin"] is False
+
+
+def test_rotating_a_token_updates_the_cloud_copy(device_client):
+    token = new_uploader(device_client)
+    uploader_id = admin(device_client, "GET", "/uploaders")["uploaders"][0]["id"]
+    headers = admin_reader(device_client)
+    device = bind(device_client, headers)
+    sync_config(device_client, device, offered={"publish": {"token": token, "schoolName": "西建大"}})
+    version = sync_config(device_client, device)["version"]
+
+    fresh = admin(device_client, "POST", f"/uploaders/{uploader_id}/rotate-token")["token"]
+    latest = sync_config(device_client, device)
+    assert latest["config"]["publish"] == {"token": fresh, "schoolName": "西建大"} and latest["version"] == version + 1
+    assert device_client.get("/api/publish/v1/me", headers=auth(fresh)).status_code == 200
+
+
+def test_rotating_another_token_leaves_the_cloud_copy_alone(device_client):
+    token = new_uploader(device_client, "我")
+    other = new_uploader(device_client, "别人")
+    assert other
+    other_id = next(u["id"] for u in admin(device_client, "GET", "/uploaders")["uploaders"] if u["displayName"] == "别人")
+    device = bind(device_client, admin_reader(device_client))
+    sync_config(device_client, device, offered={"publish": {"token": token, "schoolName": ""}})
+    admin(device_client, "POST", f"/uploaders/{other_id}/rotate-token")
+    assert sync_config(device_client, device)["config"]["publish"]["token"] == token
