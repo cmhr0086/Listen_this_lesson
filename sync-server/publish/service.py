@@ -109,6 +109,33 @@ def set_uploader_status(db: Session, uploader_id: int, status: str) -> Uploader:
     return uploader
 
 
+def set_reader_role(db: Session, reader: Reader, role: str, name: str | None) -> Reader:
+    """Sets everything a role implies at once. Uploaders and admins publish under this name."""
+    publishes = role in ("uploader", "admin")
+    final_name = name if name is not None else reader.remark
+    if publishes and not final_name:
+        raise ServiceError(422, "上传者和管理员要填写名称，它会公开显示在课堂上")
+    reader.remark = final_name or None
+    reader.isAdmin = role == "admin"
+    if role == "reader":
+        if reader.transcriptAccess in ("approved", "pending"):
+            reader.transcriptAccess = "revoked"
+    else:
+        reader.transcriptAccess = "approved"
+    reader.reviewedAt = now_ms()
+    uploader = db.get(Uploader, reader.uploaderId) if reader.uploaderId else None
+    if publishes and uploader is None:
+        uploader, _token = create_uploader(db, final_name)
+        reader.uploaderId = uploader.id
+    if uploader is not None:
+        uploader.status = "active" if publishes else "disabled"
+        if final_name:
+            uploader.displayName = final_name
+    audit(db, "admin", "reader.role", str(reader.id), f"{final_name or '未命名'} → {role}")
+    db.commit()
+    return reader
+
+
 def set_reader_upload(db: Session, reader: Reader, allowed: bool, display_name: str | None, uploader_id: int | None = None) -> Reader:
     """Publishing follows the account: its bound phones upload as this uploader, with no token to type."""
     uploader = db.get(Uploader, reader.uploaderId) if reader.uploaderId else None

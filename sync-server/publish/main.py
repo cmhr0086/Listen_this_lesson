@@ -38,6 +38,7 @@ from .schemas import (
     PairingRequest,
     ReaderAccessRequest,
     ReaderProfile,
+    ReaderRole,
     ReaderRemark,
     ReaderUpload,
     TimetableUpload,
@@ -328,6 +329,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
     @public.put("/me/profile")
     def reader_profile(body: ReaderProfile, reader: Reader = Depends(require_reader), db: Session = Depends(get_db)):
         return readers.reader_dict(readers.save_profile(db, reader, body.nickname, body.avatar))
+
+    @public.put("/me/name")
+    def reader_name(body: ReaderRemark, reader: Reader = Depends(require_reader), db: Session = Depends(get_db)):
+        return readers.reader_dict(readers.set_own_name(db, reader, body.remark))
 
     @public.post("/me/transcript-access")
     def reader_request_access(
@@ -729,6 +734,13 @@ def create_app(database_url: str | None = None) -> FastAPI:
             raise HTTPException(409, "不能取消自己的管理员身份")
         return readers.admin_reader_dict(readers.set_admin(db, reader, False))
 
+    @admin.post("/readers/{reader_id}/role")
+    def admin_reader_role(reader_id: int, body: ReaderRole, db: Session = Depends(get_db)):
+        reader = service.require(db.get(Reader, reader_id), "读者不存在")
+        if db.info.get("readerId") == reader.id and body.role != "admin":
+            raise HTTPException(409, "不能修改自己的角色")
+        return readers.admin_reader_dict(service.set_reader_role(db, reader, body.role, body.name))
+
     @admin.post("/readers/{reader_id}/upload-enable")
     def admin_reader_upload_enable(reader_id: int, body: ReaderUpload | None = None, db: Session = Depends(get_db)):
         reader = service.require(db.get(Reader, reader_id), "读者不存在")
@@ -744,7 +756,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
         rows = db.scalars(select(Device).order_by(Device.lastSeenAt.desc()))
         def owner(device: Device) -> str:
             reader = db.get(Reader, device.readerId)
-            return (reader.remark or reader.nickname or "未命名") if reader else "—"
+            return readers.name_of(reader) if reader else "—"
         return {"devices": [{**devices.device_dict(d), "owner": owner(d)} for d in rows]}
 
     @admin.delete("/devices/{device_id}")
@@ -783,7 +795,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
             kind, _, key = actor.partition(":")
             row = db.get(Reader, int(key)) if kind == "reader" and key.isdigit() else None
             if row is not None:
-                return row.remark or row.nickname or "未命名读者"
+                return readers.name_of(row)
             uploader = db.get(Uploader, int(key)) if kind == "uploader" and key.isdigit() else None
             if uploader is not None:
                 return uploader.displayName
@@ -807,6 +819,8 @@ def create_app(database_url: str | None = None) -> FastAPI:
         course_id: str,
         fileName: Annotated[str, Query(max_length=255)],
         title: Annotated[str | None, Query(max_length=200)] = None,
+        category: Annotated[str, Query(pattern="^(note|material)$")] = "material",
+        lessonId: Annotated[str | None, Query(max_length=100)] = None,
         db: Session = Depends(get_db),
     ):
         # The raw file is the body, as with the timetable PDF, so the mini program can send it
@@ -815,7 +829,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
         if declared and declared.isdigit() and int(declared) > materials.MAX_MATERIAL_BYTES:
             raise HTTPException(413, f"文件超过 {materials.MAX_MATERIAL_BYTES // 1024 // 1024} MB")
         body = await request.body()
-        return materials.material_dict(materials.upload(db, course_id, fileName, body, title))
+        return materials.material_dict(materials.upload(db, course_id, fileName, body, title, category, lessonId))
 
     @admin.patch("/materials/{material_id}")
     def admin_update_material(material_id: str, body: MaterialUpdate, db: Session = Depends(get_db)):
