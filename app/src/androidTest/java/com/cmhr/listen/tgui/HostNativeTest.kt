@@ -27,6 +27,7 @@ import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
+import org.telegram.ui.ActionBar.INavigationLayout
 import java.io.File
 
 /** Real microphone/service lifecycle on the debug emulator; no ASR or AI credentials. */
@@ -35,6 +36,7 @@ class HostNativeTest : NativeSettingsFixture() {
     private lateinit var courses: CourseRepository
     private var courseId = 0L
     private var recordId = 0L
+    private var courseName = ""
 
     @Before fun createHostFixture() {
         database = ListenDatabase.get(context)
@@ -43,7 +45,8 @@ class HostNativeTest : NativeSettingsFixture() {
             repository.clearApiKey()
             repository.clearAiApiKey()
             repository.setAutoNotes(false)
-            courseId = courses.createCourse("宿主测试课程${SystemClock.uptimeMillis()}")
+            courseName = "宿主测试课程${SystemClock.uptimeMillis()}"
+            courseId = courses.createCourse(courseName)
             recordId = courses.createRecord(courseId, "宿主录音测试课堂")
             repository.selectRecord(courseId, recordId)
         }
@@ -130,12 +133,30 @@ class HostNativeTest : NativeSettingsFixture() {
         scenario = ActivityScenario.launch(Intent(context, ListenHostActivity::class.java)
             .putExtra(ListeningForegroundService.EXTRA_RECORD_ID, recordId))
         assertRoute("record/$recordId")
+        assertTitle("宿主录音测试课堂")
+        // Force native view reconstruction after data already arrived: no new Room emission
+        // is required to bind the dynamic title, including after process/back-stack restoration.
+        scenario!!.onActivity { it.actionBarLayout.rebuildFragments(INavigationLayout.REBUILD_FLAG_REBUILD_LAST) }
+        assertTitle("宿主录音测试课堂")
         scenario!!.onActivity { it.open("courses") }
         assertRoute("courses")
         scenario!!.onActivity { it.open("course/$courseId") }
         assertRoute("course/$courseId")
+        assertTitle(courseName)
+        scenario!!.onActivity { it.actionBarLayout.rebuildFragments(INavigationLayout.REBUILD_FLAG_REBUILD_LAST) }
+        assertTitle(courseName)
         scenario!!.recreate()
         assertRoute("course/$courseId")
+        assertTitle(courseName)
+        scenario!!.onActivity { it.open("record/$recordId") }
+        assertRoute("record/$recordId")
+        assertTitle("宿主录音测试课堂")
+        scenario!!.recreate()
+        assertRoute("record/$recordId")
+        assertTitle("宿主录音测试课堂")
+        device.pressBack()
+        assertRoute("course/$courseId")
+        assertTitle(courseName)
         // Temporary viewers are intentionally not serialized; no source text enters the Bundle.
         scenario!!.onActivity { it.presentFragment(AiMarkdownFragment("临时正文", "只属于本地测试的临时内容")) }
         await {
@@ -145,11 +166,13 @@ class HostNativeTest : NativeSettingsFixture() {
         }
         scenario!!.recreate()
         assertRoute("course/$courseId")
+        assertTitle(courseName)
         device.pressBack()
         assertRoute("courses")
         text("新建课程")
         device.pressBack()
         assertRoute("record/$recordId")
+        assertTitle("宿主录音测试课堂")
         device.pressBack()
         assertRoute("home")
     }
@@ -205,6 +228,12 @@ class HostNativeTest : NativeSettingsFixture() {
         var route: String? = null
         scenario!!.onActivity { if (!it.actionBarLayout.isTransitionAnimationInProgress) route = (it.lastFragment as? ListenListFragment)?.route }
         route == expected
+    }
+
+    private fun assertTitle(expected: String) = await {
+        var actual: String? = null
+        scenario!!.onActivity { actual = it.lastFragment.actionBar.title }
+        actual == expected
     }
 
     private fun recordingNotification(): Notification? = context.getSystemService(NotificationManager::class.java)

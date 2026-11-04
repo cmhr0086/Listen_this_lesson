@@ -164,7 +164,8 @@ class CourseFragment(private val courseId: Long) : ListenListFragment("课堂") 
     private fun render() {
         val name = host.courses.uiState.value.courses.firstOrNull { it.id == courseId }?.name ?: "课堂"
         selected = selected.intersect(classes.map { it.session.id }.toSet())
-        if (actionBar != null) { actionBar.setTitle(name); if (selected.isEmpty()) actionBar.hideActionMode() else actionBar.showActionMode() }
+        setPageTitle(name)
+        if (actionBar != null) { if (selected.isEmpty()) actionBar.hideActionMode() else actionBar.showActionMode() }
         submit(buildList {
             val live = liveRecord(host.stt.uiState.value)
             val blocked = live != null || host.recordings.uiState.value.processing.isProcessing
@@ -221,7 +222,7 @@ class ClassroomFragment(private val recordId: Long) : ListenListFragment("课堂
     }
     private fun render() {
         val record = summary?.session
-        if (actionBar != null) actionBar.setTitle(record?.name ?: "课堂")
+        setPageTitle(record?.name ?: "课堂")
         submit(buildList {
             add(ListenRow.header(summary?.courseName ?: "课堂"))
             addAll(captureRows(this@ClassroomFragment, host, recordId))

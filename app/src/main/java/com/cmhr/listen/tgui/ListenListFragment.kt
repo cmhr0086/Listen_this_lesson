@@ -54,6 +54,7 @@ data class ListenRow(
 
 /** Collect once per fragment; view reconstruction never duplicates observers. */
 open class ListenListFragment(private val pageTitle: String) : BaseFragment() {
+    private var displayTitle = pageTitle
     protected val host: ListenHostActivity get() = (parentActivity ?: TelegramUI.getHost()) as ListenHostActivity
     protected val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     protected lateinit var list: RecyclerListView
@@ -64,6 +65,11 @@ open class ListenListFragment(private val pageTitle: String) : BaseFragment() {
     protected open fun onReady() {}
     protected open fun configureMenu() {}
     protected open fun menuClick(id: Int) {}
+    /** Data may arrive before this fragment's view is restored from the back stack. */
+    protected fun setPageTitle(title: String) {
+        displayTitle = title
+        actionBar?.setTitle(title)
+    }
 
     override fun onFragmentCreate(): Boolean {
         if (!super.onFragmentCreate()) return false
@@ -72,7 +78,7 @@ open class ListenListFragment(private val pageTitle: String) : BaseFragment() {
     }
 
     override fun createView(context: Context): View {
-        actionBar.setTitle(pageTitle)
+        actionBar.setTitle(displayTitle)
         if (route != "home") actionBar.setBackButtonImage(R.drawable.ic_ab_back)
         actionBar.setActionBarMenuOnItemClick(object : ActionBar.ActionBarMenuOnItemClick() {
             override fun onItemClick(id: Int) { if (id == -1) finishFragment() else menuClick(id) }

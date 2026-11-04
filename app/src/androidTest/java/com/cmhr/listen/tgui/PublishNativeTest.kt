@@ -89,7 +89,8 @@ class PublishNativeTest {
     }
 
     @Test fun searchFiltersNotesHighlightsMatchesAndOpensClassroom() {
-        launch("search")
+        launch("home")
+        scrolled(By.desc("搜索")).click()
         found(By.desc("搜索文字和笔记"))
         onView(allOf(withContentDescription("搜索文字和笔记"), isDisplayed(), isAssignableFrom(EditText::class.java))).perform(replaceText("静矩"), closeSoftKeyboard())
         found(By.descStartsWith("范围，")).click()
@@ -117,6 +118,16 @@ class PublishNativeTest {
         found(By.desc("范围，笔记"))
         onView(allOf(withContentDescription("搜索文字和笔记"), isDisplayed(), isAssignableFrom(EditText::class.java))).perform(replaceText("不存在的演示关键词"), closeSoftKeyboard())
         found(By.desc("没有找到结果"))
+        // A permanently expanded search field must not consume either real Back path.
+        device.pressBack()
+        assertRoute("home")
+        scrolled(By.desc("搜索")).click()
+        found(By.desc("搜索文字和笔记"))
+        onView(allOf(withContentDescription("搜索文字和笔记"), isDisplayed(), isAssignableFrom(EditText::class.java)))
+            .perform(closeSoftKeyboard())
+        found(By.desc(context.getString(org.telegram.tgui.R.string.AccDescrGoBack))).click()
+        assertRoute("home")
+        found(By.desc("搜索"))
     }
 
     @Test fun publicationHubShowsCachedStatusAndCourseEditsRemainLocal() = runBlocking {
@@ -274,6 +285,15 @@ class PublishNativeTest {
     }
 
     private fun startServer(): MockWebServer = MockWebServer().apply { start(); server = this }
+
+    private fun assertRoute(expected: String) {
+        eventually {
+            var actual = ""
+            scenario!!.onActivity { actual = (it.lastFragment as? ListenListFragment)?.route.orEmpty() }
+            actual == expected
+        }
+        device.waitForIdle()
+    }
 
     private fun request(mock: MockWebServer) = mock.takeRequest(10, TimeUnit.SECONDS)
         ?: throw AssertionError("Expected local MockWebServer request")

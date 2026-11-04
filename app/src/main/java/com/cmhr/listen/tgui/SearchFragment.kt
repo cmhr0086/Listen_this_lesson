@@ -45,7 +45,15 @@ class SearchFragment : ListenListFragment("搜索") {
                         search()
                     }
                 }
-                override fun canCollapseSearch(): Boolean = false
+                override fun canCollapseSearch(): Boolean {
+                    // Both system Back and the toolbar arrow first ask the ActionBar to
+                    // collapse search. This dedicated page must leave instead; keeping
+                    // the field expanded also preserves it when a classroom is pushed.
+                    if (!isFinished && !finishing && parentLayout?.lastFragment === this@SearchFragment) {
+                        finishFragment()
+                    }
+                    return false
+                }
             })
         searchItem?.setSearchFieldHint("搜索文字和笔记")
         searchItem?.searchField?.contentDescription = "搜索文字和笔记"
