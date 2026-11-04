@@ -26,8 +26,8 @@ android {
         applicationId = "com.cmhr.listen"
         minSdk = 26
         targetSdk = 36
-        versionCode = 17
-        versionName = "1.7.0"
+        versionCode = 18
+        versionName = "1.8.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
