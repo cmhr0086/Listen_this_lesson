@@ -1,6 +1,5 @@
 package com.cmhr.listen.ui
 
-import com.cmhr.listen.data.recording.RecordingExportTarget
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.FiberManualRecord
@@ -81,7 +80,7 @@ fun CourseRecordsScreen(
     startClass: (CaptureMode) -> Unit = {},
     publishSummary: Pair<String, Pair<String, StatusTone>?>? = null,
     openPublish: () -> Unit = {},
-    exportRecordings: (RecordingExportTarget) -> Unit = {},
+    exportTranscripts: (TranscriptExportTarget) -> Unit = {},
     now: Long = System.currentTimeMillis(),
     openRecord: (Long) -> Unit
 ) {
@@ -138,11 +137,11 @@ fun CourseRecordsScreen(
                     )
                     ListDivider(52.dp)
                     ListRow(
-                        title = "导出全部录音",
-                        subtitle = "把这门课每节课的录音存到手机文件夹",
+                        title = "导出全部原文",
+                        subtitle = "把这门课每节课的原文合成一个 TXT",
                         leading = { Icon(Icons.Outlined.Download, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
-                        onClick = { exportRecordings(RecordingExportTarget.Course(course.id)) },
-                        modifier = Modifier.testTag("course-export-recordings")
+                        onClick = { exportTranscripts(TranscriptExportTarget.Course(course.id)) },
+                        modifier = Modifier.testTag("course-export-transcripts")
                     )
                     publishSummary?.let { (subtitle, status) ->
                         ListDivider(52.dp)
@@ -189,7 +188,7 @@ fun CourseRecordsScreen(
                                     description = "${record.name} 的操作",
                                     actions = listOf(
                                         "重命名" to { renameDraft = record.name; renameTarget = record },
-                                        "导出录音" to { exportRecordings(RecordingExportTarget.Class(record.id)) },
+                                        "导出原文" to { exportTranscripts(TranscriptExportTarget.Class(record.id)) },
                                         "移到其他课程" to {
                                             if (capturing) switchMessage = "这条课堂记录正在录制，停止后才能移动。" else moveTarget = record
                                         },
@@ -266,7 +265,7 @@ internal fun CourseMenu(
     course: CourseEntity,
     listening: ListeningUiState,
     model: CourseViewModel,
-    exportRecordings: (RecordingExportTarget) -> Unit = {}
+    exportTranscripts: (TranscriptExportTarget) -> Unit = {}
 ) {
     var renaming by remember { mutableStateOf(false) }
     var editingPrompt by remember { mutableStateOf(false) }
@@ -282,7 +281,7 @@ internal fun CourseMenu(
             "重命名" to { renaming = true },
             "更换颜色" to { pickingColor = true },
             "专业词提示" to { editingPrompt = true },
-            "导出全部录音" to { exportRecordings(RecordingExportTarget.Course(course.id)) },
+            "导出全部原文" to { exportTranscripts(TranscriptExportTarget.Course(course.id)) },
             "删除课程" to {
                 if (listening.isListening) warning = "正在录制时不能删除课程，请先停止。" else deleting = true
             }

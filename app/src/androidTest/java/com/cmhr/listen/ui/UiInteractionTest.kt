@@ -774,9 +774,10 @@ class UiInteractionTest {
 
         composeRule.onNodeWithText("高等数学 · 第 8 节").assertExists()
         composeRule.onNodeWithContentDescription("更多操作").performClick()
-        listOf("导出 TXT", "选择片段", "专业词提示").forEach {
+        listOf("导出原文", "选择片段", "专业词提示").forEach {
             composeRule.onNodeWithText(it).assertExists()
         }
+        composeRule.onNodeWithText("导出录音").assertDoesNotExist()
         // Notes and AI results live in the class's tabs now, not in the menu.
         composeRule.onNodeWithText("整理成笔记").assertDoesNotExist()
     }

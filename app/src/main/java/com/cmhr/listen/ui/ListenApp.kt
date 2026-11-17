@@ -1,11 +1,6 @@
 package com.cmhr.listen.ui
 
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.LinearProgressIndicator
-import kotlinx.coroutines.Job
-import com.cmhr.listen.data.recording.RecordingExportTarget
-import com.cmhr.listen.data.recording.RecordingExportPlan
-import com.cmhr.listen.data.recording.RecordingExporter
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -347,45 +342,15 @@ fun ListenApp(
         exportContent = null
     }
 
-    // Recording export: work out what to copy first (so an empty course never opens the picker),
-    // then let the user pick a folder, then copy with a cancellable progress dialog.
-    val recordingExporter = remember(context) { RecordingExporter(context.applicationContext) }
-    var pendingExportPlan by remember { mutableStateOf<RecordingExportPlan?>(null) }
-    var exportProgress by remember { mutableStateOf<RecordingExportProgress?>(null) }
-    var exportJob by remember { mutableStateOf<Job?>(null) }
-    val exportFolderLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { treeUri ->
-        val plan = pendingExportPlan
-        pendingExportPlan = null
-        if (treeUri == null || plan == null) return@rememberLauncherForActivityResult
-        exportProgress = RecordingExportProgress(plan, 0, 0L)
-        exportJob = scope.launch {
-            val message = try {
-                recordingExporter.export(treeUri, plan) { done, copied ->
-                    exportProgress = RecordingExportProgress(plan, done, copied)
-                }
-                "已导出 ${plan.items.size} 段录音到「${plan.folderName}」"
-            } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                "已取消导出，已完成的 ${exportProgress?.done ?: 0} 段保留在「${plan.folderName}」"
-            } catch (exception: Exception) {
-                "导出失败：${exception.message ?: "无法写入所选位置"}"
-            } finally {
-                exportProgress = null
-                exportJob = null
-            }
-            snackbarHostState.showSnackbar(message, duration = SnackbarDuration.Long)
-        }
-    }
-    val exportRecordings: (RecordingExportTarget) -> Unit = { target ->
-        if (exportJob == null) scope.launch {
-            val plan = recordingExporter.plan(target)
-            if (plan.items.isEmpty()) {
-                snackbarHostState.showSnackbar("还没有可导出的录音", duration = SnackbarDuration.Short)
+    // 原文 export: build the TXT first, so a class without 原文 never opens the picker.
+    val exportTranscripts: (TranscriptExportTarget) -> Unit = { target ->
+        scope.launch {
+            val export = buildTranscriptExport(com.cmhr.listen.data.course.ListenDatabase.get(context.applicationContext), target)
+            if (export.content == null) {
+                snackbarHostState.showSnackbar("还没有可导出的原文", duration = SnackbarDuration.Short)
             } else {
-                pendingExportPlan = plan
-                // Start in 下载: some pickers open on 最近, where no folder can be chosen.
-                exportFolderLauncher.launch(
-                    android.provider.DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:Download")
-                )
+                exportContent = export.content
+                exportLauncher.launch(export.fileName)
             }
         }
     }
@@ -576,22 +541,6 @@ fun ListenApp(
     if (showAiContext && aiContextSnapshot != null) {
         AiContextBottomSheet(snapshot = aiContextSnapshot, dismiss = { showAiContext = false })
     }
-    exportProgress?.let { progress ->
-        AlertDialog(
-            onDismissRequest = {},
-            title = { Text("导出录音") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("${minOf(progress.done + 1, progress.plan.items.size)} / ${progress.plan.items.size} 段 · ${formatSize(progress.copiedBytes)} / ${formatSize(progress.plan.totalBytes)}")
-                    LinearProgressIndicator(
-                        progress = { (progress.copiedBytes.toFloat() / progress.plan.totalBytes.coerceAtLeast(1)).coerceIn(0f, 1f) },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-            },
-            confirmButton = { TextButton(onClick = { exportJob?.cancel() }) { Text("取消") } }
-        )
-    }
     if (showAiDiagnostics) aiState.lastDiagnostics?.let { diagnostics ->
         androidx.compose.material3.AlertDialog(
             onDismissRequest = { showAiDiagnostics = false },
@@ -661,16 +610,7 @@ fun ListenApp(
                     back = { nav.popBackStack() },
                     exportTxt = {
                         recordMenuExpanded = false
-                        val course = currentCourse
-                        if (course != null) {
-                            val record = requireNotNull(currentRecord)
-                            exportContent = buildTxt(course, record, currentSegments)
-                            exportLauncher.launch("${record.name}.txt")
-                        }
-                    },
-                    exportRecordings = {
-                        recordMenuExpanded = false
-                        exportRecordings(RecordingExportTarget.Class(recordId))
+                        exportTranscripts(TranscriptExportTarget.Class(recordId))
                     },
                     select = { recordMenuExpanded = false; ai.beginSelection(recordId) },
                     editAsrPrompt = {
@@ -885,7 +825,7 @@ fun ListenApp(
                         courses.enterCourse(id)
                         nav.navigate("course/$id")
                     },
-                    courseMenu = { summary -> CourseMenu(summary.course, sttState, courses, exportRecordings) }
+                    courseMenu = { summary -> CourseMenu(summary.course, sttState, courses, exportTranscripts) }
                 )
             }
             composable("ai") {
@@ -924,7 +864,7 @@ fun ListenApp(
                     id, courseState, sttState, courses, recordingState.pendingCounts, startClass = { mode -> quickStart(id, mode) },
                     publishSummary = coursePublishSummary(settingsState.publish.hasToken, publishInfo?.remoteStatus.orEmpty(), publishInfo?.teacherName.orEmpty()),
                     openPublish = { nav.navigate("course/$id/publish") },
-                    exportRecordings = exportRecordings
+                    exportTranscripts = exportTranscripts
                 ) { record ->
                     courses.selectRecord(id, record)
                     nav.navigate("record/$record")
@@ -1200,7 +1140,6 @@ internal fun RecordNormalTopBar(
     setMenuExpanded: (Boolean) -> Unit,
     back: () -> Unit,
     exportTxt: () -> Unit,
-    exportRecordings: () -> Unit,
     select: () -> Unit,
     editAsrPrompt: () -> Unit
 ) = TopAppBar(
@@ -1229,8 +1168,7 @@ internal fun RecordNormalTopBar(
             shape = RoundedCornerShape(20.dp)
         ) {
             DropdownMenuItem(text = { Text("选择片段") }, onClick = select)
-            DropdownMenuItem(text = { Text("导出 TXT") }, onClick = exportTxt)
-            DropdownMenuItem(text = { Text("导出录音") }, onClick = exportRecordings)
+            DropdownMenuItem(text = { Text("导出原文") }, onClick = exportTxt)
             HorizontalDivider()
             DropdownMenuItem(text = { Text("专业词提示") }, onClick = editAsrPrompt)
         }
@@ -1239,12 +1177,6 @@ internal fun RecordNormalTopBar(
 
 private fun Boolean.toInt() = if (this) 1 else 0
 
-private data class RecordingExportProgress(val plan: RecordingExportPlan, val done: Int, val copiedBytes: Long)
-
-private fun formatSize(bytes: Long): String = when {
-    bytes >= 1L shl 30 -> "%.1f GB".format(bytes / (1L shl 30).toDouble())
-    else -> "%.0f MB".format(bytes / (1L shl 20).toDouble())
-}
 
 private const val FAB_ANIMATION_DURATION_MS = 250
 
